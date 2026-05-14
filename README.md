@@ -165,8 +165,8 @@ cp .env.example .env
 $EDITOR .env                       # fill in the GitHub fields + commit identity
 openssl rand -hex 32 > /tmp/sec    # generate webhook secret; paste into .env *and* GitHub later
 
-make build                         # rsync $PI_ROOT → .pi-context/ then docker compose build
-make up                            # docker compose up -d
+just build                         # rsync $PI_ROOT → .pi-context/ then docker compose build
+just up                            # docker compose up -d
 curl -fsS http://localhost:8080/healthz   # { "status": "ok" }
 ```
 
@@ -301,7 +301,7 @@ pytest -x tests/                              # 80 tests, ~2s
 ROBOMP_INTEGRATION=1 pytest -x tests/test_worker_smoke.py
 
 # Live container.
-make build && make up
+just build && just up
 curl -fsS http://localhost:8080/healthz       # {"status":"ok"}
 
 # Live end-to-end against a real (or test) issue:
@@ -334,7 +334,7 @@ docker compose logs -f robomp                 # in another shell, watch each too
 robomp/
 ├── Dockerfile                  # multi-stage: natives-builder, python-builder, runtime
 ├── docker-compose.yml          # mounts, extra_hosts, env_file
-├── Makefile                    # `make build`, `make up`, `make stage`
+├── justfile                     # `just build`, `just up`, `just stage`, …
 ├── bin/
 │   └── stage-pi.sh             # rsync $PI_ROOT → .pi-context/ excluding target/runs/etc.
 ├── entrypoint.sh
@@ -380,7 +380,7 @@ robomp/
 | `refusing to push: `bun run fix:tools` produced unformatted-file changes` | Committed code isn't formatted. Same amend command as above. |
 | Agent loops on the same comment | A non-bot reply triggered `handle_comment`; check `/events?limit=20` to see what was queued and `/issues` for the per-issue state. |
 | PR opened without the four template sections, or without `Fixes #N` | Shouldn't happen — `gh_open_pr` validates both. If you see it, the agent reached an out-of-process write somehow; inspect `tool_calls`. |
-| `omp` fails with `Failed to load pi_natives` | The `pi_natives.linux-<arch>.node` is missing. Rebuild the image (`make build`); the `natives-builder` stage compiles it from `.pi-context/`. |
+| `omp` fails with `Failed to load pi_natives` | The `pi_natives.linux-<arch>.node` is missing. Rebuild the image (`just build`); the `natives-builder` stage compiles it from `.pi-context/`. |
 | Tasks all fail with `No API key found for <provider>` | `~/.omp/agent/models.yml` isn't mounted, or its provider id doesn't match what's in `ROBOMP_MODEL`. Check `docker compose exec robomp ls /root/.omp/agent/`. |
 
 ---

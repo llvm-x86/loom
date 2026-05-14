@@ -76,17 +76,37 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
     BUN_INSTALL=/opt/bun \
-    PATH=/opt/bun/bin:/usr/local/bin:/usr/bin:/bin \
-    PI_ROOT=/work/pi
+    PI_ROOT=/work/pi \
+    # Persistent build caches under the /data volume so cargo target,
+    # rustup toolchains, and bun's global package cache are shared across
+    # every per-issue worktree AND survive container restarts.
+    CARGO_HOME=/data/cache/cargo \
+    CARGO_TARGET_DIR=/data/cache/cargo-target \
+    RUSTUP_HOME=/data/cache/rustup \
+    BUN_INSTALL_CACHE_DIR=/data/cache/bun-cache \
+    PATH=/opt/bun/bin:/usr/local/cargo/bin:/usr/local/bin:/usr/bin:/bin
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         git curl ca-certificates unzip openssh-client tini \
+        build-essential pkg-config libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
 ARG BUN_VERSION=1.3.14
 RUN curl -fsSL https://bun.sh/install | bash -s "bun-v${BUN_VERSION}" \
     && /opt/bun/bin/bun --version
+
+# Rustup launcher. Install the cargo/rustc/rustup proxies into a fixed
+# image path; the real toolchain is *not* baked in — it's installed
+# lazily into RUSTUP_HOME (=/data/cache/rustup) on the first `cargo`
+# invocation inside a worktree, driven by pi's rust-toolchain.toml.
+# That keeps the image small while sharing the toolchain across reboots.
+RUN curl -fsSL https://sh.rustup.rs -o /tmp/rustup-init.sh \
+    && CARGO_HOME=/usr/local/cargo RUSTUP_HOME=/usr/local/rustup-bootstrap \
+       sh /tmp/rustup-init.sh -y --no-modify-path --default-toolchain none --profile minimal \
+    && rm -f /tmp/rustup-init.sh \
+    && rm -rf /usr/local/rustup-bootstrap \
+    && /usr/local/cargo/bin/rustup --version
 
 # pi-natives addon: pi's loader probes /opt/bun/bin as a fallback path.
 COPY --from=natives-builder /out/pi_natives.linux-*.node /opt/bun/bin/

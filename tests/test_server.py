@@ -530,3 +530,132 @@ def test_webhook_rate_limited_event_records_reason(rate_limited_settings: Settin
     assert skipped.last_error is not None
     assert "rate limit" in skipped.last_error
     assert "@charlie" in skipped.last_error
+
+
+# ---------- /api/github/issues ----------
+
+
+def _allowlist(monkeypatch: pytest.MonkeyPatch, repos: str) -> None:
+    monkeypatch.setenv("ROBOMP_REPO_ALLOWLIST", repos)
+    reset_settings_cache()
+
+
+def _make_issues_handler(by_repo: dict[str, list[dict]]) -> httpx.MockTransport:
+    def handler(request: httpx.Request) -> httpx.Response:
+        path = request.url.path
+        for repo, items in by_repo.items():
+            if path == f"/repos/{repo}/issues":
+                return httpx.Response(200, json=items)
+        return httpx.Response(404, json={"message": "not found"})
+    return httpx.MockTransport(handler)
+
+
+def test_browse_returns_404_without_token(settings: Settings) -> None:
+    app = create_app(settings)
+    with TestClient(app) as client:
+        resp = client.get("/api/github/issues")
+    close_database()
+    assert resp.status_code == 404
+
+
+def test_browse_fans_out_across_allowlist_and_filters_prs(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = _enable_replay(monkeypatch)
+    _allowlist(monkeypatch, "octo/widget,octo/gadget")
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+    transport = _make_issues_handler({
+        "octo/widget": [
+            {"number": 7, "title": "newest", "state": "open",
+             "user": {"login": "alice"}, "labels": [{"name": "bug"}],
+             "comments": 3, "updated_at": "2026-05-14T10:00:00Z",
+             "created_at": "2026-05-01T10:00:00Z",
+             "html_url": "https://github.com/octo/widget/issues/7"},
+            {"number": 8, "title": "a PR not an issue", "state": "open",
+             "user": {"login": "bob"}, "labels": [], "comments": 0,
+             "updated_at": "2026-05-14T11:00:00Z",
+             "created_at": "2026-05-14T11:00:00Z",
+             "html_url": "https://github.com/octo/widget/pull/8",
+             "pull_request": {"url": "..."}},  # GitHub /issues returns these too
+        ],
+        "octo/gadget": [
+            {"number": 2, "title": "older", "state": "open",
+             "user": {"login": "carol"}, "labels": [], "comments": 1,
+             "updated_at": "2026-05-12T09:00:00Z",
+             "created_at": "2026-05-12T09:00:00Z",
+             "html_url": "https://github.com/octo/gadget/issues/2"},
+        ],
+    })
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        _install_github_mock(app, transport)
+        resp = client.get(
+            "/api/github/issues?state=open&limit=20",
+            headers={"X-Robomp-Replay-Token": token},
+        )
+    close_database()
+
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["repos"] == ["octo/gadget", "octo/widget"]
+    assert body["errors"] == []
+    # PR row dropped; issues sorted newest-updated first.
+    titles = [(i["repo"], i["number"]) for i in body["issues"]]
+    assert titles == [("octo/widget", 7), ("octo/gadget", 2)]
+    first = body["issues"][0]
+    assert first["author"] == "alice"
+    assert first["labels"] == ["bug"]
+    assert first["comments"] == 3
+    assert first["html_url"].endswith("/issues/7")
+
+
+def test_browse_per_repo_failure_does_not_take_down_panel(
+    env, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    token = _enable_replay(monkeypatch)
+    _allowlist(monkeypatch, "octo/widget,octo/dead")
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/repos/octo/widget/issues":
+            return httpx.Response(200, json=[
+                {"number": 1, "title": "ok", "state": "open",
+                 "user": {"login": "u"}, "labels": [], "comments": 0,
+                 "updated_at": "2026-05-14T00:00:00Z",
+                 "created_at": "2026-05-14T00:00:00Z",
+                 "html_url": "https://github.com/octo/widget/issues/1"},
+            ])
+        return httpx.Response(500, json={"message": "boom"})
+
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        _install_github_mock(app, httpx.MockTransport(handler))
+        resp = client.get(
+            "/api/github/issues",
+            headers={"X-Robomp-Replay-Token": token},
+        )
+    close_database()
+
+    assert resp.status_code == 200
+    body = resp.json()
+    assert len(body["issues"]) == 1
+    assert body["issues"][0]["repo"] == "octo/widget"
+    assert len(body["errors"]) == 1
+    assert body["errors"][0]["repo"] == "octo/dead"
+
+
+def test_browse_rejects_bad_state(env, monkeypatch: pytest.MonkeyPatch) -> None:
+    token = _enable_replay(monkeypatch)
+    cfg = Settings()  # type: ignore[call-arg]
+    cfg.ensure_paths()
+    app = create_app(cfg)
+    with TestClient(app) as client:
+        _install_github_mock(app, httpx.MockTransport(lambda r: httpx.Response(500)))
+        resp = client.get(
+            "/api/github/issues?state=garbage",
+            headers={"X-Robomp-Replay-Token": token},
+        )
+    close_database()
+    assert resp.status_code == 400
