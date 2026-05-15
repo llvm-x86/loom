@@ -566,6 +566,32 @@ class Database:
             classification=row["classification"],
         )
 
+    def find_issue_by_branch(self, repo: str, branch: str) -> IssueRow | None:
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT key, repo, number, branch, session_dir, pr_number, state, classification, updated_at
+                FROM issues
+                WHERE repo=? AND branch=?
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                (repo, branch),
+            ).fetchone()
+        if row is None:
+            return None
+        return IssueRow(
+            key=row["key"],
+            repo=row["repo"],
+            number=int(row["number"]),
+            branch=row["branch"],
+            session_dir=row["session_dir"],
+            pr_number=int(row["pr_number"]) if row["pr_number"] is not None else None,
+            state=row["state"],
+            updated_at=row["updated_at"],
+            classification=row["classification"],
+        )
+
     def list_issues(self, limit: int = 100) -> list[IssueRow]:
         with self._lock:
             rows = self._conn.execute(

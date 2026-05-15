@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from robomp.git_ops import GitCommandError
 from robomp.sandbox import (
     SandboxManager,
     Workspace,
@@ -17,6 +18,7 @@ from robomp.sandbox import (
     _share_git_metadata_with_slots,
     _slot_pids,
     make_branch,
+    rename_workspace_branch,
     workspace_key,
 )
 
@@ -75,6 +77,130 @@ def test_workspace_key_and_branch_shape() -> None:
     parts = branch.split("/")
     assert len(parts) == 3 and len(parts[1]) == 8
     assert "json-parse-crashes" in parts[2]
+
+
+def _init_worktree_repo(repo_dir: Path, branch: str) -> None:
+    """Stand up a minimal local git repo with `branch` checked out."""
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _git(["init", f"--initial-branch={branch}", str(repo_dir)], cwd=repo_dir.parent)
+    (repo_dir / "README.md").write_text("hello\n", encoding="utf-8")
+    _git(["-C", str(repo_dir), "add", "."], cwd=repo_dir.parent)
+    subprocess.run(
+        ["git", "commit", "-m", "init"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=os.environ
+        | {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+
+
+def test_rename_workspace_branch_renames_local_branch(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    repo_dir = root / "repo"
+    initial = "farm/abc12345/some-issue"
+    _init_worktree_repo(repo_dir, initial)
+    ws = Workspace(
+        root=root,
+        repo_dir=repo_dir,
+        session_dir=root / ".omp-session",
+        context_dir=root / "context",
+        artifacts_dir=root / "artifacts",
+        branch=initial,
+        repo_full_name="octo/widget",
+        issue_number=1,
+    )
+    new_branch = rename_workspace_branch(ws, "fix-json-bom")
+    assert new_branch == "farm/abc12345/fix-json-bom"
+    assert ws.branch == "farm/abc12345/fix-json-bom"
+    head = subprocess.run(
+        ["git", "symbolic-ref", "HEAD"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == "refs/heads/farm/abc12345/fix-json-bom"
+
+
+def test_rename_workspace_branch_is_idempotent_when_slug_unchanged(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    repo_dir = root / "repo"
+    initial = "farm/abc12345/keep-me"
+    _init_worktree_repo(repo_dir, initial)
+    ws = Workspace(
+        root=root,
+        repo_dir=repo_dir,
+        session_dir=root / ".omp-session",
+        context_dir=root / "context",
+        artifacts_dir=root / "artifacts",
+        branch=initial,
+        repo_full_name="octo/widget",
+        issue_number=1,
+    )
+    # No git operation should run; nothing to rename. We assert that by
+    # passing a non-existent repo_dir — the helper must not touch git.
+    ws.repo_dir = tmp_path / "does-not-exist"
+    out = rename_workspace_branch(ws, "keep-me")
+    assert out == initial
+    assert ws.branch == initial
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "Has-Caps",
+        "-leading",
+        "trailing-",
+        "double--hyphen",
+        "has/slash",
+        "has_underscore",
+        "a" * 51,
+        None,
+        123,
+    ],
+)
+def test_rename_workspace_branch_rejects_bad_slug(tmp_path: Path, bad: object) -> None:
+    ws = _workspace(tmp_path / "ws")
+    with pytest.raises(ValueError):
+        rename_workspace_branch(ws, bad)  # type: ignore[arg-type]
+
+
+def test_rename_workspace_branch_rejects_non_farm_branch(tmp_path: Path) -> None:
+    ws = _workspace(tmp_path / "ws")
+    ws.branch = "main"
+    with pytest.raises(ValueError):
+        rename_workspace_branch(ws, "ok-slug")
+
+
+def test_rename_workspace_branch_surfaces_git_failure(tmp_path: Path) -> None:
+    root = tmp_path / "ws"
+    repo_dir = root / "repo"
+    initial = "farm/abc12345/old"
+    _init_worktree_repo(repo_dir, initial)
+    # Create a second branch that collides with the rename target.
+    _git(["-C", str(repo_dir), "branch", "farm/abc12345/new"], cwd=repo_dir.parent)
+    ws = Workspace(
+        root=root,
+        repo_dir=repo_dir,
+        session_dir=root / ".omp-session",
+        context_dir=root / "context",
+        artifacts_dir=root / "artifacts",
+        branch=initial,
+        repo_full_name="octo/widget",
+        issue_number=1,
+    )
+    with pytest.raises(GitCommandError):
+        rename_workspace_branch(ws, "new")
+    # Original branch must remain on failure.
+    assert ws.branch == initial
 
 
 def test_ensure_workspace_creates_worktree(tmp_path: Path, upstream_repo: Path) -> None:

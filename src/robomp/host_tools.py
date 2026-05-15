@@ -23,7 +23,7 @@ from robomp.db import Database, issue_key
 from robomp.git_ops import GitCommandError, HeadDriftError, rev_parse_head
 from robomp.github_backend import GitHubBackend
 from robomp.github_client import GitHubError, IssueInfo, RepoInfo
-from robomp.sandbox import GitTransport, Workspace, workspace_key
+from robomp.sandbox import GitTransport, Workspace, rename_workspace_branch, validate_branch_slug, workspace_key
 
 log = logging.getLogger(__name__)
 _PRE_PR_FIX_COMMAND = ("bun", "run", "fix")
@@ -815,6 +815,14 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
         rationale = args.get("rationale")
         if not isinstance(rationale, str) or not rationale.strip():
             _raise_command("classify_issue requires a one-sentence 'rationale'.")
+        branch_slug = args.get("branch_slug")
+        if branch_slug is not None and branch_slug != "":
+            try:
+                branch_slug = validate_branch_slug(branch_slug)
+            except ValueError as exc:
+                _raise_command(f"classify_issue rejected branch_slug: {exc}")
+        else:
+            branch_slug = None
 
         labels: list[str] = [primary]
         if primary == "bug" and isinstance(priority, str):
@@ -849,16 +857,38 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
             _raise_command(f"GitHub rejected labels: {exc.status} {exc.message}")
 
         bindings.db.set_issue_classification(bindings.issue_key, primary)
+        renamed_to: str | None = None
+        if branch_slug:
+            try:
+                renamed_to = rename_workspace_branch(bindings.workspace, branch_slug)
+            except ValueError as exc:
+                _audit(bindings, "classify_issue", args, error=str(exc))
+                _raise_command(f"classify_issue rejected branch_slug: {exc}")
+            except GitCommandError as exc:
+                _audit(bindings, "classify_issue", args, error=str(exc))
+                _raise_command(f"classify_issue could not rename branch: {exc}")
+            if renamed_to != bindings.workspace.branch:
+                # rename_workspace_branch already mutated workspace.branch on
+                # success; this branch is purely defensive — kept so a future
+                # refactor of that helper still surfaces the mismatch.
+                _raise_command("classify_issue internal: branch rename inconsistent.")
+            bindings.db.set_issue_branch(bindings.issue_key, renamed_to)
         _audit(
             bindings,
             "classify_issue",
             args,
-            result={"primary": primary, "labels": list(applied), "rationale": rationale},
+            result={
+                "primary": primary,
+                "labels": list(applied),
+                "rationale": rationale,
+                "branch": renamed_to,
+            },
         )
         # Echo back the workflow the agent should now follow. The persona prompt
         # already describes each branch; the tool result reminds it.
         next_step = persona.classify_next_step(str(primary))
-        return f"classified as {primary}; labels applied: {', '.join(applied)}. Next: {next_step}."
+        suffix = f" Branch renamed to `{renamed_to}`." if renamed_to else ""
+        return f"classified as {primary}; labels applied: {', '.join(applied)}.{suffix} Next: {next_step}."
 
     return host_tool(
         name="classify_issue",
@@ -893,6 +923,10 @@ def _build_classify_issue(bindings: ToolBindings) -> HostTool[Any, Any]:
                 "rationale": {
                     "type": "string",
                     "description": persona.host_tool_parameter_description("classify_issue", "rationale"),
+                },
+                "branch_slug": {
+                    "type": "string",
+                    "description": persona.host_tool_parameter_description("classify_issue", "branch_slug"),
                 },
             },
             "required": ["primary", "rationale"],

@@ -49,6 +49,7 @@ functional = "Zero or more functional labels."
 provider = "Only if explicitly provider-scoped; format provider:<name>."
 platform = "Only if platform materially affects reproduction."
 rationale = "One sentence explaining the classification."
+branch_slug = "Optional concise kebab-case slug describing the issue (1-50 chars, [a-z0-9-], no leading/trailing/double hyphen). Replaces the auto-generated slug in the working branch name. Provide this for `bug`/`documentation` classifications so the eventual PR carries a readable branch (e.g. `fix-windows-env-colon-vars`). Omit for non-PR workflows (`question`, `enhancement`, `proposal`, `invalid`, `duplicate`)."
 
 [classify_issue.next_steps]
 bug = "reproduce → diagnose → fix → PR"

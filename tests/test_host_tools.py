@@ -406,6 +406,125 @@ def test_classify_issue_rejects_unknown_primary(db: Database, tmp_path: Path) ->
         _stop_loop(loop, t)
 
 
+def _init_git_repo(repo_dir: Path, branch: str) -> None:
+    """Initialize a minimal git repo at `repo_dir` with `branch` checked out."""
+    import os as _os
+    import subprocess as _sp
+
+    repo_dir.mkdir(parents=True, exist_ok=True)
+    _sp.run(
+        ["git", "init", f"--initial-branch={branch}", str(repo_dir)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    (repo_dir / "README.md").write_text("hi\n", encoding="utf-8")
+    _sp.run(["git", "-C", str(repo_dir), "add", "."], check=True, capture_output=True, text=True)
+    _sp.run(
+        ["git", "commit", "-m", "init"],
+        cwd=str(repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+        env=_os.environ
+        | {
+            "GIT_AUTHOR_NAME": "t",
+            "GIT_AUTHOR_EMAIL": "t@t",
+            "GIT_COMMITTER_NAME": "t",
+            "GIT_COMMITTER_EMAIL": "t@t",
+        },
+    )
+
+
+def test_classify_issue_renames_branch_when_slug_provided(db: Database, tmp_path: Path) -> None:
+    bindings, loop, t = _bindings(
+        db,
+        tmp_path,
+        httpx.MockTransport(
+            lambda r: httpx.Response(200, json=[{"name": "bug"}, {"name": "prio:p1"}, {"name": "triaged"}])
+        ),
+    )
+    # The stub workspace's initial branch matches `_stub_workspace`.
+    _init_git_repo(bindings.workspace.repo_dir, bindings.workspace.branch)
+    try:
+        tool = next(x for x in build(bindings) if x.name == "classify_issue")
+        result = tool.execute(
+            {
+                "primary": "bug",
+                "priority": "prio:p1",
+                "rationale": "powershell env colon-var parsing on win is broken",
+                "branch_slug": "fix-windows-env-colon-vars",
+            },
+            _ctx(),
+        )
+    finally:
+        _stop_loop(loop, t)
+
+    assert "branch renamed to" in result.lower()
+    assert bindings.workspace.branch == "farm/abc12345/fix-windows-env-colon-vars"
+    row = db.get_issue(bindings.issue_key)
+    assert row is not None and row.branch == "farm/abc12345/fix-windows-env-colon-vars"
+    import subprocess as _sp
+
+    head = _sp.run(
+        ["git", "symbolic-ref", "HEAD"],
+        cwd=str(bindings.workspace.repo_dir),
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.strip()
+    assert head == "refs/heads/farm/abc12345/fix-windows-env-colon-vars"
+
+
+def test_classify_issue_rejects_invalid_branch_slug(db: Database, tmp_path: Path) -> None:
+    """Bad slug is rejected BEFORE GitHub is contacted (no labels applied)."""
+    requests: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(str(request.url))
+        return httpx.Response(500)
+
+    bindings, loop, t = _bindings(db, tmp_path, httpx.MockTransport(handler))
+    try:
+        tool = next(x for x in build(bindings) if x.name == "classify_issue")
+        with pytest.raises(RpcCommandError):
+            tool.execute(
+                {
+                    "primary": "bug",
+                    "priority": "prio:p1",
+                    "rationale": "x",
+                    "branch_slug": "Has-Caps",
+                },
+                _ctx(),
+            )
+    finally:
+        _stop_loop(loop, t)
+
+    assert requests == []  # no GitHub call attempted
+    # Branch unchanged; issue row unchanged.
+    assert bindings.workspace.branch == "farm/abc12345/some-issue"
+
+
+def test_classify_issue_omitting_branch_slug_is_a_noop(db: Database, tmp_path: Path) -> None:
+    """Existing callers that don't pass branch_slug must keep the original branch."""
+    bindings, loop, t = _bindings(
+        db,
+        tmp_path,
+        httpx.MockTransport(lambda r: httpx.Response(200, json=[{"name": "question"}, {"name": "triaged"}])),
+    )
+    try:
+        tool = next(x for x in build(bindings) if x.name == "classify_issue")
+        result = tool.execute(
+            {"primary": "question", "rationale": "how-to"},
+            _ctx(),
+        )
+    finally:
+        _stop_loop(loop, t)
+
+    assert "branch renamed" not in result.lower()
+    assert bindings.workspace.branch == "farm/abc12345/some-issue"
+
+
 def test_set_issue_labels_appends(db: Database, tmp_path: Path) -> None:
     captured: dict[str, Any] = {}
 

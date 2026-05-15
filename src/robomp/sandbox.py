@@ -47,7 +47,7 @@ from robomp.git_ops import (
 log = logging.getLogger(__name__)
 
 
-@dataclass(slots=True, frozen=True)
+@dataclass(slots=True)
 class Workspace:
     """Resolved per-issue scratch space."""
 
@@ -88,6 +88,58 @@ def workspace_key(repo: str, number: int) -> str:
 
 def make_branch(*, issue_number: int, title: str, seed: str | None = None) -> str:
     return f"farm/{_short_hex(seed or f'{issue_number}-{title}')}/{_slug(title or f'issue-{issue_number}')}"
+
+
+_BRANCH_SLUG_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+
+
+def validate_branch_slug(slug: object) -> str:
+    """Return ``slug`` if it is a valid kebab-case branch slug, else raise.
+
+    Rules: 1-50 chars, only ``[a-z0-9-]``, no leading/trailing hyphen, no
+    double hyphen. Raises ``ValueError`` otherwise.
+    """
+    if not isinstance(slug, str) or not _BRANCH_SLUG_RE.fullmatch(slug) or len(slug) > 50:
+        raise ValueError(
+            f"invalid branch slug {slug!r}: expected kebab-case [a-z0-9-], 1-50 chars, no leading/trailing/double hyphen"
+        )
+    return slug
+
+
+def rename_workspace_branch(workspace: Workspace, new_slug: str) -> str:
+    """Rename the workspace's local branch to ``farm/<hex>/<new_slug>``.
+
+    The 8-hex disambiguator stays untouched; only the trailing slug after
+    the second `/` changes. Runs ``git branch -m`` inside the worktree
+    (which updates the shared refs in the pool) and mutates
+    ``workspace.branch`` in place.
+
+    Idempotent when the computed branch already matches ``workspace.branch``.
+    Raises ``ValueError`` for syntactically invalid slugs or for a
+    workspace whose branch isn't on the ``farm/<hex>/<slug>`` shape.
+    Raises ``GitCommandError`` if the underlying ``git`` invocation fails
+    (e.g. the target branch name is already taken).
+    """
+    validate_branch_slug(new_slug)
+    parts = workspace.branch.split("/", 2)
+    if len(parts) != 3 or parts[0] != "farm" or not parts[1]:
+        raise ValueError(f"refusing to rename non-farm branch {workspace.branch!r}")
+    new_branch = f"farm/{parts[1]}/{new_slug}"
+    if new_branch == workspace.branch:
+        return new_branch
+    proc = _safe_run(
+        ["git", "branch", "-m", workspace.branch, new_branch],
+        cwd=workspace.repo_dir,
+    )
+    if proc.returncode != 0:
+        raise GitCommandError(
+            ["git", "branch", "-m", workspace.branch, new_branch],
+            proc.returncode,
+            proc.stdout,
+            proc.stderr,
+        )
+    workspace.branch = new_branch
+    return new_branch
 
 
 # ---------- GitTransport (transport abstraction over clone/fetch/push) ----------
@@ -526,6 +578,8 @@ __all__ = [
     "SandboxManager",
     "Workspace",
     "make_branch",
+    "rename_workspace_branch",
+    "validate_branch_slug",
     "redact_credentials",
     "workspace_key",
 ]
