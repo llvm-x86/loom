@@ -590,3 +590,15 @@ _made for terminals that stay open_
 - [npm](https://www.npmjs.com/package/@oh-my-pi/pi-coding-agent)
 - [Discord](https://discord.gg/4NMW9cdXZa)
 - [MIT](https://github.com/can1357/oh-my-pi/blob/main/LICENSE)
+
+---
+
+## Fork notes (llvm-x86)
+
+Internal fork of `can1357/oh-my-pi`, carrying:
+
+- `task-model-override` (branched from tag `v17.0.5`): per-invocation `model` override on the `task` tool. Upstream discussion: https://github.com/can1357/oh-my-pi/discussions/6044 (vouch requested; PR only after vouch).
+
+Maintenance: rebase fork branches onto upstream release tags only (never moving `main` mid-review). If upstream requests PR changes, apply them on the PR branch and cherry-pick back here. Retirement: once the PR merges and ships in a tagged release, drop the fork patches and return to stock `omp.sh` installs.
+
+Local dev build: `bun setup && bun dev`; the `omp-dev` bin symlink points at this checkout's dev launcher.
