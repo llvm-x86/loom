@@ -32,6 +32,8 @@ Each task assignment must be self-contained:
     # Acceptance
     Observable result, return packet, and local verification. Subagents skip formatters,
     linters, and project-wide tests; the parent runs shared proof once.
+
+Per-item `model` pins a subagent to a specific model for this spawn only (e.g. mixed providers across a review fan-out); omit it to inherit defaults.
 {{else}}
 Call `task` once per independent subagent. Put the full shared background and the leaf work in that call's `assignment`. Do not pass `context` or `tasks[]`: the flat task schema rejects them when batch calls are disabled.
 
