@@ -271,9 +271,13 @@ async function syncSingleRepo(
 }
 
 /**
- * One focused single-repo turn per touched repo. Sequential and reuses the
- * proven single-repo prompt/sanitize path — far more robust than asking one
- * turn to emit a JSON map of multi-line markdown values (models mangle that).
+ * One focused single-repo turn per touched repo, run in PARALLEL. Each
+ * `runEphemeralTurn` is an independent side-channel call (unique side session
+ * id, no shared mutable turn state), so concurrency is safe and keeps total
+ * wall-time ~one turn — important because the shutdown sync runs under a bounded
+ * dispose timeout. Reuses the proven fence-tolerant single-repo path; far more
+ * robust than one turn emitting a JSON map of multi-line markdown values. A
+ * failure on one repo never blocks the others.
  */
 async function syncMultiRepo(
 	session: SessionContextSyncSession,
@@ -281,10 +285,20 @@ async function syncMultiRepo(
 	slugToDir: Map<string, string>,
 ): Promise<void> {
 	const slugs = [...slugToDir.keys()];
-	for (const slug of slugs) {
-		const otherRepos = slugs.filter(s => s !== slug);
-		await syncSingleRepo(session, ledgerDir, slug, otherRepos);
-	}
+	await Promise.all(
+		slugs.map(async slug => {
+			try {
+				await syncSingleRepo(
+					session,
+					ledgerDir,
+					slug,
+					slugs.filter(s => s !== slug),
+				);
+			} catch (error) {
+				logger.warn("[sessionContextSync] per-repo sync failed", { slug, error: String(error) });
+			}
+		}),
+	);
 }
 
 async function runSync(
