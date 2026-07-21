@@ -6912,7 +6912,12 @@ export class AgentSession {
 		try {
 			await withTimeout(
 				maybeSyncSessionContext(this.#sessionContextSyncHandle(), "shutdown"),
-				15_000,
+				// Ceiling only (returns as soon as the sync finishes). Multi-repo
+				// shutdown syncs run one ephemeral turn per touched repo and
+				// providers often serialize them, so allow enough headroom for a
+				// few sequential turns; single-repo (the common case) returns in
+				// one turn's time. Idle/compaction syncs are uncapped.
+				60_000,
 				"Timed out syncing session context during dispose",
 			);
 		} catch (error) {
