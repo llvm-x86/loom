@@ -202,7 +202,7 @@ describe("sessionContextSync", () => {
 		expect(existsSync(join(dir, "my-project.md"))).toBe(true);
 	});
 
-	it("multi-repo: two touched repos write two ledgers from a JSON-map reply", async () => {
+	it("multi-repo: two touched repos write two ledgers via one focused turn each", async () => {
 		const settings = makeSettings({ dir, workspaceRoot: "" });
 		const repoADir = join(dir, "repoA");
 		const repoBDir = join(dir, "repoB");
@@ -214,10 +214,12 @@ describe("sessionContextSync", () => {
 			if (cwd === repoBDir) return "owner/repoB";
 			throw new Error(`not a checkout: ${cwd}`);
 		};
-		const replyText = JSON.stringify({
+		// One focused turn per repo; the prompt names the repo slug, so the mock
+		// returns that repo's ledger by matching the slug in the prompt text.
+		const ledgerFor: Record<string, string> = {
 			"owner-repoA": "# owner/repoA — status ledger\n\n## Current state\nWorked on A.",
 			"owner-repoB": "# owner/repoB — status ledger\n\n## Current state\nWorked on B.",
-		});
+		};
 
 		const session: SessionContextSyncSession = {
 			cwd: dir,
@@ -233,7 +235,10 @@ describe("sessionContextSync", () => {
 					content: [{ type: "toolCall", name: "write", arguments: { path: join(repoBDir, "file2.ts") } }],
 				},
 			],
-			runEphemeralTurn: async () => ({ replyText }),
+			runEphemeralTurn: async ({ promptText }) => {
+				const slug = promptText.includes('repo "owner-repoA"') ? "owner-repoA" : "owner-repoB";
+				return { replyText: ledgerFor[slug] };
+			},
 		};
 
 		await maybeSync(session, "compaction", { resolveRepo });
@@ -321,7 +326,7 @@ describe("sessionContextSync", () => {
 		expect(existsSync(join(dir, "owner-repoA.md"))).toBe(true);
 	});
 
-	it("multi-repo: unparseable JSON-map reply leaves existing ledgers untouched and warns", async () => {
+	it("multi-repo: each repo's turn is independent — unparseable output leaves that ledger untouched and warns", async () => {
 		const settings = makeSettings({ dir, workspaceRoot: "" });
 		const repoADir = join(dir, "repoA");
 		const repoBDir = join(dir, "repoB");
@@ -364,7 +369,7 @@ describe("sessionContextSync", () => {
 		}
 	});
 
-	it("multi-repo: a JSON map wrapped in a fence with surrounding prose still parses", async () => {
+	it("multi-repo: a fenced markdown reply is unfenced; a headingless repo is skipped independently", async () => {
 		const settings = makeSettings({ dir, workspaceRoot: "" });
 		const repoADir = join(dir, "repoA");
 		const repoBDir = join(dir, "repoB");
@@ -376,15 +381,16 @@ describe("sessionContextSync", () => {
 			if (cwd === repoBDir) return "owner/repoB";
 			throw new Error(`not a checkout: ${cwd}`);
 		};
-		const json = JSON.stringify({
-			"owner-repoA": "# owner/repoA — status ledger\n\n## Current state\nFenced A.",
-			"owner-repoB": "# owner/repoB — status ledger\n\n## Current state\nFenced B.",
-		});
-		const replyText = `Sure, here's the update:\n\n\`\`\`json\n${json}\n\`\`\`\n\nLet me know if that helps!`;
+		// repoA: valid ledger wrapped in a code fence (must be unfenced + written).
+		// repoB: headingless prose (must be skipped, warns) — independent of repoA.
+		const replyFor: Record<string, string> = {
+			"owner-repoA": "```markdown\n# owner/repoA — status ledger\n\n## Current state\nFenced A.\n```",
+			"owner-repoB": "no heading here, just prose",
+		};
 
 		const session: SessionContextSyncSession = {
 			cwd: dir,
-			sessionId: "multi-fenced-prose",
+			sessionId: "multi-independent",
 			settings: { getGroup: () => settings },
 			messages: [
 				{
@@ -396,13 +402,23 @@ describe("sessionContextSync", () => {
 					content: [{ type: "toolCall", name: "edit", arguments: { path: join(repoBDir, "b.ts") } }],
 				},
 			],
-			runEphemeralTurn: async () => ({ replyText }),
+			runEphemeralTurn: async ({ promptText }) => {
+				const slug = promptText.includes('repo "owner-repoA"') ? "owner-repoA" : "owner-repoB";
+				return { replyText: replyFor[slug] };
+			},
 		};
 
-		await maybeSync(session, "compaction", { resolveRepo });
-
-		expect(readFileSync(join(dir, "owner-repoA.md"), "utf8")).toContain("Fenced A.");
-		expect(readFileSync(join(dir, "owner-repoB.md"), "utf8")).toContain("Fenced B.");
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			await maybeSync(session, "compaction", { resolveRepo });
+			const a = readFileSync(join(dir, "owner-repoA.md"), "utf8");
+			expect(a).toContain("Fenced A.");
+			expect(a).not.toContain("```");
+			expect(existsSync(join(dir, "owner-repoB.md"))).toBe(false);
+			expect(warnSpy).toHaveBeenCalled();
+		} finally {
+			warnSpy.mockRestore();
+		}
 	});
 
 	it("multi-repo: '..' and absolute paths outside workspaceRoot are rejected, never reaching resolveRepo", async () => {

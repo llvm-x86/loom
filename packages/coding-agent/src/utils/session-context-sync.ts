@@ -211,44 +211,24 @@ async function existingLedgerBlock(ledgerPath: string): Promise<string> {
 		: `No ledger file exists yet at ${ledgerPath} — this session is creating it for the first time.`;
 }
 
-async function buildSingleRepoPrompt(ledgerPath: string, slug: string): Promise<string> {
+async function buildSingleRepoPrompt(ledgerPath: string, slug: string, otherRepos: string[]): Promise<string> {
 	const existingBlock = await existingLedgerBlock(ledgerPath);
+	const focus =
+		otherRepos.length > 0
+			? `This session also worked on other repos (${otherRepos.join(", ")}). Focus ONLY on work relevant to "${slug}"; ignore changes that belong to the other repos.`
+			: "";
 	return [
 		`You are maintaining a persistent status ledger for the repo "${slug}" across coding-agent sessions.`,
 		existingBlock,
+		focus,
 		"",
 		LEDGER_FORMAT_CONTRACT,
 		"",
 		"Using THIS SESSION's conversation so far, output ONLY the full updated ledger markdown, nothing else.",
 		"Merge, don't append blindly; keep entries from other sessions.",
-	].join("\n");
-}
-
-async function buildMultiRepoPrompt(ledgerPathBySlug: Map<string, string>): Promise<string> {
-	const sections: string[] = [];
-	for (const slug of ledgerPathBySlug.keys()) {
-		const ledgerPath = ledgerPathBySlug.get(slug);
-		if (ledgerPath) sections.push(`### ${slug}\n${await existingLedgerBlock(ledgerPath)}`);
-	}
-	const slugs = [...ledgerPathBySlug.keys()];
-	return [
-		"This session worked across MULTIPLE repos in the same workspace:",
-		slugs.map(s => `- ${s}`).join("\n"),
-		"",
-		"For EACH repo where this session did substantive work, produce an updated status ledger.",
-		"Skip repos this session only glanced at or did no real work in.",
-		"",
-		LEDGER_FORMAT_CONTRACT,
-		"",
-		"Current ledger contents per repo:",
-		"",
-		sections.join("\n\n"),
-		"",
-		"Output ONLY a single JSON object mapping repo-slug (exactly as listed above) to that",
-		"repo's full updated ledger markdown string. Include a key ONLY for repos with real",
-		"changes this session. No prose outside the JSON. Example shape:",
-		'{"owner-repoA": "# owner/repoA — status ledger\\n\\n## Current state\\n..."}',
-	].join("\n");
+	]
+		.filter(Boolean)
+		.join("\n");
 }
 
 function sanitizeLedgerOutput(raw: string, slug: string): string | undefined {
@@ -256,35 +236,6 @@ function sanitizeLedgerOutput(raw: string, slug: string): string | undefined {
 	if (stripped.startsWith("# ")) return stripped;
 	if (stripped.startsWith("## ")) return `# ${slug} — status ledger\n\n${stripped}`;
 	return undefined;
-}
-
-/** Parse the multi-repo JSON map; returns slug → markdown for known slugs only. */
-function parseMultiRepoReply(replyText: string, knownSlugs: Set<string>): Map<string, string> {
-	const out = new Map<string, string>();
-	const trimmed = replyText.trim();
-	let parsed: unknown;
-	try {
-		// Fast path: the whole reply is JSON, optionally wrapped in a single fence.
-		parsed = JSON.parse(stripCodeFence(trimmed));
-	} catch {
-		// Fallback: the model wrapped the JSON in a fence but added prose around
-		// it (common in practice) — pull the first fenced block out and parse
-		// that instead of guessing at brace-balancing over arbitrary prose.
-		const fenceMatch = trimmed.match(/```[a-zA-Z0-9_-]*\r?\n([\s\S]*?)\r?\n```/);
-		if (!fenceMatch) return out;
-		try {
-			parsed = JSON.parse(fenceMatch[1].trim());
-		} catch {
-			return out;
-		}
-	}
-	if (!isRecord(parsed)) return out;
-	for (const [slug, value] of Object.entries(parsed)) {
-		if (!knownSlugs.has(slug) || typeof value !== "string") continue;
-		const sanitized = sanitizeLedgerOutput(value, slug);
-		if (sanitized) out.set(slug, sanitized);
-	}
-	return out;
 }
 
 async function writeLedgerAtomically(ledgerPath: string, content: string): Promise<void> {
@@ -299,9 +250,14 @@ async function writeLedgerAtomically(ledgerPath: string, content: string): Promi
 	}
 }
 
-async function syncSingleRepo(session: SessionContextSyncSession, ledgerDir: string, slug: string): Promise<void> {
+async function syncSingleRepo(
+	session: SessionContextSyncSession,
+	ledgerDir: string,
+	slug: string,
+	otherRepos: string[] = [],
+): Promise<void> {
 	const ledgerPath = path.join(ledgerDir, `${slug}.md`);
-	const promptText = await buildSingleRepoPrompt(ledgerPath, slug);
+	const promptText = await buildSingleRepoPrompt(ledgerPath, slug, otherRepos);
 	const { replyText } = await session.runEphemeralTurn({ promptText });
 	const sanitized = sanitizeLedgerOutput(replyText, slug);
 	if (!sanitized) {
@@ -314,27 +270,20 @@ async function syncSingleRepo(session: SessionContextSyncSession, ledgerDir: str
 	await writeLedgerAtomically(ledgerPath, sanitized);
 }
 
+/**
+ * One focused single-repo turn per touched repo. Sequential and reuses the
+ * proven single-repo prompt/sanitize path — far more robust than asking one
+ * turn to emit a JSON map of multi-line markdown values (models mangle that).
+ */
 async function syncMultiRepo(
 	session: SessionContextSyncSession,
 	ledgerDir: string,
 	slugToDir: Map<string, string>,
 ): Promise<void> {
-	const ledgerPathBySlug = new Map<string, string>();
-	for (const slug of slugToDir.keys()) ledgerPathBySlug.set(slug, path.join(ledgerDir, `${slug}.md`));
-
-	const promptText = await buildMultiRepoPrompt(ledgerPathBySlug);
-	const { replyText } = await session.runEphemeralTurn({ promptText });
-	const updates = parseMultiRepoReply(replyText, new Set(ledgerPathBySlug.keys()));
-	if (updates.size === 0) {
-		logger.warn("[sessionContextSync] multi-repo output empty or unparseable; skipping writes", {
-			sessionId: session.sessionId,
-			repos: [...ledgerPathBySlug.keys()],
-		});
-		return;
-	}
-	for (const [slug, content] of updates) {
-		const ledgerPath = ledgerPathBySlug.get(slug);
-		if (ledgerPath) await writeLedgerAtomically(ledgerPath, content);
+	const slugs = [...slugToDir.keys()];
+	for (const slug of slugs) {
+		const otherRepos = slugs.filter(s => s !== slug);
+		await syncSingleRepo(session, ledgerDir, slug, otherRepos);
 	}
 }
 
