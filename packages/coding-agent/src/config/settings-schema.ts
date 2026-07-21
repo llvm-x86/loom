@@ -2204,6 +2204,22 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	// Session context sync — periodically writes a per-repo status ledger
+	// (`<dir>/<slug>.md`) summarizing this session's progress, for continuity
+	// across sessions. No-UI: opt-in via config file, off by default.
+	"sessionContextSync.enabled": { type: "boolean", default: false },
+
+	// Tilde-expanded directory the per-repo ledger files are written to.
+	// Empty string (default) disables the feature even if `enabled` is true.
+	"sessionContextSync.dir": { type: "string", default: "" },
+
+	// Minutes of terminal idle time before an idle-triggered sync fires.
+	"sessionContextSync.idleMinutes": { type: "number", default: 10 },
+
+	// Debounce between syncs triggered by compaction/idle; a `shutdown` sync
+	// always runs regardless of this interval.
+	"sessionContextSync.minIntervalSeconds": { type: "number", default: 120 },
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
@@ -5359,6 +5375,13 @@ export interface GcSettings {
 	retainNewestPerCwd: number;
 }
 
+export interface SessionContextSyncSettings {
+	enabled: boolean;
+	dir: string;
+	idleMinutes: number;
+	minIntervalSeconds: number;
+}
+
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -5381,6 +5404,7 @@ export interface GroupTypeMap {
 	shellMinimizer: ShellMinimizerSettings;
 	codexResets: CodexResetsSettings;
 	gc: GcSettings;
+	sessionContextSync: SessionContextSyncSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;

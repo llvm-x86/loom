@@ -345,6 +345,7 @@ import { extractFileMentions, generateFileMentionMessages } from "../utils/file-
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
 import { formatLocalCalendarDate } from "../utils/local-date";
+import { maybeSync as maybeSyncSessionContext, type SessionContextSyncSession } from "../utils/session-context-sync";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
@@ -2028,6 +2029,8 @@ export class AgentSession {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	/** Armed after each turn settles; fires `sessionContextSync`'s idle sync. Cleared on new activity/dispose. */
+	#sessionContextSyncIdleTimer: NodeJS.Timeout | undefined;
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	/**
@@ -2234,6 +2237,7 @@ export class AgentSession {
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 		}
+		this.#clearSessionContextSyncIdleTimer();
 	}
 
 	#endInFlight(): void {
@@ -2242,7 +2246,38 @@ export class AgentSession {
 			this.#releasePowerAssertion();
 			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
+			this.#armSessionContextSyncIdleTimer();
 		}
+	}
+
+	/** Duck-typed view of this session for `sessionContextSync`, kept narrow for testability. */
+	#sessionContextSyncHandle(): SessionContextSyncSession {
+		return {
+			cwd: this.sessionManager.getCwd(),
+			sessionId: this.sessionId,
+			settings: this.settings,
+			messages: this.messages,
+			runEphemeralTurn: args => this.runEphemeralTurn(args),
+		};
+	}
+
+	#clearSessionContextSyncIdleTimer(): void {
+		if (this.#sessionContextSyncIdleTimer) {
+			clearTimeout(this.#sessionContextSyncIdleTimer);
+			this.#sessionContextSyncIdleTimer = undefined;
+		}
+	}
+
+	#armSessionContextSyncIdleTimer(): void {
+		if (this.#isDisposed) return;
+		const idleMinutes = this.settings.getGroup("sessionContextSync").idleMinutes;
+		const timer = setTimeout(() => {
+			this.#sessionContextSyncIdleTimer = undefined;
+			if (this.#isDisposed || this.isCompacting || this.isStreaming) return;
+			void maybeSyncSessionContext(this.#sessionContextSyncHandle(), "idle");
+		}, Math.max(1, idleMinutes) * 60_000);
+		timer.unref?.();
+		this.#sessionContextSyncIdleTimer = timer;
 	}
 
 	/** A steer/follow-up can land after the agent loop's final queue poll, or
@@ -4192,6 +4227,9 @@ export class AgentSession {
 			this.#emit(event);
 			void this.#queueExtensionEvent(event);
 			return;
+		}
+		if (event.type === "auto_compaction_end" && !event.aborted && event.result) {
+			void maybeSyncSessionContext(this.#sessionContextSyncHandle(), "compaction");
 		}
 		// Take a FIFO ticket before the extension emit: extension deliveries for
 		// consecutive events still run concurrently, but subscriber fan-out waits
@@ -6763,6 +6801,7 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#stopAdvisorRuntime();
 		this.#evalExecutionDisposing = true;
+		this.#clearSessionContextSyncIdleTimer();
 	}
 
 	/**
@@ -6869,6 +6908,15 @@ export class AgentSession {
 			}
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
+		}
+		try {
+			await withTimeout(
+				maybeSyncSessionContext(this.#sessionContextSyncHandle(), "shutdown"),
+				15_000,
+				"Timed out syncing session context during dispose",
+			);
+		} catch (error) {
+			logger.warn("Failed to sync session context during dispose", { error: String(error) });
 		}
 
 		// Stop extension timers before aborting deferred work they could enqueue.
@@ -11184,6 +11232,7 @@ export class AgentSession {
 				details,
 				preserveData,
 			};
+			void maybeSyncSessionContext(this.#sessionContextSyncHandle(), "compaction");
 			options?.onComplete?.(compactionResult);
 			return compactionResult;
 		} catch (error) {
