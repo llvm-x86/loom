@@ -579,6 +579,12 @@ export interface CreateAgentSessionOptions {
 
 	/** Whether to auto-approve all tool calls (--auto-approve CLI flag). Default: false */
 	autoApprove?: boolean;
+	/**
+	 * Internal: set by the `loom sync-context` CLI subcommand on its own
+	 * out-of-band session. Recursion guard — its own dispose neither arms the
+	 * idle context-sync timer nor writes another shutdown spool.
+	 */
+	syncContextCliMode?: boolean;
 }
 
 /** Result from createAgentSession */
@@ -2994,6 +3000,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			parentEvalSessionId: options.parentEvalSessionId,
 			advisorTools,
 			titleSystemPrompt: options.titleSystemPrompt,
+			syncContextCliMode: options.syncContextCliMode,
 		});
 		hasSession = true;
 		if (asyncJobManager) {

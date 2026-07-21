@@ -37,6 +37,7 @@ export const commands: CommandEntry[] = [
 	{ name: "read", load: () => import("./commands/read").then(m => m.default) },
 	{ name: "ssh", load: () => import("./commands/ssh").then(m => m.default) },
 	{ name: "stats", load: () => import("./commands/stats").then(m => m.default) },
+	{ name: "sync-context", load: () => import("./commands/sync-context").then(m => m.default) },
 	{ name: "update", load: () => import("./commands/update").then(m => m.default) },
 	{ name: "usage", load: () => import("./commands/usage").then(m => m.default) },
 	{ name: "tiny-models", load: () => import("./commands/tiny-models").then(m => m.default) },

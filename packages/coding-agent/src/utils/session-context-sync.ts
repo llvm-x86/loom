@@ -19,6 +19,11 @@ import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveDefaultRepoMemoized } from "../tools/gh";
 import { expandTilde } from "../tools/path-utils";
+import {
+	type ContextActivityEvent,
+	type ContextActivityPhase,
+	reportContextActivity,
+} from "./context-activity-reporter";
 
 export type SessionContextSyncReason = "compaction" | "shutdown" | "idle";
 
@@ -29,21 +34,58 @@ export interface SessionContextSyncSettings {
 	minIntervalSeconds: number;
 	/** Container dir under which repos live (multi-repo mode). Empty → use cwd. */
 	workspaceRoot: string;
+	/** Shutdown handoff spool dir (loom writes / agent-chat worker consumes). Empty disables handoff. */
+	spoolDir: string;
+	/** Pause/throttle control JSON file; read before spending tokens. Empty disables the gate. */
+	controlFile: string;
+	/** Context Activity event-ingest base URL. Empty disables reporting. */
+	reportUrl: string;
+}
+
+/** Narrow slice of `AssistantMessage` this module needs — kept local so tests don't need to build a full message. */
+interface EphemeralTurnAssistantMessage {
+	usage?: { input?: number; output?: number; cacheRead?: number };
+	model?: string;
+	provider?: string;
+	duration?: number;
 }
 
 /** Minimal duck-typed surface `AgentSession` satisfies; kept narrow for testability. */
 export interface SessionContextSyncSession {
 	readonly cwd: string;
 	readonly sessionId?: string;
+	/** AI-generated session title (`AgentSession.sessionName`), for Context Activity event display. */
+	readonly sessionLabel?: string;
+	/** `sessionManager.getSessionFile()` — required for a `loom sync-context --resume` handoff. */
+	readonly transcriptPath?: string;
 	readonly settings?: { getGroup(prefix: "sessionContextSync"): SessionContextSyncSettings };
 	readonly messages?: readonly unknown[];
-	runEphemeralTurn(args: { promptText: string; signal?: AbortSignal }): Promise<{ replyText: string }>;
+	runEphemeralTurn(args: {
+		promptText: string;
+		signal?: AbortSignal;
+	}): Promise<{ replyText: string; assistantMessage?: EphemeralTurnAssistantMessage }>;
 }
 
 export interface SessionContextSyncDeps {
 	/** Overridable for tests; defaults to the real `gh`-backed resolver. */
 	resolveRepo?: (cwd: string) => Promise<string>;
 	now?: () => number;
+	/** Overridable for tests; defaults to POSTing via `reportContextActivity` at `settings.reportUrl`. */
+	reportEvent?: (event: ContextActivityEvent) => void;
+	/** Activity id to use instead of generating one — lets `loom sync-context --activity-id` correlate. */
+	activityId?: string;
+}
+
+/** Shutdown handoff spool record — written atomically by `agent-session.ts` dispose, consumed by agent-chat's worker. */
+export interface ContextSyncSpoolRequest {
+	sessionId: string;
+	transcriptPath: string;
+	reason: "shutdown";
+	ledgerDir: string;
+	controlFile: string;
+	repos: string[];
+	cwd: string;
+	createdAt: string;
 }
 
 const LEDGER_MAX_LINES = 60;
@@ -250,24 +292,58 @@ async function writeLedgerAtomically(ledgerPath: string, content: string): Promi
 	}
 }
 
+/** Per-repo `runEphemeralTurn` usage, captured for the Context Activity `done` event. */
+interface SyncRepoResult {
+	tokensIn: number;
+	tokensOut: number;
+	cacheRead: number;
+	model?: string;
+	provider?: string;
+	durationMs: number;
+}
+
+const EMPTY_SYNC_RESULT: SyncRepoResult = { tokensIn: 0, tokensOut: 0, cacheRead: 0, durationMs: 0 };
+
+function sumSyncResults(results: readonly SyncRepoResult[]): SyncRepoResult {
+	const totals: SyncRepoResult = { ...EMPTY_SYNC_RESULT };
+	for (const result of results) {
+		totals.tokensIn += result.tokensIn;
+		totals.tokensOut += result.tokensOut;
+		totals.cacheRead += result.cacheRead;
+		totals.durationMs += result.durationMs;
+		totals.model ??= result.model;
+		totals.provider ??= result.provider;
+	}
+	return totals;
+}
+
 async function syncSingleRepo(
 	session: SessionContextSyncSession,
 	ledgerDir: string,
 	slug: string,
 	otherRepos: string[] = [],
-): Promise<void> {
+): Promise<SyncRepoResult> {
 	const ledgerPath = path.join(ledgerDir, `${slug}.md`);
 	const promptText = await buildSingleRepoPrompt(ledgerPath, slug, otherRepos);
-	const { replyText } = await session.runEphemeralTurn({ promptText });
+	const { replyText, assistantMessage } = await session.runEphemeralTurn({ promptText });
+	const usage: SyncRepoResult = {
+		tokensIn: assistantMessage?.usage?.input ?? 0,
+		tokensOut: assistantMessage?.usage?.output ?? 0,
+		cacheRead: assistantMessage?.usage?.cacheRead ?? 0,
+		model: assistantMessage?.model,
+		provider: assistantMessage?.provider,
+		durationMs: assistantMessage?.duration ?? 0,
+	};
 	const sanitized = sanitizeLedgerOutput(replyText, slug);
 	if (!sanitized) {
 		logger.warn("[sessionContextSync] model output missing a heading; skipping ledger write", {
 			ledgerPath,
 			sessionId: session.sessionId,
 		});
-		return;
+		return usage;
 	}
 	await writeLedgerAtomically(ledgerPath, sanitized);
+	return usage;
 }
 
 /**
@@ -283,12 +359,12 @@ async function syncMultiRepo(
 	session: SessionContextSyncSession,
 	ledgerDir: string,
 	slugToDir: Map<string, string>,
-): Promise<void> {
+): Promise<SyncRepoResult> {
 	const slugs = [...slugToDir.keys()];
-	await Promise.all(
+	const results = await Promise.all(
 		slugs.map(async slug => {
 			try {
-				await syncSingleRepo(
+				return await syncSingleRepo(
 					session,
 					ledgerDir,
 					slug,
@@ -296,16 +372,22 @@ async function syncMultiRepo(
 				);
 			} catch (error) {
 				logger.warn("[sessionContextSync] per-repo sync failed", { slug, error: String(error) });
+				return undefined;
 			}
 		}),
 	);
+	return sumSyncResults(results.filter((r): r is SyncRepoResult => r !== undefined));
+}
+
+export interface RunSyncResult extends SyncRepoResult {
+	repos: string[];
 }
 
 async function runSync(
 	session: SessionContextSyncSession,
 	settings: SessionContextSyncSettings,
 	deps: SessionContextSyncDeps,
-): Promise<void> {
+): Promise<RunSyncResult> {
 	const resolveRepo = deps.resolveRepo ?? (cwd => resolveDefaultRepoMemoized(cwd));
 	const ledgerDir = expandTilde(settings.dir);
 
@@ -318,8 +400,8 @@ async function runSync(
 		cwdSlug = undefined;
 	}
 	if (cwdSlug) {
-		await syncSingleRepo(session, ledgerDir, cwdSlug);
-		return;
+		const result = await syncSingleRepo(session, ledgerDir, cwdSlug);
+		return { repos: [cwdSlug], ...result };
 	}
 
 	// Multi-repo mode: cwd is a container (e.g. ~/workspace). Detect touched repos.
@@ -339,52 +421,169 @@ async function runSync(
 	if (slugToDir.size === 0) {
 		// Nothing detectable — fall back to a single cwd-basename ledger.
 		const slug = path.basename(path.resolve(session.cwd)) || "session";
-		await syncSingleRepo(session, ledgerDir, slug);
-		return;
+		const result = await syncSingleRepo(session, ledgerDir, slug);
+		return { repos: [slug], ...result };
 	}
 	if (slugToDir.size === 1) {
 		const [slug] = slugToDir.keys();
-		await syncSingleRepo(session, ledgerDir, slug);
-		return;
+		const result = await syncSingleRepo(session, ledgerDir, slug);
+		return { repos: [slug], ...result };
 	}
-	await syncMultiRepo(session, ledgerDir, slugToDir);
+	const result = await syncMultiRepo(session, ledgerDir, slugToDir);
+	return { repos: [...slugToDir.keys()], ...result };
+}
+
+/**
+ * LLM-free repo detection: the same resolution logic `runSync` uses (cwd
+ * single-repo fast path, else multi-repo touched-dir scan) but never calls
+ * `runEphemeralTurn`. Cheap enough to run inline at session dispose — used
+ * for the shutdown-handoff spool record's `repos[]`.
+ */
+export async function detectTouchedRepos(
+	session: SessionContextSyncSession,
+	settings: SessionContextSyncSettings,
+	deps: SessionContextSyncDeps = {},
+): Promise<string[]> {
+	const resolveRepo = deps.resolveRepo ?? (cwd => resolveDefaultRepoMemoized(cwd));
+	try {
+		const repo = await resolveRepo(session.cwd);
+		if (repo) return [repo.replaceAll("/", "-")];
+	} catch {
+		// Not a checkout — fall through to multi-repo detection.
+	}
+	const workspaceRoot = settings.workspaceRoot ? expandTilde(settings.workspaceRoot) : session.cwd;
+	const dirs = touchedRepoDirs(session.messages ?? [], workspaceRoot);
+	const slugToDir = await resolveTouchedSlugs(dirs, resolveRepo);
+	return [...slugToDir.keys()];
+}
+
+/**
+ * Pause/throttle gate: read before spending tokens. Missing/unreadable/
+ * malformed file is treated as not-paused — the gate must never throw and
+ * must fail open when agent-chat (or its control file) is unavailable.
+ */
+async function isSyncPaused(controlFile: string): Promise<boolean> {
+	if (!controlFile) return false;
+	try {
+		const raw = await fs.readFile(expandTilde(controlFile), "utf8");
+		const parsed: unknown = JSON.parse(raw);
+		return isRecord(parsed) && parsed.paused === true;
+	} catch {
+		return false;
+	}
+}
+
+/** Atomic (tmp + rename) spool write — same crash-safety idiom as `writeLedgerAtomically`. */
+export async function writeSpoolRecordAtomically(spoolDir: string, record: ContextSyncSpoolRequest): Promise<void> {
+	const dir = expandTilde(spoolDir);
+	await fs.mkdir(dir, { recursive: true });
+	const finalPath = path.join(dir, `${record.sessionId}-${Bun.randomUUIDv7()}.json`);
+	const tmpPath = `${finalPath}.tmp-${Bun.randomUUIDv7()}`;
+	try {
+		await fs.writeFile(tmpPath, `${JSON.stringify(record, null, 2)}\n`, "utf8");
+		await fs.rename(tmpPath, finalPath);
+	} catch (error) {
+		await fs.rm(tmpPath, { force: true }).catch(() => undefined);
+		throw error;
+	}
 }
 
 /**
  * Sync per-repo status ledger(s) from this session's transcript. No-op
  * unless `sessionContextSync.enabled` and `.dir` are both configured. Skips
  * if a sync is already in flight, or (except on `shutdown`) if the last
- * sync happened within `minIntervalSeconds`. Never throws.
+ * sync happened within `minIntervalSeconds`, or if `controlFile` says the
+ * system is paused. Reports a Context Activity `sync` event
+ * (start/done/skip/fail) at `settings.reportUrl` on every path. Never throws.
  */
 export async function maybeSync(
 	session: SessionContextSyncSession,
 	reason: SessionContextSyncReason,
 	deps: SessionContextSyncDeps = {},
 ): Promise<void> {
+	const activityId = deps.activityId ?? Bun.randomUUIDv7();
+	const now = deps.now ?? Date.now;
+	let settings: SessionContextSyncSettings | undefined;
+	const emit = (phase: ContextActivityPhase, extra: Partial<ContextActivityEvent> = {}) => {
+		const reportUrl = settings?.reportUrl;
+		// The default (module-internal) HTTP reporter only fires once this
+		// session has actually opted into sessionContextSync — otherwise the
+		// "disabled" skip emitted below would defeat this module's documented
+		// "total no-op unless enabled+dir configured" invariant by POSTing a
+		// meaningless skip row to agent-chat's default reportUrl on every idle
+		// timeout/compaction for every loom session, opted in or not. An
+		// explicit `deps.reportEvent` (the `sync-context` CLI, tests) still
+		// always receives the event — it needs the terminal outcome even when
+		// the feature is off.
+		const reportEvent =
+			deps.reportEvent ??
+			(reportUrl && settings?.enabled
+				? (event: ContextActivityEvent) => reportContextActivity(event, reportUrl)
+				: undefined);
+		reportEvent?.({
+			id: activityId,
+			kind: "sync",
+			phase,
+			session_id: session.sessionId ?? "",
+			session_label: session.sessionLabel,
+			transcript_path: session.transcriptPath,
+			trigger: reason,
+			ts: now(),
+			...extra,
+		});
+	};
+
 	try {
-		const settings = session.settings?.getGroup("sessionContextSync");
-		if (!settings?.enabled || !settings.dir) return;
-		if (session.messages && session.messages.length === 0) return;
+		settings = session.settings?.getGroup("sessionContextSync");
+		if (!settings?.enabled || !settings.dir) {
+			emit("skip", { error: "disabled" });
+			return;
+		}
+		if (session.messages && session.messages.length === 0) {
+			emit("skip", { error: "empty" });
+			return;
+		}
 
 		const state = syncStates.get(session) ?? { lastSyncAt: 0, inFlight: false };
 		syncStates.set(session, state);
-		if (state.inFlight) return;
+		if (state.inFlight) {
+			emit("skip", { error: "inflight" });
+			return;
+		}
 
-		const now = deps.now ?? Date.now;
 		if (reason !== "shutdown") {
 			const minIntervalMs = Math.max(0, settings.minIntervalSeconds) * 1000;
-			if (now() - state.lastSyncAt < minIntervalMs) return;
+			if (now() - state.lastSyncAt < minIntervalMs) {
+				emit("skip", { error: "debounce" });
+				return;
+			}
 		}
 
 		state.inFlight = true;
 		try {
-			await runSync(session, settings, deps);
+			if (await isSyncPaused(settings.controlFile)) {
+				emit("skip", { error: "paused" });
+				return;
+			}
+
+			emit("start");
+			const result = await runSync(session, settings, deps);
 			state.lastSyncAt = now();
+			emit("done", {
+				repos: result.repos,
+				tokens_in: result.tokensIn,
+				tokens_out: result.tokensOut,
+				cache_read: result.cacheRead,
+				model: result.model,
+				provider: result.provider,
+				duration_ms: result.durationMs,
+			});
 		} finally {
 			state.inFlight = false;
 		}
 	} catch (error) {
 		logger.warn("[sessionContextSync] sync failed", { reason, error: String(error) });
+		emit("fail", { error: String(error) });
 	}
 }
 

@@ -45,6 +45,9 @@ function makeSettings(overrides: Partial<SessionContextSyncSettings> = {}): Sess
 		idleMinutes: 10,
 		minIntervalSeconds: 120,
 		workspaceRoot: "",
+		spoolDir: "",
+		controlFile: "",
+		reportUrl: "",
 		...overrides,
 	};
 }
@@ -517,5 +520,144 @@ describe("sessionContextSync", () => {
 		} finally {
 			rmSync(wsRoot, { recursive: true, force: true });
 		}
+	});
+
+	describe("Context Activity events (pause gate + reporting)", () => {
+		function pausedSession(replyText = "# owner/repo — status ledger\n\n## Current state\nok."): {
+			session: SessionContextSyncSession;
+			calls: () => number;
+		} {
+			const state = { calls: 0 };
+			const settings = makeSettings({ dir, controlFile: join(dir, "control.json") });
+			const session: SessionContextSyncSession = {
+				cwd: join(dir, "repo"),
+				sessionId: "paused-session",
+				sessionLabel: "Test session",
+				transcriptPath: "/tmp/transcript.jsonl",
+				settings: { getGroup: () => settings },
+				messages: [{ role: "user" }],
+				runEphemeralTurn: async () => {
+					state.calls++;
+					return { replyText };
+				},
+			};
+			return { session, calls: () => state.calls };
+		}
+
+		it("controlFile {paused:true} skips before spending tokens, no runEphemeralTurn call", async () => {
+			const { session, calls } = pausedSession();
+			const settings = session.settings?.getGroup("sessionContextSync");
+			if (!settings) throw new Error("expected settings");
+			mkdirSync(join(dir, "repo"), { recursive: true });
+			writeFileSync(settings.controlFile, JSON.stringify({ paused: true }));
+
+			const events: Array<{ phase: string; error?: string }> = [];
+			const resolveRepo = async () => "owner/repo";
+			await maybeSync(session, "compaction", {
+				resolveRepo,
+				reportEvent: event => events.push({ phase: event.phase, error: event.error }),
+			});
+
+			expect(calls()).toBe(0);
+			expect(events.map(e => e.phase)).toEqual(["skip"]);
+			expect(events[0]?.error).toBe("paused");
+		});
+
+		it("missing/unreadable controlFile is treated as not-paused (never throws, sync proceeds)", async () => {
+			mkdirSync(join(dir, "repo"), { recursive: true });
+			const { session, calls } = pausedSession();
+			const resolveRepo = async () => "owner/repo";
+
+			await maybeSync(session, "compaction", { resolveRepo });
+
+			expect(calls()).toBe(1);
+			expect(existsSync(join(dir, "owner-repo.md"))).toBe(true);
+		});
+
+		it("emits start then done, correlated by the same activity id, with summed token usage", async () => {
+			mkdirSync(join(dir, "repo"), { recursive: true });
+			const state = { calls: 0 };
+			const settings = makeSettings({ dir });
+			const session: SessionContextSyncSession = {
+				cwd: join(dir, "repo"),
+				sessionId: "usage-session",
+				settings: { getGroup: () => settings },
+				messages: [{ role: "user" }],
+				runEphemeralTurn: async () => {
+					state.calls++;
+					return {
+						replyText: "# owner/repo — status ledger\n\n## Current state\nok.",
+						assistantMessage: {
+							usage: { input: 100, output: 40, cacheRead: 5 },
+							model: "m",
+							provider: "p",
+							duration: 12,
+						},
+					};
+				},
+			};
+			const resolveRepo = async () => "owner/repo";
+			const events: Array<Record<string, unknown>> = [];
+
+			await maybeSync(session, "idle", {
+				resolveRepo,
+				activityId: "fixed-id",
+				reportEvent: event => events.push(event as unknown as Record<string, unknown>),
+			});
+
+			expect(events.map(e => e.phase)).toEqual(["start", "done"]);
+			expect(events.every(e => e.id === "fixed-id")).toBe(true);
+			expect(events.every(e => e.kind === "sync")).toBe(true);
+			expect(events.every(e => e.trigger === "idle")).toBe(true);
+			const done = events[1];
+			expect(done.repos).toEqual(["owner-repo"]);
+			expect(done.tokens_in).toBe(100);
+			expect(done.tokens_out).toBe(40);
+			expect(done.cache_read).toBe(5);
+			expect(done.model).toBe("m");
+			expect(done.provider).toBe("p");
+			expect(done.duration_ms).toBe(12);
+		});
+
+		it("emits skip(disabled) without touching the network when sessionContextSync is off", async () => {
+			const settings = makeSettings({ enabled: false, dir: "" });
+			const session: SessionContextSyncSession = {
+				cwd: dir,
+				sessionId: "disabled-session",
+				settings: { getGroup: () => settings },
+				messages: [{ role: "user" }],
+				runEphemeralTurn: async () => ({ replyText: "" }),
+			};
+			const events: Array<{ phase: string; error?: string }> = [];
+
+			await maybeSync(session, "idle", {
+				reportEvent: event => events.push({ phase: event.phase, error: event.error }),
+			});
+
+			expect(events).toEqual([{ phase: "skip", error: "disabled" }]);
+		});
+
+		it("the default HTTP reporter never touches the network for a disabled session (no deps.reportEvent override)", async () => {
+			// Regression: `reportUrl` defaults to a non-empty localhost URL even
+			// though `enabled` defaults to false. Without an explicit
+			// `deps.reportEvent` (i.e. the automatic idle/compaction/dispose call
+			// sites, not the `sync-context` CLI), a disabled session must stay a
+			// true no-op — no fetch to agent-chat's default endpoint.
+			const settings = makeSettings({ enabled: false, dir: "", reportUrl: "http://127.0.0.1:8811" });
+			const session: SessionContextSyncSession = {
+				cwd: dir,
+				sessionId: "disabled-session-live-reporturl",
+				settings: { getGroup: () => settings },
+				messages: [{ role: "user" }],
+				runEphemeralTurn: async () => ({ replyText: "" }),
+			};
+			const fetchSpy = spyOn(globalThis, "fetch");
+			try {
+				await maybeSync(session, "idle", {});
+				expect(fetchSpy).not.toHaveBeenCalled();
+			} finally {
+				fetchSpy.mockRestore();
+			}
+		});
 	});
 });

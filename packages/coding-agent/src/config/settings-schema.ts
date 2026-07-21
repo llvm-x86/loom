@@ -2226,6 +2226,22 @@ export const SETTINGS_SCHEMA = {
 	// own ledger. Empty (default) → use the session cwd as the container.
 	"sessionContextSync.workspaceRoot": { type: "string", default: "" },
 
+	// Shutdown handoff (Context Activity): dir loom writes an out-of-band spool
+	// record to on real session dispose instead of blocking on the LLM ledger
+	// turn. Empty (default) disables the handoff — shutdown sync stays inline
+	// and awaited, same as before.
+	"sessionContextSync.spoolDir": { type: "string", default: "" },
+
+	// Pause/throttle control JSON file (`{paused: bool, ...}`), the source of
+	// truth for the global kill switch. Read before spending tokens on any
+	// sync; a missing/unreadable/malformed file is treated as not-paused.
+	// Empty (default) disables the gate.
+	"sessionContextSync.controlFile": { type: "string", default: "" },
+
+	// Context Activity event-ingest base URL. Fire-and-forget POST of every
+	// sync/compaction start/done/skip/fail. Empty disables reporting.
+	"sessionContextSync.reportUrl": { type: "string", default: "http://127.0.0.1:8811" },
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
@@ -5387,6 +5403,9 @@ export interface SessionContextSyncSettings {
 	idleMinutes: number;
 	minIntervalSeconds: number;
 	workspaceRoot: string;
+	spoolDir: string;
+	controlFile: string;
+	reportUrl: string;
 }
 
 /** Map group prefix -> typed settings interface */

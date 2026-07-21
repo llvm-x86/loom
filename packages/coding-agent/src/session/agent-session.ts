@@ -339,13 +339,20 @@ import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { isMountableUnderXdev, type XdevRegistry } from "../tools/xdev";
 import { parseCommandArgs } from "../utils/command-args";
+import { type ContextActivityEvent, reportContextActivity } from "../utils/context-activity-reporter";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
 import { formatLocalCalendarDate } from "../utils/local-date";
-import { maybeSync as maybeSyncSessionContext, type SessionContextSyncSession } from "../utils/session-context-sync";
+import {
+	type ContextSyncSpoolRequest,
+	detectTouchedRepos,
+	maybeSync as maybeSyncSessionContext,
+	type SessionContextSyncSession,
+	writeSpoolRecordAtomically,
+} from "../utils/session-context-sync";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
@@ -1056,6 +1063,13 @@ export interface AgentSessionConfig {
 	 * cwd change via {@link AgentSession.setTitleSystemPrompt}.
 	 */
 	titleSystemPrompt?: string;
+	/**
+	 * Internal: set by the `loom sync-context` CLI subcommand on its own
+	 * out-of-band session. Recursion guard — dispose neither arms the idle
+	 * context-sync timer nor writes another shutdown spool, since the CLI
+	 * already ran the one-shot sync itself before disposing.
+	 */
+	syncContextCliMode?: boolean;
 }
 
 /** Options for AgentSession.prompt() */
@@ -2031,6 +2045,10 @@ export class AgentSession {
 	#isDisposed = false;
 	/** Armed after each turn settles; fires `sessionContextSync`'s idle sync. Cleared on new activity/dispose. */
 	#sessionContextSyncIdleTimer: NodeJS.Timeout | undefined;
+	/** Recursion guard set by the `loom sync-context` CLI subcommand; see {@link AgentSessionConfig.syncContextCliMode}. */
+	#syncContextCliMode = false;
+	/** Correlates the `compaction` Context Activity `start` event with its terminal `done`/`fail`. */
+	#compactionActivityId: string | undefined;
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	/**
@@ -2255,10 +2273,62 @@ export class AgentSession {
 		return {
 			cwd: this.sessionManager.getCwd(),
 			sessionId: this.sessionId,
+			sessionLabel: this.sessionName,
+			transcriptPath: this.sessionManager.getSessionFile(),
 			settings: this.settings,
 			messages: this.messages,
 			runEphemeralTurn: args => this.runEphemeralTurn(args),
 		};
+	}
+
+	/** Fire-and-forget Context Activity event, stamped with this session's identity. */
+	#reportContextActivity(
+		partial: Omit<ContextActivityEvent, "session_id" | "session_label" | "transcript_path" | "ts">,
+	): void {
+		// Gated on `enabled` (not just `reportUrl`, which defaults non-empty per
+		// the locked contract): compaction is far more frequent than idle/shutdown
+		// syncs, and reporting it unconditionally would defeat this feature's
+		// documented opt-in invariant by POSTing telemetry for every session,
+		// everywhere, whether or not it ever configured sessionContextSync.
+		const settings = this.settings.getGroup("sessionContextSync");
+		if (!settings.enabled || !settings.reportUrl) return;
+		reportContextActivity(
+			{
+				...partial,
+				session_id: this.sessionId,
+				session_label: this.sessionName,
+				transcript_path: this.sessionManager.getSessionFile(),
+				ts: Date.now(),
+			},
+			settings.reportUrl,
+		);
+	}
+
+	/**
+	 * Shutdown handoff: instead of blocking dispose on the LLM ledger turn,
+	 * run the cheap LLM-free repo detection inline and atomically spool a
+	 * request for agent-chat's out-of-band worker (`loom sync-context`) to
+	 * pick up later. Never throws — a spool-write failure just falls through
+	 * to dispose completing normally (the ledger update is lost, same as any
+	 * other `maybeSync` failure today).
+	 */
+	async #writeContextSyncShutdownSpool(spoolDir: string): Promise<void> {
+		const settings = this.settings.getGroup("sessionContextSync");
+		if (!settings.enabled || !settings.dir) return;
+		const transcriptPath = this.sessionManager.getSessionFile();
+		if (!transcriptPath) return; // Unsaved session — nothing to hand off.
+		const repos = await detectTouchedRepos(this.#sessionContextSyncHandle(), settings);
+		const record: ContextSyncSpoolRequest = {
+			sessionId: this.sessionId,
+			transcriptPath,
+			reason: "shutdown",
+			ledgerDir: settings.dir,
+			controlFile: settings.controlFile,
+			repos,
+			cwd: this.sessionManager.getCwd(),
+			createdAt: new Date().toISOString(),
+		};
+		await writeSpoolRecordAtomically(spoolDir, record);
 	}
 
 	#clearSessionContextSyncIdleTimer(): void {
@@ -2269,7 +2339,7 @@ export class AgentSession {
 	}
 
 	#armSessionContextSyncIdleTimer(): void {
-		if (this.#isDisposed) return;
+		if (this.#isDisposed || this.#syncContextCliMode) return;
 		const idleMinutes = this.settings.getGroup("sessionContextSync").idleMinutes;
 		const timer = setTimeout(() => {
 			this.#sessionContextSyncIdleTimer = undefined;
@@ -2700,6 +2770,7 @@ export class AgentSession {
 		};
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
+		this.#syncContextCliMode = config.syncContextCliMode === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#parentEvalSessionId = config.parentEvalSessionId;
@@ -6541,12 +6612,28 @@ export class AgentSession {
 			};
 			await this.#extensionRunner.emit(extensionEvent);
 		} else if (event.type === "auto_compaction_start") {
+			this.#compactionActivityId = Bun.randomUUIDv7();
+			this.#reportContextActivity({
+				id: this.#compactionActivityId,
+				kind: "compaction",
+				phase: "start",
+				trigger: "compaction",
+			});
 			await this.#extensionRunner.emit({
 				type: "auto_compaction_start",
 				reason: event.reason,
 				action: event.action,
 			});
 		} else if (event.type === "auto_compaction_end") {
+			const compactionActivityId = this.#compactionActivityId ?? Bun.randomUUIDv7();
+			this.#compactionActivityId = undefined;
+			this.#reportContextActivity({
+				id: compactionActivityId,
+				kind: "compaction",
+				phase: event.aborted ? "fail" : "done",
+				trigger: "compaction",
+				error: event.aborted ? (event.errorMessage ?? "compaction aborted") : undefined,
+			});
 			await this.#extensionRunner.emit({
 				type: "auto_compaction_end",
 				action: event.action,
@@ -6910,16 +6997,26 @@ export class AgentSession {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
 		}
 		try {
-			await withTimeout(
-				maybeSyncSessionContext(this.#sessionContextSyncHandle(), "shutdown"),
-				// Ceiling only (returns as soon as the sync finishes). Multi-repo
-				// shutdown syncs run one ephemeral turn per touched repo and
-				// providers often serialize them, so allow enough headroom for a
-				// few sequential turns; single-repo (the common case) returns in
-				// one turn's time. Idle/compaction syncs are uncapped.
-				60_000,
-				"Timed out syncing session context during dispose",
-			);
+			if (this.#syncContextCliMode) {
+				// `loom sync-context` already ran the one-shot sync itself before
+				// calling dispose; spooling here would recurse forever.
+			} else {
+				const spoolDir = this.settings.getGroup("sessionContextSync").spoolDir;
+				if (spoolDir) {
+					await this.#writeContextSyncShutdownSpool(spoolDir);
+				} else {
+					await withTimeout(
+						maybeSyncSessionContext(this.#sessionContextSyncHandle(), "shutdown"),
+						// Ceiling only (returns as soon as the sync finishes). Multi-repo
+						// shutdown syncs run one ephemeral turn per touched repo and
+						// providers often serialize them, so allow enough headroom for a
+						// few sequential turns; single-repo (the common case) returns in
+						// one turn's time. Idle/compaction syncs are uncapped.
+						60_000,
+						"Timed out syncing session context during dispose",
+					);
+				}
+			}
 		} catch (error) {
 			logger.warn("Failed to sync session context during dispose", { error: String(error) });
 		}
