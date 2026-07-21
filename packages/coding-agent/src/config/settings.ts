@@ -697,6 +697,24 @@ export class Settings {
 		return this.get("bashInterceptor.patterns");
 	}
 
+	/**
+	 * Get session bootstrap file paths (typed accessor; lenient — non-string
+	 * entries are dropped with a warning rather than failing the whole list).
+	 */
+	getSessionBootstrap(): string[] {
+		const raw = this.get("sessionBootstrap");
+		if (!Array.isArray(raw)) return [];
+		const paths: string[] = [];
+		for (const entry of raw) {
+			if (typeof entry === "string") {
+				paths.push(entry);
+			} else {
+				logger.warn("Settings: sessionBootstrap entry must be a string; ignoring", { entry });
+			}
+		}
+		return paths;
+	}
+
 	#modelRolesFromLayer(layer: RawSettings): Record<string, string> {
 		const value = getByPath(layer, ["modelRoles"]);
 		if (!isRecord(value)) return {};

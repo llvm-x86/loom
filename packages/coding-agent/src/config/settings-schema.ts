@@ -367,6 +367,11 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined },
 
+	// Files whose contents are injected into every session's system prompt at start
+	// (environment briefings, project ledgers). Paths are tilde-expanded; missing
+	// files are skipped with a stderr warning — never fatal.
+	sessionBootstrap: { type: "array", default: EMPTY_STRING_ARRAY },
+
 	autoResume: {
 		type: "boolean",
 		default: false,

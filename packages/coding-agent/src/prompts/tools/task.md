@@ -40,6 +40,9 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{/if}}
 
+# Model Reproducibility
+Always pin `model` explicitly (per item or top-level) when reproducibility matters: spawned subagent CLIs resolve models independently and do NOT inherit an interactive session's /model selection; ambient resolution can fail with "No model selected" in environments configured only interactively. An explicit model is validated at preflight and fails loudly — never silently substituted.
+
 # Communication
 Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}
 Pass large payloads via `local://<path>` URIs, NEVER inline text.
