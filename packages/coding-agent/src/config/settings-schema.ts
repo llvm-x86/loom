@@ -2220,6 +2220,12 @@ export const SETTINGS_SCHEMA = {
 	// always runs regardless of this interval.
 	"sessionContextSync.minIntervalSeconds": { type: "number", default: 120 },
 
+	// Multi-repo mode: container dir under which repos live (e.g. "~/workspace").
+	// When the session cwd is this container rather than a checkout, the
+	// transcript is scanned for the repos actually worked in and each gets its
+	// own ledger. Empty (default) → use the session cwd as the container.
+	"sessionContextSync.workspaceRoot": { type: "string", default: "" },
+
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
 		type: "enum",
@@ -5380,6 +5386,7 @@ export interface SessionContextSyncSettings {
 	dir: string;
 	idleMinutes: number;
 	minIntervalSeconds: number;
+	workspaceRoot: string;
 }
 
 /** Map group prefix -> typed settings interface */

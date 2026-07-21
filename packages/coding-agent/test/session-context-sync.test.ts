@@ -10,12 +10,27 @@
  * 5. In-flight guard: concurrent `maybeSync` calls -> exactly one
  *    `runEphemeralTurn` call.
  * 6. Slug falls back to the cwd basename when repo resolution fails.
+ *
+ * Multi-repo mode (cwd is a container, not itself a checkout):
+ * 7. Two touched repos -> two ledgers written from a JSON-map reply.
+ * 8. Bogus bash tokens (git ref ranges, URLs, scp-like remotes, non-existent
+ *    dirs) never trigger a `resolveRepo` (gh) call.
+ * 9. One real repo among noise -> goes through the single-repo path (one
+ *    ephemeral turn, single-repo prompt/output format).
+ * 10. Unparseable multi-repo reply -> no writes at all, existing ledgers for
+ *     every touched repo are left untouched, and it warns.
+ * 11. A reply with a JSON map wrapped in a fence plus surrounding prose still
+ *     parses and writes both ledgers.
+ * 12. Relative `..` targets and absolute paths outside `workspaceRoot` are
+ *     rejected as touched dirs (never reach `resolveRepo`).
+ * 13. Two touched dirs that resolve to the same repo slug dedupe to a single
+ *     ledger write (one ephemeral turn), not a doubled/racing write.
  */
 
 import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { basename, join } from "node:path";
 import {
 	maybeSync,
 	type SessionContextSyncSession,
@@ -29,6 +44,7 @@ function makeSettings(overrides: Partial<SessionContextSyncSettings> = {}): Sess
 		dir: "",
 		idleMinutes: 10,
 		minIntervalSeconds: 120,
+		workspaceRoot: "",
 		...overrides,
 	};
 }
@@ -184,5 +200,306 @@ describe("sessionContextSync", () => {
 		});
 
 		expect(existsSync(join(dir, "my-project.md"))).toBe(true);
+	});
+
+	it("multi-repo: two touched repos write two ledgers from a JSON-map reply", async () => {
+		const settings = makeSettings({ dir, workspaceRoot: "" });
+		const repoADir = join(dir, "repoA");
+		const repoBDir = join(dir, "repoB");
+		mkdirSync(repoADir, { recursive: true });
+		mkdirSync(repoBDir, { recursive: true });
+
+		const resolveRepo = async (cwd: string) => {
+			if (cwd === repoADir) return "owner/repoA";
+			if (cwd === repoBDir) return "owner/repoB";
+			throw new Error(`not a checkout: ${cwd}`);
+		};
+		const replyText = JSON.stringify({
+			"owner-repoA": "# owner/repoA — status ledger\n\n## Current state\nWorked on A.",
+			"owner-repoB": "# owner/repoB — status ledger\n\n## Current state\nWorked on B.",
+		});
+
+		const session: SessionContextSyncSession = {
+			cwd: dir,
+			sessionId: "multi-two-repos",
+			settings: { getGroup: () => settings },
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(repoADir, "file1.ts") } }],
+				},
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "write", arguments: { path: join(repoBDir, "file2.ts") } }],
+				},
+			],
+			runEphemeralTurn: async () => ({ replyText }),
+		};
+
+		await maybeSync(session, "compaction", { resolveRepo });
+
+		expect(readFileSync(join(dir, "owner-repoA.md"), "utf8")).toContain("Worked on A.");
+		expect(readFileSync(join(dir, "owner-repoB.md"), "utf8")).toContain("Worked on B.");
+	});
+
+	it("multi-repo: bogus bash tokens (git refs, URLs, scp remotes, non-existent dirs) never call resolveRepo", async () => {
+		const settings = makeSettings({ dir, workspaceRoot: "" });
+		const calls: string[] = [];
+		const resolveRepo = async (cwd: string) => {
+			calls.push(cwd);
+			throw new Error(`not a checkout: ${cwd}`);
+		};
+		const command = [
+			"git diff origin/main...feature/x",
+			"&&",
+			"curl https://example.com/foo/bar",
+			"&&",
+			"git remote add origin git@github.com:owner/repo.git",
+			"&&",
+			"cat nonexistent-repo/file.txt",
+		].join(" ");
+
+		const session: SessionContextSyncSession = {
+			cwd: dir,
+			sessionId: "multi-bogus-tokens",
+			settings: { getGroup: () => settings },
+			messages: [{ role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command } }] }],
+			runEphemeralTurn: async () => ({ replyText: "# fallback — status ledger\nbody\n" }),
+		};
+
+		await maybeSync(session, "compaction", { resolveRepo });
+
+		// Only the initial single-repo check on `session.cwd` runs; none of the
+		// bogus tokens (ref range, URL, scp remote, non-existent dir) ever reach
+		// `resolveRepo`, so no bogus `gh` subprocess is spawned.
+		expect(calls).toEqual([dir]);
+		expect(existsSync(join(dir, `${basename(dir)}.md`))).toBe(true);
+	});
+
+	it("multi-repo: one real repo among noise goes through the single-repo path", async () => {
+		const settings = makeSettings({ dir, workspaceRoot: "" });
+		const repoADir = join(dir, "repoA");
+		mkdirSync(repoADir, { recursive: true });
+
+		const calls: string[] = [];
+		const resolveRepo = async (cwd: string) => {
+			calls.push(cwd);
+			if (cwd === repoADir) return "owner/repoA";
+			throw new Error(`not a checkout: ${cwd}`);
+		};
+		const command = [
+			"git diff origin/main...feature/x",
+			"&&",
+			"curl https://example.com/foo/bar",
+			"&&",
+			"cat nonexistent-repo/file.txt",
+		].join(" ");
+
+		let turnCalls = 0;
+		const session: SessionContextSyncSession = {
+			cwd: dir,
+			sessionId: "multi-single-among-noise",
+			settings: { getGroup: () => settings },
+			messages: [
+				{ role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command } }] },
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(repoADir, "file.ts") } }],
+				},
+			],
+			runEphemeralTurn: async () => {
+				turnCalls++;
+				return { replyText: "# owner/repoA — status ledger\n\n## Current state\nfoo" };
+			},
+		};
+
+		await maybeSync(session, "compaction", { resolveRepo });
+
+		// cwd (single-repo check) + repoA only — bogus tokens never resolved.
+		expect(calls).toEqual([dir, repoADir]);
+		expect(turnCalls).toBe(1);
+		expect(existsSync(join(dir, "owner-repoA.md"))).toBe(true);
+	});
+
+	it("multi-repo: unparseable JSON-map reply leaves existing ledgers untouched and warns", async () => {
+		const settings = makeSettings({ dir, workspaceRoot: "" });
+		const repoADir = join(dir, "repoA");
+		const repoBDir = join(dir, "repoB");
+		mkdirSync(repoADir, { recursive: true });
+		mkdirSync(repoBDir, { recursive: true });
+		writeFileSync(join(dir, "owner-repoA.md"), "# owner/repoA — status ledger\n\nOLD A\n");
+		writeFileSync(join(dir, "owner-repoB.md"), "# owner/repoB — status ledger\n\nOLD B\n");
+
+		const resolveRepo = async (cwd: string) => {
+			if (cwd === repoADir) return "owner/repoA";
+			if (cwd === repoBDir) return "owner/repoB";
+			throw new Error(`not a checkout: ${cwd}`);
+		};
+
+		const session: SessionContextSyncSession = {
+			cwd: dir,
+			sessionId: "multi-unparseable",
+			settings: { getGroup: () => settings },
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(repoADir, "a.ts") } }],
+				},
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(repoBDir, "b.ts") } }],
+				},
+			],
+			runEphemeralTurn: async () => ({ replyText: "Sorry, I can't produce that right now." }),
+		};
+
+		const warnSpy = spyOn(logger, "warn").mockImplementation(() => {});
+		try {
+			await maybeSync(session, "compaction", { resolveRepo });
+			expect(readFileSync(join(dir, "owner-repoA.md"), "utf8")).toBe("# owner/repoA — status ledger\n\nOLD A\n");
+			expect(readFileSync(join(dir, "owner-repoB.md"), "utf8")).toBe("# owner/repoB — status ledger\n\nOLD B\n");
+			expect(warnSpy).toHaveBeenCalled();
+		} finally {
+			warnSpy.mockRestore();
+		}
+	});
+
+	it("multi-repo: a JSON map wrapped in a fence with surrounding prose still parses", async () => {
+		const settings = makeSettings({ dir, workspaceRoot: "" });
+		const repoADir = join(dir, "repoA");
+		const repoBDir = join(dir, "repoB");
+		mkdirSync(repoADir, { recursive: true });
+		mkdirSync(repoBDir, { recursive: true });
+
+		const resolveRepo = async (cwd: string) => {
+			if (cwd === repoADir) return "owner/repoA";
+			if (cwd === repoBDir) return "owner/repoB";
+			throw new Error(`not a checkout: ${cwd}`);
+		};
+		const json = JSON.stringify({
+			"owner-repoA": "# owner/repoA — status ledger\n\n## Current state\nFenced A.",
+			"owner-repoB": "# owner/repoB — status ledger\n\n## Current state\nFenced B.",
+		});
+		const replyText = `Sure, here's the update:\n\n\`\`\`json\n${json}\n\`\`\`\n\nLet me know if that helps!`;
+
+		const session: SessionContextSyncSession = {
+			cwd: dir,
+			sessionId: "multi-fenced-prose",
+			settings: { getGroup: () => settings },
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(repoADir, "a.ts") } }],
+				},
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(repoBDir, "b.ts") } }],
+				},
+			],
+			runEphemeralTurn: async () => ({ replyText }),
+		};
+
+		await maybeSync(session, "compaction", { resolveRepo });
+
+		expect(readFileSync(join(dir, "owner-repoA.md"), "utf8")).toContain("Fenced A.");
+		expect(readFileSync(join(dir, "owner-repoB.md"), "utf8")).toContain("Fenced B.");
+	});
+
+	it("multi-repo: '..' and absolute paths outside workspaceRoot are rejected, never reaching resolveRepo", async () => {
+		const settings = makeSettings({ dir, workspaceRoot: "" });
+		const outsideDir = mkdtempSync(join(tmpdir(), "session-context-sync-outside-"));
+		try {
+			const calls: string[] = [];
+			const resolveRepo = async (cwd: string) => {
+				calls.push(cwd);
+				throw new Error(`not a checkout: ${cwd}`);
+			};
+			const command = `cd ../../etc && cat ${outsideDir}/secret.txt`;
+
+			const session: SessionContextSyncSession = {
+				cwd: dir,
+				sessionId: "multi-outside-root",
+				settings: { getGroup: () => settings },
+				messages: [{ role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command } }] }],
+				runEphemeralTurn: async () => ({ replyText: "# fallback — status ledger\nbody\n" }),
+			};
+
+			await maybeSync(session, "compaction", { resolveRepo });
+
+			// Only the single-repo check on `session.cwd` runs — the `..` escape
+			// and the absolute path outside `workspaceRoot` never surface as
+			// touched dirs.
+			expect(calls).toEqual([dir]);
+			expect(existsSync(join(dir, `${basename(dir)}.md`))).toBe(true);
+		} finally {
+			rmSync(outsideDir, { recursive: true, force: true });
+		}
+	});
+
+	it("multi-repo: two dirs resolving to the same slug dedupe to a single ledger write", async () => {
+		const settings = makeSettings({ dir, workspaceRoot: "" });
+		const cloneA = join(dir, "repoA-clone1");
+		const cloneB = join(dir, "repoA-clone2");
+		mkdirSync(cloneA, { recursive: true });
+		mkdirSync(cloneB, { recursive: true });
+
+		const resolveRepo = async (cwd: string) => {
+			if (cwd === cloneA || cwd === cloneB) return "owner/repoA";
+			throw new Error(`not a checkout: ${cwd}`);
+		};
+
+		let turnCalls = 0;
+		const session: SessionContextSyncSession = {
+			cwd: dir,
+			sessionId: "multi-dedupe",
+			settings: { getGroup: () => settings },
+			messages: [
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(cloneA, "a.ts") } }],
+				},
+				{
+					role: "assistant",
+					content: [{ type: "toolCall", name: "edit", arguments: { path: join(cloneB, "b.ts") } }],
+				},
+			],
+			runEphemeralTurn: async () => {
+				turnCalls++;
+				return { replyText: "# owner/repoA — status ledger\n\n## Current state\nDeduped." };
+			},
+		};
+
+		await maybeSync(session, "compaction", { resolveRepo });
+
+		expect(turnCalls).toBe(1);
+		expect(readFileSync(join(dir, "owner-repoA.md"), "utf8")).toContain("Deduped.");
+	});
+
+	it("multi-repo: a ~/-prefixed tool path is tilde-expanded and detected under workspaceRoot", async () => {
+		// workspaceRoot must live under HOME so a `~/…` path resolves into it.
+		const wsRoot = mkdtempSync(join(homedir(), ".sctest-ws-"));
+		try {
+			const repoDir = join(wsRoot, "repoA");
+			mkdirSync(repoDir, { recursive: true });
+			const settings = makeSettings({ dir, workspaceRoot: wsRoot });
+			const resolveRepo = async (cwd: string) => {
+				if (cwd === repoDir) return "owner/repoA";
+				throw new Error(`not a checkout: ${cwd}`);
+			};
+			const command = `cd ~/${basename(wsRoot)}/repoA && git status`;
+			const session: SessionContextSyncSession = {
+				cwd: dir,
+				sessionId: "multi-tilde",
+				settings: { getGroup: () => settings },
+				messages: [{ role: "assistant", content: [{ type: "toolCall", name: "bash", arguments: { command } }] }],
+				runEphemeralTurn: async () => ({ replyText: "# owner/repoA — status ledger\n\n## Current state\nTilde." }),
+			};
+
+			await maybeSync(session, "compaction", { resolveRepo });
+
+			expect(readFileSync(join(dir, "owner-repoA.md"), "utf8")).toContain("Tilde.");
+		} finally {
+			rmSync(wsRoot, { recursive: true, force: true });
+		}
 	});
 });
