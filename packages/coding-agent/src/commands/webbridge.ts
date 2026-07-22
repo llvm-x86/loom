@@ -26,6 +26,8 @@ import { logger } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
 import {
+	ensureBrowserOpen,
+	formatBrowserOpenResult,
 	formatHealth,
 	formatInstallReport,
 	formatStartResult,
@@ -68,6 +70,12 @@ export default class WebBridge extends Command {
 		}),
 		system: Flags.boolean({ description: "install/uninstall: use the machine-wide policy store (needs elevation)" }),
 		launch: Flags.boolean({ description: "install: launch the browser afterward to apply the policy" }),
+		open: Flags.boolean({
+			description:
+				"start: open + focus your browser afterward so the extension connects (default on; --no-open to skip)",
+			allowNo: true,
+			default: true,
+		}),
 	};
 
 	static examples = [
@@ -96,7 +104,7 @@ export default class WebBridge extends Command {
 			case "serve":
 				return this.#serve(port);
 			case "start":
-				return this.#start(port);
+				return this.#start(port, flags.open);
 			case "stop":
 				return this.#stop();
 			case "status":
@@ -161,8 +169,11 @@ export default class WebBridge extends Command {
 		await serveDaemon(port);
 	}
 
-	async #start(port: number): Promise<void> {
+	async #start(port: number, open: boolean): Promise<void> {
 		process.stdout.write(`${formatStartResult(await startDaemon(port))}\n`);
+		if (open) {
+			process.stdout.write(`${formatBrowserOpenResult(await ensureBrowserOpen(port))}\n`);
+		}
 	}
 
 	async #stop(): Promise<void> {

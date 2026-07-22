@@ -1,5 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import {
+	type BrowserOpenResult,
+	formatBrowserOpenResult,
 	formatHealth,
 	formatInstallReport,
 	formatStartResult,
@@ -133,5 +135,40 @@ describe("formatUninstallReport", () => {
 			],
 		};
 		expect(formatUninstallReport(report)).toContain("chrome");
+	});
+});
+
+describe("formatBrowserOpenResult", () => {
+	it("reports focusing an already-open browser", () => {
+		expect(formatBrowserOpenResult({ connected: true, launched: false, focused: true })).toContain("already open");
+	});
+
+	it("reports a launched browser that connected", () => {
+		expect(
+			formatBrowserOpenResult({ connected: true, launched: true, focused: true, name: "Google Chrome" }),
+		).toContain("opened Google Chrome");
+	});
+
+	it("surfaces a launch that never connected", () => {
+		const message = "launched Google Chrome but the extension did not connect within 15s";
+		const result: BrowserOpenResult = {
+			connected: false,
+			launched: true,
+			focused: false,
+			name: "Google Chrome",
+			message,
+		};
+		expect(formatBrowserOpenResult(result)).toBe(message);
+	});
+
+	it("reports when no browser could be opened", () => {
+		expect(
+			formatBrowserOpenResult({
+				connected: false,
+				launched: false,
+				focused: false,
+				message: "no Chromium-family browser detected to launch",
+			}),
+		).toContain("no Chromium-family browser");
 	});
 });

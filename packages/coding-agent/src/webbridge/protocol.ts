@@ -48,6 +48,7 @@ export const WEBBRIDGE_ACTIONS = [
 	"screenshot",
 	"list_tabs",
 	"find_tab",
+	"focus",
 	"close_tab",
 	"close_session",
 	"cdp",

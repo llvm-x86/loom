@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs/promises";
+import { ensureBrowserOpen } from "@oh-my-pi/pi-coding-agent/webbridge/control";
 import { WebBridgeDaemon } from "@oh-my-pi/pi-coding-agent/webbridge/daemon";
 
 /**
@@ -123,6 +124,18 @@ describe("WebBridge daemon", () => {
 		const result = await postCommand({ args: {}, session: "s" });
 		expect(result.ok).toBe(false);
 		expect(result.error?.code).toBe("bad_request");
+		ws.close();
+	});
+
+	it("ensureBrowserOpen focuses the window when a browser is already connected", async () => {
+		const seen: string[] = [];
+		const ws = await connectExtension(frame => {
+			seen.push(frame.action);
+			return { focused: true, created: false };
+		});
+		const result = await ensureBrowserOpen(daemon.listenPort);
+		expect(result).toMatchObject({ connected: true, launched: false, focused: true });
+		expect(seen).toContain("focus");
 		ws.close();
 	});
 });
