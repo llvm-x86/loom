@@ -226,6 +226,51 @@ describe("AgentSession auto-compaction queue resume", () => {
 		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
 	});
 
+	it("does not report Context Activity compaction events over the network when sessionContextSync is disabled (default settings)", async () => {
+		// Regression: `sessionContextSync.reportUrl` defaults to a non-empty
+		// localhost URL (per the Context Activity contract) even though
+		// `sessionContextSync.enabled` defaults to false. `#reportContextActivity`
+		// must gate on `enabled`, not just `reportUrl`, or every session
+		// everywhere — opted into Context Activity or not — would POST
+		// compaction telemetry to agent-chat's default endpoint on every
+		// auto-compaction.
+		const fetchSpy = vi.spyOn(globalThis, "fetch");
+
+		const { promise: compactionDone, resolve: onCompactionDone } = Promise.withResolvers<void>();
+		session.subscribe(event => {
+			if (event.type === "auto_compaction_end") onCompactionDone();
+		});
+
+		const assistantMsg = {
+			role: "assistant" as const,
+			content: [{ type: "text" as const, text: "Done." }],
+			api: "anthropic-messages" as const,
+			provider: "anthropic" as const,
+			model: "claude-sonnet-4-5",
+			stopReason: "stop" as const,
+			usage: {
+				input: 190000,
+				output: 1000,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 191000,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			timestamp: Date.now(),
+		};
+
+		session.agent.emitExternalEvent({ type: "message_end", message: assistantMsg });
+		session.agent.emitExternalEvent({ type: "agent_end", messages: [assistantMsg] });
+
+		await compactionDone;
+		await Promise.resolve();
+
+		const runtimeSignals = getRuntimeSignals();
+		expect(runtimeSignals).toContain("compaction:start:threshold");
+		expect(runtimeSignals.some(signal => signal.startsWith("compaction:end:"))).toBe(true);
+		expect(fetchSpy).not.toHaveBeenCalled();
+	});
+
 	it("marks manual compaction active before abort teardown can yield", async () => {
 		session.settings.set("compaction.keepRecentTokens", 1);
 		sessionManager.appendMessage({

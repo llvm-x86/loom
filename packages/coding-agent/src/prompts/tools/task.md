@@ -22,6 +22,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
   - `agent`: The agent type running this item (e.g. `scout`, `reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
   - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+  - `model`: Optional per-subagent model override for this spawn only. Accepts a concrete model pattern (`provider/model-id`, optional `:<thinkingLevel>` suffix, same syntax as agent frontmatter `model:`), a role alias like `@smol`, or an array for an ordered fallback chain. Use it when the user asks for a specific model or when a step needs a different strength/cost profile. Omit to inherit the agent type's configured model.
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
@@ -31,12 +32,16 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
 - `agent`: The agent type to spawn (e.g. `scout`, `reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
 - `task`: Complete, self-contained instructions. One-liners or missing acceptance criteria are PROHIBITED.
+- `model`: Optional per-subagent model override for this spawn only. Accepts a concrete model pattern (`provider/model-id`, optional `:<thinkingLevel>` suffix, same syntax as agent frontmatter `model:`), a role alias like `@smol`, or an array for an ordered fallback chain. Use it when the user asks for a specific model or when a step needs a different strength/cost profile. Omit to inherit the agent type's configured model.
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
 - `isolated`: Run in dedicated worktree, return patches.
 {{/if}}
 {{/if}}
+
+# Model Reproducibility
+Always pin `model` explicitly (per item or top-level) when reproducibility matters: spawned subagent CLIs resolve models independently and do NOT inherit an interactive session's /model selection; ambient resolution can fail with "No model selected" in environments configured only interactively. An explicit model is validated at preflight and fails loudly — never silently substituted.
 
 # Communication
 Subagents start blank — no conversation history.{{#if ircEnabled}} Parent-to-subagent IRC delivered immediately as steering.{{/if}}

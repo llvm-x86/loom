@@ -367,6 +367,11 @@ export const SETTINGS_SCHEMA = {
 	"auth.broker.url": { type: "string", default: undefined },
 	"auth.broker.token": { type: "string", default: undefined },
 
+	// Files whose contents are injected into every session's system prompt at start
+	// (environment briefings, project ledgers). Paths are tilde-expanded; missing
+	// files are skipped with a stderr warning — never fatal.
+	sessionBootstrap: { type: "array", default: EMPTY_STRING_ARRAY },
+
 	autoResume: {
 		type: "boolean",
 		default: false,
@@ -2198,6 +2203,44 @@ export const SETTINGS_SCHEMA = {
 				"Prune tool results flagged contextually useless (no matches, timed-out waits) once consumed (cache-aware)",
 		},
 	},
+
+	// Session context sync — periodically writes a per-repo status ledger
+	// (`<dir>/<slug>.md`) summarizing this session's progress, for continuity
+	// across sessions. No-UI: opt-in via config file, off by default.
+	"sessionContextSync.enabled": { type: "boolean", default: false },
+
+	// Tilde-expanded directory the per-repo ledger files are written to.
+	// Empty string (default) disables the feature even if `enabled` is true.
+	"sessionContextSync.dir": { type: "string", default: "" },
+
+	// Minutes of terminal idle time before an idle-triggered sync fires.
+	"sessionContextSync.idleMinutes": { type: "number", default: 10 },
+
+	// Debounce between syncs triggered by compaction/idle; a `shutdown` sync
+	// always runs regardless of this interval.
+	"sessionContextSync.minIntervalSeconds": { type: "number", default: 120 },
+
+	// Multi-repo mode: container dir under which repos live (e.g. "~/workspace").
+	// When the session cwd is this container rather than a checkout, the
+	// transcript is scanned for the repos actually worked in and each gets its
+	// own ledger. Empty (default) → use the session cwd as the container.
+	"sessionContextSync.workspaceRoot": { type: "string", default: "" },
+
+	// Shutdown handoff (Context Activity): dir loom writes an out-of-band spool
+	// record to on real session dispose instead of blocking on the LLM ledger
+	// turn. Empty (default) disables the handoff — shutdown sync stays inline
+	// and awaited, same as before.
+	"sessionContextSync.spoolDir": { type: "string", default: "" },
+
+	// Pause/throttle control JSON file (`{paused: bool, ...}`), the source of
+	// truth for the global kill switch. Read before spending tokens on any
+	// sync; a missing/unreadable/malformed file is treated as not-paused.
+	// Empty (default) disables the gate.
+	"sessionContextSync.controlFile": { type: "string", default: "" },
+
+	// Context Activity event-ingest base URL. Fire-and-forget POST of every
+	// sync/compaction start/done/skip/fail. Empty disables reporting.
+	"sessionContextSync.reportUrl": { type: "string", default: "http://127.0.0.1:8811" },
 
 	// Experimental: snapcompact inline imaging (transient, per-request; never persisted)
 	"snapcompact.systemPrompt": {
@@ -5354,6 +5397,17 @@ export interface GcSettings {
 	retainNewestPerCwd: number;
 }
 
+export interface SessionContextSyncSettings {
+	enabled: boolean;
+	dir: string;
+	idleMinutes: number;
+	minIntervalSeconds: number;
+	workspaceRoot: string;
+	spoolDir: string;
+	controlFile: string;
+	reportUrl: string;
+}
+
 /** Map group prefix -> typed settings interface */
 export interface GroupTypeMap {
 	compaction: CompactionSettings;
@@ -5376,6 +5430,7 @@ export interface GroupTypeMap {
 	shellMinimizer: ShellMinimizerSettings;
 	codexResets: CodexResetsSettings;
 	gc: GcSettings;
+	sessionContextSync: SessionContextSyncSettings;
 }
 
 export type GroupPrefix = keyof GroupTypeMap;

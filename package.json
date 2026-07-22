@@ -1,5 +1,5 @@
 {
-  "name": "omp",
+  "name": "loom",
   "homepage": "https://omp.sh",
   "private": true,
   "type": "module",

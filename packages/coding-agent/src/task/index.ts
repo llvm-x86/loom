@@ -48,6 +48,7 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
+import { appendSpawnErrorGuidance } from "./spawn-error-guidance";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -232,6 +233,17 @@ function validateShapeParams(batchEnabled: boolean, params: TaskParams): string 
 function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string | undefined {
 	const hasTask = typeof params.task === "string" && params.task.trim() !== "";
 	const tasks = params.tasks;
+	const modelProblem = (value: unknown, where: string): string | undefined => {
+		if (value === undefined) return undefined;
+		const valid =
+			(typeof value === "string" && value.trim() !== "") ||
+			(Array.isArray(value) && value.length > 0 && value.every(v => typeof v === "string" && v.trim() !== ""));
+		return valid
+			? undefined
+			: `Invalid \`model\` for ${where}. Provide a non-empty model pattern string ("provider/model-id", optionally with a :thinking suffix, or a role alias like "@smol"), or a non-empty array of them.`;
+	};
+	const topLevelModelError = modelProblem(params.model, "this call");
+	if (topLevelModelError) return topLevelModelError;
 	if (batchEnabled && tasks !== undefined) {
 		if (!Array.isArray(tasks) || tasks.length === 0) {
 			return "Missing `tasks`. Provide at least one task item ({ name?, agent?, task }).";
@@ -241,6 +253,8 @@ function validateSpawnParams(params: TaskParams, batchEnabled: boolean): string 
 		}
 		for (let i = 0; i < tasks.length; i++) {
 			const item = tasks[i];
+			const itemModelError = modelProblem(item?.model, `task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""}`);
+			if (itemModelError) return itemModelError;
 			if (!item || typeof item.task !== "string" || item.task.trim() === "") {
 				return `Task ${i + 1}${item?.name ? ` (\`${item.name}\`)` : ""} is missing \`task\`. Every task needs complete, self-contained instructions.`;
 			}
@@ -280,6 +294,7 @@ function resolveSpawnItems(params: TaskParams): TaskItem[] {
 		return params.tasks;
 	}
 	const item: TaskItem = { name: params.name, agent: params.agent, task: params.task };
+	if ("model" in params) item.model = params.model;
 	if ("outputSchema" in params) item.outputSchema = params.outputSchema;
 	if ("schemaMode" in params) item.schemaMode = params.schemaMode;
 	if ("isolated" in params) item.isolated = params.isolated;
@@ -302,6 +317,11 @@ function spawnParamsFor(params: TaskParams, item: TaskItem, defaultAgent: string
 	if (params.context !== undefined) spawn.context = params.context;
 	if ("outputSchema" in item) spawn.outputSchema = item.outputSchema;
 	if ("schemaMode" in item) spawn.schemaMode = item.schemaMode;
+	if (item.model !== undefined) {
+		spawn.model = item.model;
+	} else if ("model" in params) {
+		spawn.model = params.model;
+	}
 	if (item.isolated !== undefined) {
 		spawn.isolated = item.isolated;
 	} else if ("isolated" in params) {
@@ -601,6 +621,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 			assignment: (params.task ?? "").trim(),
 			context: this.#isBatchEnabled() ? params.context?.trim() || undefined : undefined,
 			agent: params.agent,
+			...(params.model !== undefined ? { model: params.model } : {}),
 			...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 			...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 			...("isolated" in params ? { isolation: { requested: params.isolated } } : {}),
@@ -1372,6 +1393,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				assignment,
 				context,
 				agent: params.agent,
+				...(params.model !== undefined ? { model: params.model } : {}),
 				...(Object.hasOwn(params, "outputSchema") ? { outputSchema: params.outputSchema } : {}),
 				...(Object.hasOwn(params, "schemaMode") ? { schemaMode: params.schemaMode } : {}),
 				identity: { id: preAllocatedId, label: params.name },
@@ -1465,9 +1487,10 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				: undefined,
 			mergeSummary,
 		});
+		const text = appendSpawnErrorGuidance(summary, result);
 
 		return {
-			content: [{ type: "text", text: summary }],
+			content: [{ type: "text", text }],
 			details: {
 				projectAgentsDir,
 				results: [result],

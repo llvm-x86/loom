@@ -7,9 +7,10 @@ import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
 import { CollabHost } from "../collab/host";
+import type { ModelRegistry } from "../config/model-registry";
 import { expandRoleAlias, getModelMatchPreferences, resolveCliModel } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
-import type { SettingPath, SettingValue } from "../config/settings";
+import type { SettingPath, Settings, SettingValue } from "../config/settings";
 import { settings } from "../config/settings";
 import {
 	clearPluginRootsAndCaches,
@@ -385,12 +386,41 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 	{
 		name: "switch",
 		description: "Switch model for this session (same as alt+p)",
+		inlineHint: "[model]",
+		allowArgs: true,
 		getTuiAutocompleteDescription: runtime => {
 			const model = runtime.ctx.session.model;
 			return model ? `Model: ${model.provider}/${model.id}` : "Model: none selected";
 		},
-		handleTui: (_command, runtime) => {
-			runtime.ctx.showModelSelector({ temporaryOnly: true });
+		handleTui: async (command, runtime) => {
+			const arg = command.args.trim();
+			if (!arg) {
+				runtime.ctx.showModelSelector({ temporaryOnly: true });
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const cliModel = arg.startsWith("@") ? expandRoleAlias(arg, runtime.ctx.settings) : arg;
+			const resolved = resolveCliModel({
+				cliModel,
+				modelRegistry: runtime.ctx.session.modelRegistry,
+				preferences: getModelMatchPreferences(runtime.ctx.settings),
+			});
+			if (resolved.error || !resolved.model) {
+				runtime.ctx.showStatus(resolved.error ?? `Model "${arg}" not found`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const model = resolved.model;
+			if (!runtime.ctx.session.modelRegistry.hasConfiguredAuth(model)) {
+				runtime.ctx.showStatus(`No API key for ${model.provider}/${model.id}`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const thinking = resolved.thinkingLevel ?? runtime.ctx.session.resolveTemporaryModelThinkingLevel(model);
+			await runtime.ctx.session.setModelTemporary(model, thinking);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.updateEditorBorderColor();
+			runtime.ctx.showStatus(`Switched to ${model.provider}/${model.id}`);
 			runtime.ctx.editor.setText("");
 		},
 	},
@@ -2507,6 +2537,41 @@ function buildDirectoryCompletionDisplayValue(prefix: string, absoluteValue: str
 	return `${relative.replaceAll("\\", "/")}/`;
 }
 
+const MODEL_COMPLETION_LIMIT = 50;
+
+/**
+ * Build getArgumentCompletions for `/switch <model>`: matches the argument
+ * prefix against each available model's `provider/id` and display name.
+ * startsWith matches rank ahead of substring matches, then alphabetical.
+ * The `value` is the exact `provider/id` token the handler resolves.
+ */
+export function buildModelArgumentCompletions(
+	modelRegistry: Pick<ModelRegistry, "getAvailable">,
+	_settings?: Settings,
+): (prefix: string) => AutocompleteItem[] | null {
+	return (argumentPrefix: string) => {
+		if (argumentPrefix.includes(" ")) return null; // past the model token
+		const query = argumentPrefix.trim().replace(/^@/, "").toLowerCase();
+		const prefixMatches: AutocompleteItem[] = [];
+		const substringMatches: AutocompleteItem[] = [];
+		for (const model of modelRegistry.getAvailable()) {
+			const value = `${model.provider}/${model.id}`;
+			const valueLower = value.toLowerCase();
+			const nameLower = model.name.toLowerCase();
+			if (query.length > 0 && !valueLower.includes(query) && !nameLower.includes(query)) continue;
+			const item: AutocompleteItem = { value, label: value, description: model.name };
+			if (query.length > 0 && (valueLower.startsWith(query) || nameLower.startsWith(query))) {
+				prefixMatches.push(item);
+			} else {
+				substringMatches.push(item);
+			}
+		}
+		prefixMatches.sort((a, b) => a.label.localeCompare(b.label));
+		substringMatches.sort((a, b) => a.label.localeCompare(b.label));
+		return [...prefixMatches, ...substringMatches].slice(0, MODEL_COMPLETION_LIMIT);
+	};
+}
+
 /** Builtin command metadata used for slash-command autocomplete and help text. */
 export const BUILTIN_SLASH_COMMAND_DEFS: ReadonlyArray<BuiltinSlashCommand> = BUILTIN_SLASH_COMMAND_REGISTRY.map(
 	command => ({
@@ -2530,6 +2595,12 @@ function materializeTuiBuiltinSlashCommand(
 		materialized.getInlineHint = buildSubcommandInlineHint(cmd.subcommands);
 	} else if (cmd.name === "move") {
 		materialized.getArgumentCompletions = buildDirectoryArgumentCompletions();
+		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
+	} else if (cmd.name === "switch" && runtime) {
+		materialized.getArgumentCompletions = buildModelArgumentCompletions(
+			runtime.ctx.session.modelRegistry,
+			runtime.ctx.settings,
+		);
 		if (cmd.inlineHint) materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);
 	} else if (cmd.inlineHint) {
 		materialized.getInlineHint = buildStaticInlineHint(cmd.inlineHint);

@@ -56,6 +56,12 @@ declare module "*.generated.js" {
 	export default content;
 }
 
+// WebBridge MV3 extension source, embedded as text (coding-agent src/webbridge).
+declare module "*/ext/background.js" {
+	const content: string;
+	export default content;
+}
+
 // turndown-plugin-gfm has no published types
 declare module "turndown-plugin-gfm" {
 	import type TurndownService from "turndown";

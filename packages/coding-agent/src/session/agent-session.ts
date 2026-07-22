@@ -122,6 +122,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { isOAuthToken } from "@oh-my-pi/pi-ai/utils/anthropic-auth";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
@@ -339,12 +340,20 @@ import { ToolAbortError, ToolError } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
 import { isMountableUnderXdev, type XdevRegistry } from "../tools/xdev";
 import { parseCommandArgs } from "../utils/command-args";
+import { type ContextActivityEvent, reportContextActivity } from "../utils/context-activity-reporter";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
 import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
 import { formatLocalCalendarDate } from "../utils/local-date";
+import {
+	type ContextSyncSpoolRequest,
+	detectTouchedRepos,
+	maybeSync as maybeSyncSessionContext,
+	type SessionContextSyncSession,
+	writeSpoolRecordAtomically,
+} from "../utils/session-context-sync";
 import { generateSessionTitle } from "../utils/title-generator";
 import { buildNamedToolChoice, isToolChoiceActive } from "../utils/tool-choice";
 import type { VibeModeState } from "../vibe/state";
@@ -1055,6 +1064,13 @@ export interface AgentSessionConfig {
 	 * cwd change via {@link AgentSession.setTitleSystemPrompt}.
 	 */
 	titleSystemPrompt?: string;
+	/**
+	 * Internal: set by the `loom sync-context` CLI subcommand on its own
+	 * out-of-band session. Recursion guard — dispose neither arms the idle
+	 * context-sync timer nor writes another shutdown spool, since the CLI
+	 * already ran the one-shot sync itself before disposing.
+	 */
+	syncContextCliMode?: boolean;
 }
 
 /** Options for AgentSession.prompt() */
@@ -2028,6 +2044,12 @@ export class AgentSession {
 	#autolearnCaptureAbortController: AbortController | undefined;
 	#autolearnCaptureTask: Promise<void> | undefined;
 	#isDisposed = false;
+	/** Armed after each turn settles; fires `sessionContextSync`'s idle sync. Cleared on new activity/dispose. */
+	#sessionContextSyncIdleTimer: NodeJS.Timeout | undefined;
+	/** Recursion guard set by the `loom sync-context` CLI subcommand; see {@link AgentSessionConfig.syncContextCliMode}. */
+	#syncContextCliMode = false;
+	/** Correlates the `compaction` Context Activity `start` event with its terminal `done`/`fail`. */
+	#compactionActivityId: string | undefined;
 	// Extension system
 	#extensionRunner: ExtensionRunner | undefined = undefined;
 	/**
@@ -2207,7 +2229,7 @@ export class AgentSession {
 		if (mode === "off") return;
 		try {
 			this.#powerAssertion = MacOSPowerAssertion.start({
-				reason: "Oh My Pi agent session",
+				reason: "Loom agent session",
 				idle: true,
 				display: mode === "display" || mode === "system",
 				system: mode === "system",
@@ -2234,6 +2256,7 @@ export class AgentSession {
 		if (this.#promptInFlightCount === 1) {
 			this.#acquirePowerAssertion();
 		}
+		this.#clearSessionContextSyncIdleTimer();
 	}
 
 	#endInFlight(): void {
@@ -2242,7 +2265,90 @@ export class AgentSession {
 			this.#releasePowerAssertion();
 			this.#flushPendingAgentEnd();
 			this.#drainStrandedQueuedMessages();
+			this.#armSessionContextSyncIdleTimer();
 		}
+	}
+
+	/** Duck-typed view of this session for `sessionContextSync`, kept narrow for testability. */
+	#sessionContextSyncHandle(): SessionContextSyncSession {
+		return {
+			cwd: this.sessionManager.getCwd(),
+			sessionId: this.sessionId,
+			sessionLabel: this.sessionName,
+			transcriptPath: this.sessionManager.getSessionFile(),
+			settings: this.settings,
+			messages: this.messages,
+			runEphemeralTurn: args => this.runEphemeralTurn(args),
+		};
+	}
+
+	/** Fire-and-forget Context Activity event, stamped with this session's identity. */
+	#reportContextActivity(
+		partial: Omit<ContextActivityEvent, "session_id" | "session_label" | "transcript_path" | "ts">,
+	): void {
+		// Gated on `enabled` (not just `reportUrl`, which defaults non-empty per
+		// the locked contract): compaction is far more frequent than idle/shutdown
+		// syncs, and reporting it unconditionally would defeat this feature's
+		// documented opt-in invariant by POSTing telemetry for every session,
+		// everywhere, whether or not it ever configured sessionContextSync.
+		const settings = this.settings.getGroup("sessionContextSync");
+		if (!settings.enabled || !settings.reportUrl) return;
+		reportContextActivity(
+			{
+				...partial,
+				session_id: this.sessionId,
+				session_label: this.sessionName,
+				transcript_path: this.sessionManager.getSessionFile(),
+				ts: Date.now(),
+			},
+			settings.reportUrl,
+		);
+	}
+
+	/**
+	 * Shutdown handoff: instead of blocking dispose on the LLM ledger turn,
+	 * run the cheap LLM-free repo detection inline and atomically spool a
+	 * request for agent-chat's out-of-band worker (`loom sync-context`) to
+	 * pick up later. Never throws — a spool-write failure just falls through
+	 * to dispose completing normally (the ledger update is lost, same as any
+	 * other `maybeSync` failure today).
+	 */
+	async #writeContextSyncShutdownSpool(spoolDir: string): Promise<void> {
+		const settings = this.settings.getGroup("sessionContextSync");
+		if (!settings.enabled || !settings.dir) return;
+		const transcriptPath = this.sessionManager.getSessionFile();
+		if (!transcriptPath) return; // Unsaved session — nothing to hand off.
+		const repos = await detectTouchedRepos(this.#sessionContextSyncHandle(), settings);
+		const record: ContextSyncSpoolRequest = {
+			sessionId: this.sessionId,
+			transcriptPath,
+			reason: "shutdown",
+			ledgerDir: settings.dir,
+			controlFile: settings.controlFile,
+			repos,
+			cwd: this.sessionManager.getCwd(),
+			createdAt: new Date().toISOString(),
+		};
+		await writeSpoolRecordAtomically(spoolDir, record);
+	}
+
+	#clearSessionContextSyncIdleTimer(): void {
+		if (this.#sessionContextSyncIdleTimer) {
+			clearTimeout(this.#sessionContextSyncIdleTimer);
+			this.#sessionContextSyncIdleTimer = undefined;
+		}
+	}
+
+	#armSessionContextSyncIdleTimer(): void {
+		if (this.#isDisposed || this.#syncContextCliMode) return;
+		const idleMinutes = this.settings.getGroup("sessionContextSync").idleMinutes;
+		const timer = setTimeout(() => {
+			this.#sessionContextSyncIdleTimer = undefined;
+			if (this.#isDisposed || this.isCompacting || this.isStreaming) return;
+			void maybeSyncSessionContext(this.#sessionContextSyncHandle(), "idle");
+		}, Math.max(1, idleMinutes) * 60_000);
+		timer.unref?.();
+		this.#sessionContextSyncIdleTimer = timer;
 	}
 
 	/** A steer/follow-up can land after the agent loop's final queue poll, or
@@ -2665,6 +2771,7 @@ export class AgentSession {
 		};
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
+		this.#syncContextCliMode = config.syncContextCliMode === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
 		this.#parentEvalSessionId = config.parentEvalSessionId;
@@ -4192,6 +4299,9 @@ export class AgentSession {
 			this.#emit(event);
 			void this.#queueExtensionEvent(event);
 			return;
+		}
+		if (event.type === "auto_compaction_end" && !event.aborted && event.result) {
+			void maybeSyncSessionContext(this.#sessionContextSyncHandle(), "compaction");
 		}
 		// Take a FIFO ticket before the extension emit: extension deliveries for
 		// consecutive events still run concurrently, but subscriber fan-out waits
@@ -6503,12 +6613,28 @@ export class AgentSession {
 			};
 			await this.#extensionRunner.emit(extensionEvent);
 		} else if (event.type === "auto_compaction_start") {
+			this.#compactionActivityId = Bun.randomUUIDv7();
+			this.#reportContextActivity({
+				id: this.#compactionActivityId,
+				kind: "compaction",
+				phase: "start",
+				trigger: "compaction",
+			});
 			await this.#extensionRunner.emit({
 				type: "auto_compaction_start",
 				reason: event.reason,
 				action: event.action,
 			});
 		} else if (event.type === "auto_compaction_end") {
+			const compactionActivityId = this.#compactionActivityId ?? Bun.randomUUIDv7();
+			this.#compactionActivityId = undefined;
+			this.#reportContextActivity({
+				id: compactionActivityId,
+				kind: "compaction",
+				phase: event.aborted ? "fail" : "done",
+				trigger: "compaction",
+				error: event.aborted ? (event.errorMessage ?? "compaction aborted") : undefined,
+			});
 			await this.#extensionRunner.emit({
 				type: "auto_compaction_end",
 				action: event.action,
@@ -6763,6 +6889,7 @@ export class AgentSession {
 		this.agent.hasIrcInterrupts = undefined;
 		this.#stopAdvisorRuntime();
 		this.#evalExecutionDisposing = true;
+		this.#clearSessionContextSyncIdleTimer();
 	}
 
 	/**
@@ -6869,6 +6996,30 @@ export class AgentSession {
 			}
 		} catch (error) {
 			logger.warn("Failed to emit session_shutdown event", { error: String(error) });
+		}
+		try {
+			if (this.#syncContextCliMode) {
+				// `loom sync-context` already ran the one-shot sync itself before
+				// calling dispose; spooling here would recurse forever.
+			} else {
+				const spoolDir = this.settings.getGroup("sessionContextSync").spoolDir;
+				if (spoolDir) {
+					await this.#writeContextSyncShutdownSpool(spoolDir);
+				} else {
+					await withTimeout(
+						maybeSyncSessionContext(this.#sessionContextSyncHandle(), "shutdown"),
+						// Ceiling only (returns as soon as the sync finishes). Multi-repo
+						// shutdown syncs run one ephemeral turn per touched repo and
+						// providers often serialize them, so allow enough headroom for a
+						// few sequential turns; single-repo (the common case) returns in
+						// one turn's time. Idle/compaction syncs are uncapped.
+						60_000,
+						"Timed out syncing session context during dispose",
+					);
+				}
+			}
+		} catch (error) {
+			logger.warn("Failed to sync session context during dispose", { error: String(error) });
 		}
 
 		// Stop extension timers before aborting deferred work they could enqueue.
@@ -11184,6 +11335,7 @@ export class AgentSession {
 				details,
 				preserveData,
 			};
+			void maybeSyncSessionContext(this.#sessionContextSyncHandle(), "compaction");
 			options?.onComplete?.(compactionResult);
 			return compactionResult;
 		} catch (error) {
@@ -13267,10 +13419,11 @@ export class AgentSession {
 		availableModels: Model[],
 		filter?: (model: Model) => boolean,
 	): Model[] {
-		const candidates: Model[] = [];
+		const primary: Model[] = [];
+		const deferred: Model[] = [];
 		const seen = new Set<string>();
 
-		const addCandidate = (model: Model | undefined): void => {
+		const addCandidate = (model: Model | undefined, options?: { exemptFromDefer?: boolean }): void => {
 			if (!model) return;
 			const key = this.#getModelKey(model);
 			if (seen.has(key)) return;
@@ -13279,11 +13432,21 @@ export class AgentSession {
 			// scan below doesn't reintroduce them; the filter just suppresses
 			// inclusion in this caller's candidate chain.
 			if (filter && !filter(model)) return;
-			candidates.push(model);
+			// Reverse-engineered anthropic (Claude Code OAuth framing) can't run a
+			// reliable local compaction summary, so defer it behind every other
+			// enabled model. An explicitly configured compactionModel target is the
+			// user's deliberate routing choice and stays primary.
+			if (!options?.exemptFromDefer && this.#usesClaudeCodeOAuthFraming(model)) {
+				deferred.push(model);
+				return;
+			}
+			primary.push(model);
 		};
 
 		if (preferredModel) {
-			addCandidate(this.#resolveCompactionConfiguredTarget(preferredModel, availableModels));
+			addCandidate(this.#resolveCompactionConfiguredTarget(preferredModel, availableModels), {
+				exemptFromDefer: true,
+			});
 		}
 		addCandidate(preferredModel ?? undefined);
 		for (const role of MODEL_ROLE_IDS) {
@@ -13298,7 +13461,21 @@ export class AgentSession {
 			}
 		}
 
-		return candidates;
+		return [...primary, ...deferred];
+	}
+
+	/**
+	 * Whether a compaction candidate would be sent through the reverse-engineered
+	 * Claude Code OAuth request shape (anthropic-messages + an `sk-ant-oat` token,
+	 * or a model that explicitly forces `isOAuth`). That framing cannot run a
+	 * reliable local summarization turn, so {@link #resolveCompactionModelCandidates}
+	 * routes compaction to any other enabled model first.
+	 */
+	#usesClaudeCodeOAuthFraming(model: Model): boolean {
+		if (model.api !== "anthropic-messages") return false;
+		if (model.isOAuth === true) return true;
+		const credential = this.#modelRegistry.authStorage.getOAuthCredential(model.provider);
+		return credential !== undefined && isOAuthToken(credential.access);
 	}
 
 	#buildCompactionAuthError(): Error {
