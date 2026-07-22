@@ -1,14 +1,20 @@
 ---
 name: loom-webbridge
-description: Loom WebBridge lets loom drive the user's real local browser (their actual login sessions) via a loopback HTTP daemon plus a Chrome/Edge extension. Use this skill whenever the user wants to interact with websites, automate browser tasks, scrape content behind a login, take screenshots, or perform any action needing a real logged-in browser. Also use when the user mentions "browser", "webpage", "open URL", "screenshot", or asks to read/interact with a site using their own session. Prefer this over the built-in headless browser tool when real login state is required.
+description: Loom's own bridge to the user's REAL local browser (their actual login sessions) via a loopback HTTP daemon on port 10088 plus a Chrome/Edge/Brave extension. Use this skill for ANY real-browser task — navigate, click, type, read, screenshot, scrape behind a login, or interact with a site using the user's own session. Also use when the user mentions "browser", "webpage", "open URL", "screenshot", or asks to read/interact with a site. This is the authoritative browser skill for loom; prefer it over the built-in headless browser tool when real login state matters, and over any other webbridge-style skill.
 ---
 
 # Loom WebBridge
 
 Drive the user's real browser from loom. A local daemon exposes a loopback HTTP
-endpoint; a companion MV3 browser extension executes each command against the
-live browser using `chrome.*` APIs (tabs / scripting / debugger). Because it is
-the user's actual browser, their existing logins, cookies, and sessions apply.
+endpoint on **port 10088**; a companion MV3 browser extension executes each
+command against the live browser using `chrome.*` APIs (tabs / scripting /
+debugger). Because it is the user's actual browser, their existing logins,
+cookies, and sessions apply.
+
+> **This is loom's bridge — always use port 10088.** If a separate
+> `kimi-webbridge` (or any other browser) skill is also installed, ignore it:
+> it targets a different daemon (Kimi uses port 10086) and is unrelated to
+> loom. Every request below MUST go to `http://127.0.0.1:10088`.
 
 ## One-time setup
 
@@ -22,8 +28,9 @@ the user's actual browser, their existing logins, cookies, and sessions apply.
      and prints manual **Load unpacked** steps (Developer mode).
    - `--system` forces the machine-wide store on Windows/macOS too (needs elevation).
    - `loom webbridge uninstall` removes the force-install policy.
-2. `loom webbridge start` — launches the daemon in the background (port 10088;
-   override with `LOOM_WEBBRIDGE_PORT` or `--port`).
+2. `loom webbridge start` — launches the daemon in the background and opens (or
+   focuses) your browser so the extension connects (port 10088; override with
+   `LOOM_WEBBRIDGE_PORT` or `--port`; `--no-open` skips opening the browser).
 3. `loom webbridge status` — confirm `browser extension: connected`.
 
 ## Managing the bridge from inside a loom session
@@ -34,17 +41,12 @@ leaving the session:
 
 - `/webbridge status` — daemon + extension health (default when no subcommand
   is given).
-- `/webbridge start` — start the background daemon.
+- `/webbridge start` — start the daemon and open/focus the browser.
 - `/webbridge stop` — stop the background daemon.
 - `/webbridge install` — force-install the extension into every detected
   Chromium-family browser. It tries passwordless `sudo -n`; if a password is
-  needed it prints paste-able `sudo` commands instead, since the TUI can't
-  host a password prompt — run `loom webbridge install` in a shell to enter
-  the password interactively.
+  needed it prompts inline (interactive sudo).
 - `/webbridge uninstall` — remove the force-install policy.
-
-Behavior is identical to the CLI; the only difference is that the CLI can
-prompt for a sudo password interactively.
 
 ## Wire protocol
 
@@ -74,6 +76,7 @@ Single-tab actions target the session's current tab — `navigate` first.
 | `find_tab` | `query`, `activate?` | `{matched, tabs}` — sets current tab to first match |
 | `close_tab` | `tabId?` | `{success}` |
 | `close_session` | — | `{success}` — closes every tab in the session |
+| `focus` | — | `{focused, windowId}` — raise the browser window |
 | `cdp` | `method`, `params?` | `{result}` — raw Chrome DevTools Protocol escape hatch |
 
 **Selectors:** a CSS selector, or `@eN` to target the element with snapshot
@@ -81,7 +84,8 @@ Single-tab actions target the session's current tab — `navigate` first.
 
 ## Usage from the shell
 
-The daemon is plain HTTP — use `curl`, or the convenience verb:
+The daemon is plain HTTP — use `curl` against **port 10088**, or the
+convenience verb:
 
 ```
 loom webbridge call navigate --args '{"url":"github.com/notifications"}'
@@ -98,8 +102,9 @@ anything unsupported.
 ## Notes
 
 - `evaluate`/`cdp` attach the Chrome debugger to the tab, which shows a browser
-  banner — expected, same as Kimi WebBridge.
-- Runs on a different port (10088) than Kimi (10086), so both can coexist.
+  banner — expected.
+- Runs on port 10088 (Kimi's bridge, if present, is a different daemon on
+  10086 — do not use it).
 - If a command returns `extension_not_connected`, the extension is not loaded or
   the daemon is down — check `loom webbridge status` (or `/webbridge status`
   inside a session).

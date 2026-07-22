@@ -9,7 +9,7 @@
 import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getConfigRootDir } from "@oh-my-pi/pi-utils";
+import { getAgentDir, getConfigRootDir } from "@oh-my-pi/pi-utils";
 import { isDaemonRunning, WebBridgeDaemon } from "./daemon";
 import { installWebBridgeExtension } from "./ext-assets";
 import { ensureSigningKey, writeCrxArtifacts } from "./install/crx";
@@ -17,6 +17,7 @@ import { detectBrowsers, familyDisplayName } from "./install/detect";
 import { installForcePolicy, removeForcePolicy } from "./install/policy";
 import { BROWSER_FAMILIES, type BrowserFamily, type PolicyResult } from "./install/types";
 import { WEBBRIDGE_HOST } from "./protocol";
+import loomWebBridgeSkill from "./skill/SKILL.md" with { type: "text" };
 
 /** `~/.omp/webbridge` — home for the extension, CRX artifacts, pid file, and daemon log. */
 export function webBridgeDir(): string {
@@ -25,6 +26,19 @@ export function webBridgeDir(): string {
 
 export function pidFilePath(): string {
 	return path.join(webBridgeDir(), "daemon.pid");
+}
+
+/**
+ * Install the loom-webbridge skill into the user skills dir so ANY loom session
+ * (not just one run inside the repo) discovers it and drives the real browser
+ * via port 10088 — instead of falling back to an unrelated browser skill.
+ */
+export async function installWebBridgeSkill(): Promise<string> {
+	const skillDir = path.join(getAgentDir(), "skills", "loom-webbridge");
+	await fs.mkdir(skillDir, { recursive: true });
+	const skillPath = path.join(skillDir, "SKILL.md");
+	await fs.writeFile(skillPath, loomWebBridgeSkill, "utf8");
+	return skillPath;
 }
 
 // ---------------------------------------------------------------------------
@@ -253,6 +267,7 @@ export interface InstallReport {
 export async function installWebBridge(opts: InstallOptions): Promise<InstallReport> {
 	const destDir = opts.dir ? path.resolve(opts.dir) : path.join(webBridgeDir(), "extension");
 	await installWebBridgeExtension(destDir);
+	await installWebBridgeSkill();
 
 	if (opts.dev) {
 		return { destDir, dev: true, noBrowsers: false, results: [] };
