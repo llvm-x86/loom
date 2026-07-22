@@ -1488,7 +1488,7 @@ export const imageGenTool: CustomTool<typeof imageGenSchema, ImageGenToolDetails
 										"Content-Type": "application/json",
 										Authorization: `Bearer ${key}`,
 										"HTTP-Referer": "https://omp.sh/",
-										"X-OpenRouter-Title": "Oh-My-Pi",
+										"X-OpenRouter-Title": "Loom",
 										"X-OpenRouter-Categories": "cli-agent",
 									},
 									body: JSON.stringify(requestBody),

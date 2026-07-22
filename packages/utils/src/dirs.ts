@@ -6,9 +6,9 @@
  *
  * On Linux, if XDG_DATA_HOME / XDG_STATE_HOME / XDG_CACHE_HOME environment
  * variables are set, paths are redirected to XDG-compliant locations under
- * $XDG_*_HOME/omp/. This requires running `omp config migrate` first to
+ * $XDG_*_HOME/loom/. This requires running `loom config migrate` first to
  * move data to the new locations. No filesystem existence checks are performed
- * — if the env var is set, omp trusts that the migration has been done.
+ * — if the env var is set, loom trusts that the migration has been done.
  */
 
 import * as fs from "node:fs";
@@ -16,8 +16,8 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { engines, version } from "../package.json" with { type: "json" };
 
-/** App name (e.g. "omp") */
-export const APP_NAME: string = "omp";
+/** App name (e.g. "loom") */
+export const APP_NAME: string = "loom";
 
 /** Config directory name (e.g. ".omp") */
 export const CONFIG_DIR_NAME: string = ".omp";
