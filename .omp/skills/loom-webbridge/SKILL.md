@@ -15,8 +15,8 @@ the user's actual browser, their existing logins, cookies, and sessions apply.
 1. `loom webbridge install` — **permanently force-installs** the extension into
    every detected Chromium-family browser (chrome/chromium/edge/brave) via each
    browser's enterprise policy store. No Developer mode, survives restarts. On
-   Linux the policy is machine-wide (the command uses `sudo -n`; if that is not
-   available it prints the exact `sudo` commands to paste). **Fully quit and
+   Linux the policy is machine-wide — the command elevates with `sudo`
+   automatically, prompting for your password when needed. **Fully quit and
    reopen the browser** so the policy loads.
    - `--dev` instead writes the unpacked extension to `~/.omp/webbridge/extension`
      and prints manual **Load unpacked** steps (Developer mode).
@@ -25,6 +25,26 @@ the user's actual browser, their existing logins, cookies, and sessions apply.
 2. `loom webbridge start` — launches the daemon in the background (port 10088;
    override with `LOOM_WEBBRIDGE_PORT` or `--port`).
 3. `loom webbridge status` — confirm `browser extension: connected`.
+
+## Managing the bridge from inside a loom session
+
+The `/webbridge` slash command shares one control plane with the
+`loom webbridge` CLI, so you can manage the daemon and extension without
+leaving the session:
+
+- `/webbridge status` — daemon + extension health (default when no subcommand
+  is given).
+- `/webbridge start` — start the background daemon.
+- `/webbridge stop` — stop the background daemon.
+- `/webbridge install` — force-install the extension into every detected
+  Chromium-family browser. It tries passwordless `sudo -n`; if a password is
+  needed it prints paste-able `sudo` commands instead, since the TUI can't
+  host a password prompt — run `loom webbridge install` in a shell to enter
+  the password interactively.
+- `/webbridge uninstall` — remove the force-install policy.
+
+Behavior is identical to the CLI; the only difference is that the CLI can
+prompt for a sudo password interactively.
 
 ## Wire protocol
 
@@ -81,4 +101,5 @@ anything unsupported.
   banner — expected, same as Kimi WebBridge.
 - Runs on a different port (10088) than Kimi (10086), so both can coexist.
 - If a command returns `extension_not_connected`, the extension is not loaded or
-  the daemon is down — check `loom webbridge status`.
+  the daemon is down — check `loom webbridge status` (or `/webbridge status`
+  inside a session).

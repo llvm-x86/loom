@@ -2,7 +2,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { type AutocompleteItem, Spacer } from "@oh-my-pi/pi-tui";
+import { type AutocompleteItem, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
 import { reset as resetCapabilities } from "../capability";
 import { COLLAB_GUEST_ALLOWED_COMMANDS, CollabGuestLink } from "../collab/guest";
@@ -45,6 +45,19 @@ import {
 	renderChangelogEntries,
 } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
+import {
+	formatHealth,
+	formatInstallReport,
+	formatStartResult,
+	formatStopResult,
+	formatUninstallReport,
+	getDaemonHealth,
+	installWebBridge,
+	startDaemon,
+	stopDaemon,
+	uninstallWebBridge,
+} from "../webbridge/control";
+import { resolveWebBridgePort } from "../webbridge/protocol";
 import { CollabQrCodeComponent } from "./helpers/collab-qrcode";
 import { buildContextReportText } from "./helpers/context-report";
 import { formatDuration } from "./helpers/format";
@@ -855,8 +868,9 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
-		name: "browser",
-		description: "Toggle browser headless vs visible mode",
+		name: "puppeteer",
+		aliases: ["browser"],
+		description: "Toggle the puppeteer browser tool headless vs visible mode",
 		acpInputHint: "[headless|visible]",
 		subcommands: [
 			{ name: "headless", description: "Switch to headless mode" },
@@ -876,7 +890,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			if (!arg) next = !current;
 			else if (arg === "headless" || arg === "hidden") next = true;
 			else if (arg === "visible" || arg === "show" || arg === "headful") next = false;
-			else return usage("Usage: /browser [headless|visible]", runtime);
+			else return usage("Usage: /puppeteer [headless|visible]", runtime);
 			runtime.settings.set("browser.headless" as SettingPath, next as SettingValue<SettingPath>);
 			const tool = runtime.session.getToolByName("browser");
 			if (tool && "restartForModeChange" in tool) {
@@ -910,7 +924,7 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			} else if (arg === "visible" || arg === "show" || arg === "headful") {
 				next = false;
 			} else {
-				runtime.ctx.showStatus("Usage: /browser [headless|visible]");
+				runtime.ctx.showStatus("Usage: /puppeteer [headless|visible]");
 				runtime.ctx.editor.setText("");
 				return;
 			}
@@ -927,6 +941,46 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			runtime.ctx.showStatus(`Browser mode: ${next ? "headless" : "visible"}`);
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "webbridge",
+		description: "Manage the local browser WebBridge (drive your real browser)",
+		subcommands: [
+			{ name: "status", description: "Show daemon + extension health" },
+			{ name: "start", description: "Start the bridge daemon in the background" },
+			{ name: "stop", description: "Stop the background daemon" },
+			{ name: "install", description: "Force-install the extension into every detected browser" },
+			{ name: "uninstall", description: "Remove the force-install policy" },
+		],
+		allowArgs: true,
+		handleTui: async (command, runtime) => {
+			runtime.ctx.editor.setText("");
+			const port = resolveWebBridgePort();
+			const sub = command.args.trim().toLowerCase();
+			try {
+				if (sub === "" || sub === "status") {
+					runtime.ctx.present([new Spacer(1), new Text(formatHealth(await getDaemonHealth(port)), 1, 0)]);
+				} else if (sub === "start") {
+					runtime.ctx.showStatus("Starting WebBridge daemon…");
+					runtime.ctx.present([new Spacer(1), new Text(formatStartResult(await startDaemon(port)), 1, 0)]);
+				} else if (sub === "stop") {
+					runtime.ctx.present([new Spacer(1), new Text(formatStopResult(await stopDaemon()), 1, 0)]);
+				} else if (sub === "install") {
+					// TUI raw mode can't host an interactive sudo prompt; try passwordless
+					// sudo and print paste-able commands for anything that needs a password.
+					runtime.ctx.showStatus("Installing WebBridge extension…");
+					const report = await installWebBridge({ dev: false, system: false, interactiveSudo: false });
+					runtime.ctx.present([new Spacer(1), new Text(formatInstallReport(report), 1, 0)]);
+				} else if (sub === "uninstall") {
+					const report = await uninstallWebBridge({ system: false, interactiveSudo: false });
+					runtime.ctx.present([new Spacer(1), new Text(formatUninstallReport(report), 1, 0)]);
+				} else {
+					runtime.ctx.showStatus("Usage: /webbridge [status|start|stop|install|uninstall]");
+				}
+			} catch (error) {
+				runtime.ctx.showError(`WebBridge: ${errorMessage(error)}`);
+			}
 		},
 	},
 	{
