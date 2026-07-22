@@ -445,6 +445,20 @@ const HANDLERS = {
 		return { tabs: tabs.map(t => ({ id: t.id, url: t.url, title: t.title, active: t.active })) };
 	},
 
+	async focus() {
+		// Raise the user's real browser. Prefer the last-focused normal window
+		// (un-minimize it); create one if the browser has no windows open.
+		const wins = await chrome.windows.getAll({ windowTypes: ["normal"] });
+		if (!wins.length) {
+			const created = await chrome.windows.create({ focused: true });
+			return { focused: true, windowId: created.id, created: true };
+		}
+		const target = wins.find(w => w.focused) || wins.find(w => w.state !== "minimized") || wins[0];
+		const patch = target.state === "minimized" ? { focused: true, state: "normal" } : { focused: true };
+		await chrome.windows.update(target.id, patch);
+		return { focused: true, windowId: target.id, created: false };
+	},
+
 	async find_tab(args, session) {
 		const query = String(args.query || "").toLowerCase();
 		const tabs = await chrome.tabs.query({});

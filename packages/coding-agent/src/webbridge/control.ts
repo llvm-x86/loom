@@ -6,6 +6,7 @@
  * command and the `/webbridge` slash command so the two can never diverge.
  * Functions return structured results; callers own presentation.
  */
+import { spawn } from "node:child_process";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getConfigRootDir } from "@oh-my-pi/pi-utils";
@@ -99,6 +100,77 @@ export async function startDaemon(port: number): Promise<StartResult> {
 	} finally {
 		await logFd.close();
 	}
+}
+
+export interface BrowserOpenResult {
+	/** The extension is connected — a real browser is driving the bridge. */
+	connected: boolean;
+	/** This call launched a browser. */
+	launched: boolean;
+	/** An existing or newly created window was focused. */
+	focused: boolean;
+	/** Display name of the launched browser, when `launched`. */
+	name?: string;
+	/** Present when nothing opened, or a launch didn't connect in time. */
+	message?: string;
+}
+
+/** POST one command to the running daemon (used to focus the browser window). */
+async function postDaemonCommand(port: number, action: string): Promise<void> {
+	await fetch(`http://${WEBBRIDGE_HOST}:${port}/command`, {
+		method: "POST",
+		headers: { "content-type": "application/json" },
+		body: JSON.stringify({ action, args: {}, session: "default" }),
+		signal: AbortSignal.timeout(5_000),
+	});
+}
+
+/**
+ * Ensure the user's real browser is open and focused so the force-installed
+ * extension connects the bridge. If the extension is already connected (a
+ * browser is open), focus its window; otherwise launch the user's browser
+ * (preferring Chrome) with their default profile — their live logins — and wait
+ * for it to connect. Never throws.
+ */
+export async function ensureBrowserOpen(port: number): Promise<BrowserOpenResult> {
+	if ((await getDaemonHealth(port)).connected) {
+		try {
+			await postDaemonCommand(port, "focus");
+			return { connected: true, launched: false, focused: true };
+		} catch {
+			return { connected: true, launched: false, focused: false };
+		}
+	}
+	const browsers = detectBrowsers();
+	const browser = browsers.find(b => b.family === "chrome") ?? browsers[0];
+	if (!browser) {
+		return {
+			connected: false,
+			launched: false,
+			focused: false,
+			message: "no Chromium-family browser detected to launch",
+		};
+	}
+	// Detached, default profile: the browser outlives this process and the
+	// force-installed extension connects on its own.
+	spawn(browser.executablePath, [], { detached: true, stdio: "ignore" }).unref();
+	const deadline = Date.now() + 15_000;
+	while (Date.now() < deadline) {
+		await Bun.sleep(300);
+		if ((await getDaemonHealth(port)).connected) {
+			try {
+				await postDaemonCommand(port, "focus");
+			} catch {}
+			return { connected: true, launched: true, focused: true, name: browser.name };
+		}
+	}
+	return {
+		connected: false,
+		launched: true,
+		focused: false,
+		name: browser.name,
+		message: `launched ${browser.name} but the extension did not connect within 15s — if you haven't fully quit and reopened it since installing, do that once`,
+	};
 }
 
 /** Run the daemon in the foreground on `port` (blocks until signalled). Writes the pid file. */
@@ -282,6 +354,13 @@ export function formatHealth(h: DaemonHealth): string {
 export function formatStartResult(r: StartResult): string {
 	if (r.alreadyRunning) return `webbridge daemon already running on ${r.url}`;
 	return `webbridge daemon started on ${r.url}${r.pid ? ` (pid ${r.pid})` : ""}\nlogs: ${r.logPath}`;
+}
+
+export function formatBrowserOpenResult(r: BrowserOpenResult): string {
+	if (r.connected && !r.launched) return "browser already open — focused the existing window";
+	if (r.connected && r.launched) return `opened ${r.name} — extension connected`;
+	if (r.launched) return r.message ?? `opened ${r.name}`;
+	return r.message ?? "no browser opened";
 }
 
 export function formatStopResult(r: StopResult): string {

@@ -46,6 +46,8 @@ import {
 } from "../utils/changelog";
 import { copyToClipboard } from "../utils/clipboard";
 import {
+	ensureBrowserOpen,
+	formatBrowserOpenResult,
 	formatHealth,
 	formatInstallReport,
 	formatStartResult,
@@ -964,6 +966,8 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				} else if (sub === "start") {
 					runtime.ctx.showStatus("Starting WebBridge daemon…");
 					runtime.ctx.present([new Spacer(1), new Text(formatStartResult(await startDaemon(port)), 1, 0)]);
+					runtime.ctx.showStatus("Opening your browser…");
+					runtime.ctx.present([new Text(formatBrowserOpenResult(await ensureBrowserOpen(port)), 1, 0)]);
 				} else if (sub === "stop") {
 					runtime.ctx.present([new Spacer(1), new Text(formatStopResult(await stopDaemon()), 1, 0)]);
 				} else if (sub === "install") {
