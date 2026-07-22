@@ -1,25 +1,26 @@
-import type { Effort } from "@oh-my-pi/pi-ai";
 import { Container, type SelectItem, SelectList, type SgrMouseEvent } from "@oh-my-pi/pi-tui";
 import { getSelectListTheme } from "../../modes/theme/theme";
-import { getThinkingLevelMetadata } from "../../thinking";
+import { type ConfiguredThinkingLevel, getConfiguredThinkingLevelMetadata } from "../../thinking";
 import { DynamicBorder } from "./dynamic-border";
 import { routeSelectListMouseWithTopBorder } from "./select-list-mouse-routing";
 
 /**
- * Component that renders a thinking level selector with borders
+ * Renders a reasoning-effort selector (bordered `SelectList`) over the
+ * transcript. Accepts configured levels so `auto` and `off` show alongside the
+ * model's concrete efforts.
  */
 export class ThinkingSelectorComponent extends Container {
 	#selectList: SelectList;
 
 	constructor(
-		currentLevel: Effort,
-		availableLevels: Effort[],
-		onSelect: (level: Effort) => void,
+		currentLevel: ConfiguredThinkingLevel,
+		availableLevels: ConfiguredThinkingLevel[],
+		onSelect: (level: ConfiguredThinkingLevel) => void,
 		onCancel: () => void,
 	) {
 		super();
 
-		const thinkingLevels: SelectItem[] = availableLevels.map(getThinkingLevelMetadata);
+		const thinkingLevels: SelectItem[] = availableLevels.map(getConfiguredThinkingLevelMetadata);
 
 		// Add top border
 		this.addChild(new DynamicBorder());
@@ -34,7 +35,7 @@ export class ThinkingSelectorComponent extends Container {
 		}
 
 		this.#selectList.onSelect = item => {
-			onSelect(item.value as Effort);
+			onSelect(item.value as ConfiguredThinkingLevel);
 		};
 
 		this.#selectList.onCancel = () => {

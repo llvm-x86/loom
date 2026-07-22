@@ -54,6 +54,7 @@ import {
 	AUTO_THINKING,
 	type ConfiguredThinkingLevel,
 	concreteThinkingLevel,
+	getConfiguredThinkingLevelMetadata,
 	parseConfiguredThinkingLevel,
 } from "../../thinking";
 import {
@@ -85,6 +86,7 @@ import { ResetUsageSelectorComponent } from "../components/reset-usage-selector"
 import { renderSegmentTrack } from "../components/segment-track";
 import { SessionSelectorComponent } from "../components/session-selector";
 import { SettingsSelectorComponent } from "../components/settings-selector";
+import { ThinkingSelectorComponent } from "../components/thinking-selector";
 import { ToolExecutionComponent } from "../components/tool-execution";
 import { TranscriptBlock } from "../components/transcript-container";
 import { TreeSelectorComponent } from "../components/tree-selector";
@@ -638,6 +640,54 @@ export class SelectorController {
 			return;
 		}
 		this.#showModelHub({});
+	}
+
+	/**
+	 * Reasoning-effort picker (bare `/effort`): a bottom-anchored overlay listing
+	 * `off`, `auto`, and the current model's supported efforts. Mirrors the
+	 * `cycleThinkingLevel` level set; selecting one applies it session-only.
+	 */
+	showEffortSelector(): void {
+		if (!this.ctx.session.model?.reasoning) {
+			this.ctx.showStatus("Current model does not support reasoning effort.");
+			return;
+		}
+		const levels: ConfiguredThinkingLevel[] = [
+			ThinkingLevel.Off,
+			AUTO_THINKING,
+			...this.ctx.session.getAvailableThinkingLevels(),
+		];
+		const configured = this.ctx.session.configuredThinkingLevel();
+		const current = configured === ThinkingLevel.Inherit || configured === undefined ? ThinkingLevel.Off : configured;
+		let overlayHandle: OverlayHandle | undefined;
+		let closed = false;
+		const done = () => {
+			if (closed) return;
+			closed = true;
+			overlayHandle?.hide();
+			this.focusActiveEditorArea();
+			this.ctx.ui.requestRender();
+		};
+		const selector = new ThinkingSelectorComponent(
+			current,
+			levels,
+			level => {
+				this.ctx.session.setThinkingLevel(level);
+				this.ctx.statusLine.invalidate();
+				this.ctx.updateEditorBorderColor();
+				this.ctx.showStatus(`Reasoning effort: ${getConfiguredThinkingLevelMetadata(level).label}`);
+				done();
+			},
+			done,
+		);
+		overlayHandle = this.ctx.ui.showOverlay(selector, {
+			anchor: "bottom-center",
+			width: "100%",
+			maxHeight: "100%",
+			margin: 0,
+		});
+		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.requestRender();
 	}
 
 	/**

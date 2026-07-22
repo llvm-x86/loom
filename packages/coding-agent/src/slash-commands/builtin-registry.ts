@@ -559,7 +559,12 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			const arg = command.args.trim().toLowerCase();
-			if (!arg || arg === "toggle" || arg === "cycle") {
+			if (!arg) {
+				runtime.ctx.showEffortSelector();
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "toggle" || arg === "cycle") {
 				const next = runtime.ctx.session.cycleThinkingLevel();
 				if (next === undefined) {
 					runtime.ctx.showStatus("Current model does not support reasoning effort");
