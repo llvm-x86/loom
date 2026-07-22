@@ -62,4 +62,11 @@ export interface PolicyOptions {
 	 * (Windows HKCU, macOS user defaults); Linux is always system-wide.
 	 */
 	system?: boolean;
+	/**
+	 * When passwordless `sudo -n` fails, retry the elevation with an interactive
+	 * `sudo` that inherits the controlling terminal so the user can type their
+	 * password. Requires a TTY (the `loom webbridge` CLI); the `/webbridge`
+	 * slash command leaves this off and instructs instead. Linux only.
+	 */
+	interactiveSudo?: boolean;
 }

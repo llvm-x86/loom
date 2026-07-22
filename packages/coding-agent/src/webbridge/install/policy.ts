@@ -14,7 +14,7 @@
  * `applied: false` with a message containing the exact commands the user can
  * run instead. Only real bugs (e.g. a missing updateManifestPath) throw.
  */
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
@@ -118,6 +118,29 @@ async function run(command: string, args: string[]): Promise<CommandResult> {
 		}
 		return { ok: false, stdout, stderr };
 	}
+}
+
+/** Run a command inheriting the controlling terminal (so `sudo` can prompt for a password). */
+async function runInteractive(command: string, args: string[]): Promise<boolean> {
+	return await new Promise<boolean>(resolve => {
+		const child = spawn(command, args, { stdio: "inherit" });
+		child.on("error", () => resolve(false));
+		child.on("close", code => resolve(code === 0));
+	});
+}
+
+/**
+ * Elevate `argv` via sudo. Tries passwordless `sudo -n` first; when that fails
+ * and `interactive` is set on a TTY, retries with an interactive `sudo` that
+ * inherits the terminal so the user can enter their password.
+ */
+async function elevate(argv: string[], interactive: boolean): Promise<boolean> {
+	const passwordless = await run("sudo", ["-n", ...argv]);
+	if (passwordless.ok) return true;
+	if (interactive && process.stdin.isTTY) {
+		return await runInteractive("sudo", argv);
+	}
+	return false;
 }
 
 function shellQuote(value: string): string {
@@ -367,8 +390,8 @@ async function installLinux(opts: PolicyOptions, entry: string): Promise<PolicyR
 	}
 
 	const script = 'mkdir -p "$1" && printf "%s" "$2" > "$3"';
-	const elevated = await run("sudo", ["-n", "sh", "-c", script, "sh", dir, content, file]);
-	if (elevated.ok) {
+	const elevated = await elevate(["sh", "-c", script, "sh", dir, content, file], opts.interactiveSudo ?? false);
+	if (elevated) {
 		return { family: opts.family, applied: true, location: file, message: RESTART_NOTE };
 	}
 	return {
@@ -404,8 +427,8 @@ async function removeLinux(opts: PolicyOptions): Promise<PolicyResult> {
 			// Direct remove failed despite the writability check — try elevation.
 		}
 	}
-	const elevated = await run("sudo", ["-n", "rm", "-f", file]);
-	if (elevated.ok) {
+	const elevated = await elevate(["rm", "-f", file], opts.interactiveSudo ?? false);
+	if (elevated) {
 		return { family: opts.family, applied: true, location: file };
 	}
 	return {
