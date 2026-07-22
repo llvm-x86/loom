@@ -659,35 +659,25 @@ export class SelectorController {
 		];
 		const configured = this.ctx.session.configuredThinkingLevel();
 		const current = configured === ThinkingLevel.Inherit || configured === undefined ? ThinkingLevel.Off : configured;
-		let overlayHandle: OverlayHandle | undefined;
-		let closed = false;
-		const done = () => {
-			if (closed) return;
-			closed = true;
-			overlayHandle?.hide();
-			this.focusActiveEditorArea();
-			this.ctx.ui.requestRender();
-		};
-		const selector = new ThinkingSelectorComponent(
-			current,
-			levels,
-			level => {
-				this.ctx.session.setThinkingLevel(level);
-				this.ctx.statusLine.invalidate();
-				this.ctx.updateEditorBorderColor();
-				this.ctx.showStatus(`Reasoning effort: ${getConfiguredThinkingLevelMetadata(level).label}`);
-				done();
-			},
-			done,
-		);
-		overlayHandle = this.ctx.ui.showOverlay(selector, {
-			anchor: "bottom-center",
-			width: "100%",
-			maxHeight: "100%",
-			margin: 0,
+		this.showSelector(done => {
+			const selector = new ThinkingSelectorComponent(
+				current,
+				levels,
+				level => {
+					done();
+					this.ctx.session.setThinkingLevel(level);
+					this.ctx.statusLine.invalidate();
+					this.ctx.updateEditorBorderColor();
+					this.ctx.showStatus(`Reasoning effort: ${getConfiguredThinkingLevelMetadata(level).label}`);
+					this.ctx.ui.requestRender();
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+			);
+			return { component: selector, focus: selector.getSelectList() };
 		});
-		this.ctx.ui.setFocus(selector.getSelectList());
-		this.ctx.ui.requestRender();
 	}
 
 	/**
