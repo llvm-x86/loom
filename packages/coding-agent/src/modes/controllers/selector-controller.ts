@@ -686,7 +686,7 @@ export class SelectorController {
 			maxHeight: "100%",
 			margin: 0,
 		});
-		this.ctx.ui.setFocus(selector);
+		this.ctx.ui.setFocus(selector.getSelectList());
 		this.ctx.ui.requestRender();
 	}
 
