@@ -1,6 +1,7 @@
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
+import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
 import { type AutocompleteItem, Spacer, Text } from "@oh-my-pi/pi-tui";
 import { APP_NAME, getProjectDir, setProjectDir } from "@oh-my-pi/pi-utils";
@@ -36,6 +37,7 @@ import type { AgentSession, FreshSessionResult } from "../session/agent-session"
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata, parseConfiguredThinkingLevel } from "../thinking";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
 import {
@@ -101,6 +103,12 @@ function refreshStatusLine(ctx: InteractiveModeContext): void {
 /** `/fast status` label for the active model: "on" when its family is priority, else "off". */
 function formatFastModeStatus(session: AgentSession): string {
 	return session.isFastModeEnabled() ? "on" : "off";
+}
+
+/** `/effort` label for the active model: the configured effort selector, or "off". */
+function formatEffortStatus(session: AgentSession): string {
+	const configured = session.configuredThinkingLevel();
+	return configured === undefined ? "off" : getConfiguredThinkingLevelMetadata(configured).label;
 }
 
 const AUTOCOMPLETE_DETAIL_LIMIT = 48;
@@ -505,6 +513,84 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				return;
 			}
 			runtime.ctx.showStatus("Usage: /fast [on|off|status]");
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "effort",
+		description: "Set or cycle model reasoning effort (off, minimal, low, medium, high, xhigh, max, auto)",
+		acpDescription: "Set reasoning effort",
+		acpInputHint: "[level]",
+		inlineHint: "[level]",
+		allowArgs: true,
+		subcommands: CLI_THINKING_LEVELS.map(level => ({
+			name: level,
+			description: getConfiguredThinkingLevelMetadata(parseConfiguredThinkingLevel(level) ?? ThinkingLevel.Off)
+				.description,
+		})),
+		getTuiAutocompleteDescription: runtime => `Effort: ${formatEffortStatus(runtime.ctx.session)}`,
+		handle: async (command, runtime) => {
+			const arg = command.args.trim().toLowerCase();
+			if (!arg || arg === "toggle" || arg === "cycle") {
+				const next = runtime.session.cycleThinkingLevel();
+				if (next === undefined) return usage("Current model does not support reasoning effort.", runtime);
+				await runtime.output(`Reasoning effort: ${getConfiguredThinkingLevelMetadata(next).label}.`);
+				return commandConsumed();
+			}
+			if (arg === "status") {
+				await runtime.output(`Reasoning effort is ${formatEffortStatus(runtime.session)}.`);
+				return commandConsumed();
+			}
+			const level = parseConfiguredThinkingLevel(arg);
+			if (level === undefined || level === ThinkingLevel.Inherit) {
+				return usage(`Usage: /effort [${CLI_THINKING_LEVELS.join("|")}]`, runtime);
+			}
+			if (level !== ThinkingLevel.Off && !runtime.session.model?.reasoning) {
+				return usage("Current model does not support reasoning effort.", runtime);
+			}
+			runtime.session.setThinkingLevel(level);
+			await runtime.output(`Reasoning effort: ${getConfiguredThinkingLevelMetadata(level).label}.`);
+			return commandConsumed();
+		},
+		handleTui: (command, runtime) => {
+			if (runtime.ctx.focusedAgentId) {
+				runtime.ctx.showStatus("Model/thinking apply to the main session — press ←← to return first");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const arg = command.args.trim().toLowerCase();
+			if (!arg || arg === "toggle" || arg === "cycle") {
+				const next = runtime.ctx.session.cycleThinkingLevel();
+				if (next === undefined) {
+					runtime.ctx.showStatus("Current model does not support reasoning effort");
+				} else {
+					refreshStatusLine(runtime.ctx);
+					runtime.ctx.updateEditorBorderColor();
+					runtime.ctx.showStatus(`Reasoning effort: ${getConfiguredThinkingLevelMetadata(next).label}`);
+				}
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (arg === "status") {
+				runtime.ctx.showStatus(`Reasoning effort is ${formatEffortStatus(runtime.ctx.session)}.`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			const level = parseConfiguredThinkingLevel(arg);
+			if (level === undefined || level === ThinkingLevel.Inherit) {
+				runtime.ctx.showStatus(`Usage: /effort [${CLI_THINKING_LEVELS.join("|")}]`);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			if (level !== ThinkingLevel.Off && !runtime.ctx.session.model?.reasoning) {
+				runtime.ctx.showStatus("Current model does not support reasoning effort");
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			runtime.ctx.session.setThinkingLevel(level);
+			refreshStatusLine(runtime.ctx);
+			runtime.ctx.updateEditorBorderColor();
+			runtime.ctx.showStatus(`Reasoning effort: ${getConfiguredThinkingLevelMetadata(level).label}`);
 			runtime.ctx.editor.setText("");
 		},
 	},
