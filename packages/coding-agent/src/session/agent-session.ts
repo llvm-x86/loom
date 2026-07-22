@@ -122,6 +122,7 @@ import {
 } from "@oh-my-pi/pi-ai";
 import * as AIError from "@oh-my-pi/pi-ai/error";
 import { resetOpenAICodexHistoryAfterCompaction } from "@oh-my-pi/pi-ai/providers/openai-codex-responses";
+import { isOAuthToken } from "@oh-my-pi/pi-ai/utils/anthropic-auth";
 import { kCursorExecResolved } from "@oh-my-pi/pi-ai/utils/block-symbols";
 import { toolWireSchema } from "@oh-my-pi/pi-ai/utils/schema";
 import { GeminiHeaderRunDetector, isGeminiThinkingModel } from "@oh-my-pi/pi-ai/utils/thinking-loop";
@@ -13418,10 +13419,11 @@ export class AgentSession {
 		availableModels: Model[],
 		filter?: (model: Model) => boolean,
 	): Model[] {
-		const candidates: Model[] = [];
+		const primary: Model[] = [];
+		const deferred: Model[] = [];
 		const seen = new Set<string>();
 
-		const addCandidate = (model: Model | undefined): void => {
+		const addCandidate = (model: Model | undefined, options?: { exemptFromDefer?: boolean }): void => {
 			if (!model) return;
 			const key = this.#getModelKey(model);
 			if (seen.has(key)) return;
@@ -13430,11 +13432,21 @@ export class AgentSession {
 			// scan below doesn't reintroduce them; the filter just suppresses
 			// inclusion in this caller's candidate chain.
 			if (filter && !filter(model)) return;
-			candidates.push(model);
+			// Reverse-engineered anthropic (Claude Code OAuth framing) can't run a
+			// reliable local compaction summary, so defer it behind every other
+			// enabled model. An explicitly configured compactionModel target is the
+			// user's deliberate routing choice and stays primary.
+			if (!options?.exemptFromDefer && this.#usesClaudeCodeOAuthFraming(model)) {
+				deferred.push(model);
+				return;
+			}
+			primary.push(model);
 		};
 
 		if (preferredModel) {
-			addCandidate(this.#resolveCompactionConfiguredTarget(preferredModel, availableModels));
+			addCandidate(this.#resolveCompactionConfiguredTarget(preferredModel, availableModels), {
+				exemptFromDefer: true,
+			});
 		}
 		addCandidate(preferredModel ?? undefined);
 		for (const role of MODEL_ROLE_IDS) {
@@ -13449,7 +13461,21 @@ export class AgentSession {
 			}
 		}
 
-		return candidates;
+		return [...primary, ...deferred];
+	}
+
+	/**
+	 * Whether a compaction candidate would be sent through the reverse-engineered
+	 * Claude Code OAuth request shape (anthropic-messages + an `sk-ant-oat` token,
+	 * or a model that explicitly forces `isOAuth`). That framing cannot run a
+	 * reliable local summarization turn, so {@link #resolveCompactionModelCandidates}
+	 * routes compaction to any other enabled model first.
+	 */
+	#usesClaudeCodeOAuthFraming(model: Model): boolean {
+		if (model.api !== "anthropic-messages") return false;
+		if (model.isOAuth === true) return true;
+		const credential = this.#modelRegistry.authStorage.getOAuthCredential(model.provider);
+		return credential !== undefined && isOAuthToken(credential.access);
 	}
 
 	#buildCompactionAuthError(): Error {

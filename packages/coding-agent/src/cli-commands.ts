@@ -44,6 +44,7 @@ export const commands: CommandEntry[] = [
 	{ name: "token", load: () => import("./commands/token").then(m => m.default) },
 	{ name: "ttsr", load: () => import("./commands/ttsr").then(m => m.default) },
 	{ name: "worktree", load: () => import("./commands/worktree").then(m => m.default), aliases: ["wt"] },
+	{ name: "webbridge", load: () => import("./commands/webbridge").then(m => m.default) },
 	{ name: "search", load: () => import("./commands/web-search").then(m => m.default), aliases: ["q"] },
 ];
 
