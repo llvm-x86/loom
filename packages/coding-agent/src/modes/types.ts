@@ -252,6 +252,13 @@ export interface InteractiveModeContext {
 	 * leak.
 	 */
 	resetTranscript(): void;
+	/**
+	 * Suspend the TUI (restore cooked mode, release stdin), run an interactive
+	 * terminal process that owns the real controlling terminal — e.g. an
+	 * interactive `sudo` password prompt — then restore the TUI. Mirrors the
+	 * `$EDITOR` suspend/restore flow.
+	 */
+	runInteractiveTerminal<T>(run: () => Promise<T>): Promise<T>;
 	showStatus(message: string, options?: { dim?: boolean }): void;
 	showModelCycleTrack(track: string): void;
 	showError(message: string): void;

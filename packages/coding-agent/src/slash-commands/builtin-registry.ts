@@ -967,13 +967,17 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 				} else if (sub === "stop") {
 					runtime.ctx.present([new Spacer(1), new Text(formatStopResult(await stopDaemon()), 1, 0)]);
 				} else if (sub === "install") {
-					// TUI raw mode can't host an interactive sudo prompt; try passwordless
-					// sudo and print paste-able commands for anything that needs a password.
+					// Suspend the TUI so `sudo` can prompt for a password on the real
+					// terminal (interactive elevation), then restore it.
 					runtime.ctx.showStatus("Installing WebBridge extension…");
-					const report = await installWebBridge({ dev: false, system: false, interactiveSudo: false });
+					const report = await runtime.ctx.runInteractiveTerminal(() =>
+						installWebBridge({ dev: false, system: false, interactiveSudo: true }),
+					);
 					runtime.ctx.present([new Spacer(1), new Text(formatInstallReport(report), 1, 0)]);
 				} else if (sub === "uninstall") {
-					const report = await uninstallWebBridge({ system: false, interactiveSudo: false });
+					const report = await runtime.ctx.runInteractiveTerminal(() =>
+						uninstallWebBridge({ system: false, interactiveSudo: true }),
+					);
 					runtime.ctx.present([new Spacer(1), new Text(formatUninstallReport(report), 1, 0)]);
 				} else {
 					runtime.ctx.showStatus("Usage: /webbridge [status|start|stop|install|uninstall]");
