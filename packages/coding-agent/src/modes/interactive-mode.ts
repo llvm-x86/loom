@@ -2806,6 +2806,24 @@ export class InteractiveMode implements InteractiveModeContext {
 		}
 	}
 
+	/**
+	 * Suspend the TUI, run an interactive terminal process that owns the real
+	 * controlling terminal (e.g. an interactive `sudo` password prompt), then
+	 * restore the TUI. Mirrors the `$EDITOR` suspend/restore above: `ui.stop()`
+	 * removes the stdin listener, pauses stdin, and restores cooked mode, so the
+	 * child (and `sudo`, which reads the password from `/dev/tty`) owns the
+	 * terminal without the TUI reader fighting for keystrokes.
+	 */
+	async runInteractiveTerminal<T>(run: () => Promise<T>): Promise<T> {
+		this.ui.stop();
+		try {
+			return await run();
+		} finally {
+			this.ui.start();
+			this.ui.requestRender(true);
+		}
+	}
+
 	async #applyPlanExecutionModel(entry: ResolvedRoleModel | undefined): Promise<void> {
 		if (!entry) return;
 		try {
