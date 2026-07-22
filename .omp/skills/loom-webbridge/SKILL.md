@@ -12,13 +12,19 @@ the user's actual browser, their existing logins, cookies, and sessions apply.
 
 ## One-time setup
 
-1. `loom webbridge install` — writes the unpacked extension to
-   `~/.omp/webbridge/extension` and prints load steps.
-2. In the browser: open `chrome://extensions` (or `edge://extensions`), enable
-   **Developer mode**, click **Load unpacked**, select that directory.
-3. `loom webbridge start` — launches the daemon in the background (port 10088;
+1. `loom webbridge install` — **permanently force-installs** the extension into
+   every detected Chromium-family browser (chrome/chromium/edge/brave) via each
+   browser's enterprise policy store. No Developer mode, survives restarts. On
+   Linux the policy is machine-wide (the command uses `sudo -n`; if that is not
+   available it prints the exact `sudo` commands to paste). **Fully quit and
+   reopen the browser** so the policy loads.
+   - `--dev` instead writes the unpacked extension to `~/.omp/webbridge/extension`
+     and prints manual **Load unpacked** steps (Developer mode).
+   - `--system` forces the machine-wide store on Windows/macOS too (needs elevation).
+   - `loom webbridge uninstall` removes the force-install policy.
+2. `loom webbridge start` — launches the daemon in the background (port 10088;
    override with `LOOM_WEBBRIDGE_PORT` or `--port`).
-4. `loom webbridge status` — confirm `browser extension: connected`.
+3. `loom webbridge status` — confirm `browser extension: connected`.
 
 ## Wire protocol
 
