@@ -21,7 +21,7 @@
  *   status  [--port]  — print daemon + extension health as JSON
  *   call <action>     — POST one command to a running daemon (for testing)
  */
-import { spawn } from "node:child_process";
+import { execFileSync, spawn } from "node:child_process";
 import { logger } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
@@ -62,7 +62,10 @@ export default class WebBridge extends Command {
 		port: Flags.integer({ description: "Daemon port (default 10088, or LOOM_WEBBRIDGE_PORT)", char: "p" }),
 		dir: Flags.string({ description: "Destination directory for `install`" }),
 		args: Flags.string({ description: "JSON args object for `call`" }),
-		session: Flags.string({ description: "Session id for `call`", default: "default" }),
+		session: Flags.string({
+			description:
+				'Tab-group id for `call` (default: auto — the tmux session name, or $LOOM_WEBBRIDGE_SESSION, else "default")',
+		}),
 		json: Flags.boolean({ description: "Output JSON" }),
 		dev: Flags.boolean({
 			description:
@@ -110,7 +113,7 @@ export default class WebBridge extends Command {
 			case "status":
 				return this.#status(port, Boolean(flags.json));
 			case "call":
-				return this.#call(port, args.target, flags.args, flags.session ?? "default");
+				return this.#call(port, args.target, flags.args, this.#resolveSession(flags.session));
 			default:
 				process.stdout.write(
 					`Usage: loom webbridge <${WEBBRIDGE_ACTIONS.join("|")}>\n\nRun \`loom webbridge install\` first, load the extension, then \`loom webbridge start\`.\n`,
@@ -201,6 +204,7 @@ export default class WebBridge extends Command {
 				throw new Error(`--args must be valid JSON (got: ${argsJson})`);
 			}
 		}
+		process.stderr.write(`webbridge: session "${session}" → tab group loom:${session}\n`);
 		const res = await fetch(`http://${WEBBRIDGE_HOST}:${port}/command`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
@@ -210,5 +214,30 @@ export default class WebBridge extends Command {
 		process.stdout.write(`${JSON.stringify(body, null, 2)}\n`);
 		const ok = body !== null && typeof body === "object" && "ok" in body && body.ok === true;
 		if (!ok) process.exitCode = 1;
+	}
+
+	/**
+	 * Pick the tab-group id for a `call` so concurrent loom sessions land in
+	 * separate browser tab groups automatically. Precedence: explicit
+	 * `--session` › `$LOOM_WEBBRIDGE_SESSION` › the tmux session name (each
+	 * workstream on the box is its own tmux session) › `"default"`.
+	 */
+	#resolveSession(explicit: string | undefined): string {
+		const clean = (value: string | undefined): string | undefined => {
+			const trimmed = value?.trim();
+			return trimmed && trimmed !== "default" ? trimmed : undefined;
+		};
+		const chosen = clean(explicit) ?? clean(process.env.LOOM_WEBBRIDGE_SESSION);
+		if (chosen) return chosen;
+		if (process.env.TMUX) {
+			try {
+				const name = execFileSync("tmux", ["display-message", "-p", "#S"], {
+					encoding: "utf8",
+					timeout: 1_000,
+				}).trim();
+				if (name) return name;
+			} catch {}
+		}
+		return "default";
 	}
 }

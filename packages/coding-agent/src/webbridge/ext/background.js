@@ -16,7 +16,7 @@
 const PROTOCOL_VERSION = "1";
 const DEFAULT_PORT = 10088;
 const RECONNECT_MS = 3000;
-const SESSIONS_KEY = "loom:sessions";
+const SESSION_PREFIX = "loom:session:";
 const KEEPALIVE_ALARM = "loom-webbridge-keepalive";
 
 let socket = null;
@@ -109,26 +109,24 @@ function toError(err) {
 // Session / tab state (persisted so it survives SW restarts)
 // ---------------------------------------------------------------------------
 
-async function allSessions() {
-	const stored = await chrome.storage.session.get(SESSIONS_KEY);
-	return stored[SESSIONS_KEY] || {};
-}
-
-async function saveSessions(sessions) {
-	await chrome.storage.session.set({ [SESSIONS_KEY]: sessions });
-}
-
+// Each session is stored under its OWN key (`loom:session:<name>`) so
+// concurrent sessions never read-modify-write a shared object and clobber each
+// other — the invariant that lets many loom sessions drive one browser at once.
 async function getSession(session) {
-	const sessions = await allSessions();
-	return sessions[session] || { currentTabId: null, tabIds: [], groupId: null };
+	const key = SESSION_PREFIX + session;
+	const stored = await chrome.storage.session.get(key);
+	return stored[key] || { currentTabId: null, tabIds: [], groupId: null };
 }
 
 async function updateSession(session, patch) {
-	const sessions = await allSessions();
-	const current = sessions[session] || { currentTabId: null, tabIds: [], groupId: null };
-	sessions[session] = { ...current, ...patch };
-	await saveSessions(sessions);
-	return sessions[session];
+	const key = SESSION_PREFIX + session;
+	const next = { ...(await getSession(session)), ...patch };
+	await chrome.storage.session.set({ [key]: next });
+	return next;
+}
+
+async function deleteSession(session) {
+	await chrome.storage.session.remove(SESSION_PREFIX + session);
 }
 
 // Tab groups: every session's tabs live in one auto-created, auto-labelled
@@ -499,9 +497,7 @@ const HANDLERS = {
 				await chrome.tabs.remove(tabId);
 			} catch {}
 		}
-		const sessions = await allSessions();
-		delete sessions[session];
-		await saveSessions(sessions);
+		await deleteSession(session);
 		return { success: true };
 	},
 };
