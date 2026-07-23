@@ -59,8 +59,18 @@ POST JSON to `http://127.0.0.1:10088/command`:
 Response is `{ "ok": true, "data": {...} }` or
 `{ "ok": false, "error": { "code": "...", "message": "..." } }`.
 
-`session` groups tabs into an isolated workspace (defaults to `"default"`).
-Single-tab actions target the session's current tab — `navigate` first.
+`session` puts every tab it touches into its own Chrome **tab group** named
+`loom:<session>`, isolated from other sessions (own current tab, own colour).
+Many loom sessions can therefore drive the **same browser at once**, each in a
+separate tab group, without stepping on each other. Single-tab actions target
+that session's current tab — `navigate` first.
+
+**You normally never set `session` yourself.** `loom webbridge call` fills it in
+automatically — on the box each workstream is its own tmux session, so its tabs
+land in a `loom:<tmux-session>` group with zero effort. Override only to split
+or share a group deliberately: pass `--session <id>` (CLI) or set
+`$LOOM_WEBBRIDGE_SESSION`. If you POST with `curl` directly, add
+`"session":"<id>"` yourself — raw curl has no way to infer the workstream.
 
 ## Actions
 

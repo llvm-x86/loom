@@ -87,6 +87,28 @@ describe("WebBridge daemon", () => {
 		ws.close();
 	});
 
+	it("multiplexes concurrent sessions — out-of-order replies stay id-correlated", async () => {
+		// The invariant that lets many loom sessions drive one browser at once:
+		// two sessions dispatched concurrently, answered in REVERSE order, must
+		// each resolve with their OWN reply — never cross-wired.
+		const frames: Array<{ id: string; session: string }> = [];
+		const ws = await connectExtension(frame => {
+			frames.push({ id: frame.id, session: frame.session });
+			return undefined; // reply manually below, deliberately out of order
+		});
+		const pAlpha = postCommand({ action: "snapshot", args: {}, session: "alpha" });
+		const pBeta = postCommand({ action: "snapshot", args: {}, session: "beta" });
+		while (frames.length < 2) await Bun.sleep(5);
+		for (const frame of [...frames].reverse()) {
+			ws.send(JSON.stringify({ id: frame.id, ok: true, data: { echoSession: frame.session } }));
+		}
+		const [alpha, beta] = await Promise.all([pAlpha, pBeta]);
+		expect(alpha).toEqual({ ok: true, data: { echoSession: "alpha" } });
+		expect(beta).toEqual({ ok: true, data: { echoSession: "beta" } });
+		expect(new Set(frames.map(f => f.session))).toEqual(new Set(["alpha", "beta"]));
+		ws.close();
+	});
+
 	it("writes a screenshot's base64 payload to disk and returns a path", async () => {
 		// 1x1 transparent PNG.
 		const pngBase64 =
