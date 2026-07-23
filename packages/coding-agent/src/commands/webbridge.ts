@@ -22,6 +22,7 @@
  *   call <action>     — POST one command to a running daemon (for testing)
  */
 import { execFileSync, spawn } from "node:child_process";
+import * as fs from "node:fs";
 import { logger } from "@oh-my-pi/pi-utils";
 import { Args, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { setTransports as setLoggerTransports } from "@oh-my-pi/pi-utils/logger";
@@ -45,6 +46,40 @@ import { detectBrowsers, familyDisplayName } from "../webbridge/install/detect";
 import { resolveWebBridgePort, WEBBRIDGE_HOST } from "../webbridge/protocol";
 
 const WEBBRIDGE_ACTIONS = ["install", "uninstall", "serve", "start", "stop", "status", "call"] as const;
+
+/** Parent pid from /proc (Linux). The comm field can hold spaces/parens, so read after the last ')'. */
+function parentPid(pid: number): number | undefined {
+	try {
+		const stat = fs.readFileSync(`/proc/${pid}/stat`, "utf8");
+		const ppid = Number.parseInt(stat.slice(stat.lastIndexOf(")") + 2).split(" ")[1] ?? "", 10);
+		return Number.isFinite(ppid) && ppid > 0 ? ppid : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/**
+ * Walk the ancestry to the nearest interactive `omp`/`loom` process (the one
+ * owning this terminal tab) — never a `webbridge` CLI invocation. Its pid is
+ * stable for the tab's lifetime and distinct across tabs, so plain terminal
+ * tabs land in separate tab groups even without tmux. Linux-only.
+ */
+function nearestInteractiveLoomPid(): number | undefined {
+	if (process.platform !== "linux") return undefined;
+	let pid: number | undefined = process.ppid;
+	for (let hops = 0; hops < 24 && pid && pid > 1; hops += 1) {
+		let cmdline = "";
+		try {
+			cmdline = fs.readFileSync(`/proc/${pid}/cmdline`, "utf8");
+		} catch {
+			return undefined;
+		}
+		const base = (cmdline.split("\0")[0] ?? "").split("/").pop() ?? "";
+		if ((base === "omp" || base === "loom") && !cmdline.includes("webbridge")) return pid;
+		pid = parentPid(pid);
+	}
+	return undefined;
+}
 
 export default class WebBridge extends Command {
 	static description = "Run the local browser WebBridge (drive your real browser from loom)";
@@ -219,8 +254,9 @@ export default class WebBridge extends Command {
 	/**
 	 * Pick the tab-group id for a `call` so concurrent loom sessions land in
 	 * separate browser tab groups automatically. Precedence: explicit
-	 * `--session` › `$LOOM_WEBBRIDGE_SESSION` › the tmux session name (each
-	 * workstream on the box is its own tmux session) › `"default"`.
+	 * `--session` › `$LOOM_WEBBRIDGE_SESSION` › tmux session name › the
+	 * interactive loom process that owns this terminal tab (`tab-<pid>`, so
+	 * plain non-tmux tabs still separate) › `"default"`.
 	 */
 	#resolveSession(explicit: string | undefined): string {
 		const clean = (value: string | undefined): string | undefined => {
@@ -238,6 +274,8 @@ export default class WebBridge extends Command {
 				if (name) return name;
 			} catch {}
 		}
+		const tabPid = nearestInteractiveLoomPid();
+		if (tabPid) return `tab-${tabPid}`;
 		return "default";
 	}
 }
