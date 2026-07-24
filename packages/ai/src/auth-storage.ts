@@ -611,6 +611,13 @@ const USAGE_REPORT_TTL_MS = 5 * 60_000;
 const USAGE_HEADER_INGEST_INTERVAL_MS = 60_000;
 const USAGE_LAST_GOOD_RETENTION_MS = 24 * 60 * 60_000;
 /**
+ * Oldest recorded usage report still trusted to say a provider is spent (see
+ * `#recordedUsageExhaustionByAccount`). The window's `resetsAt` already has to
+ * be in the future, so this only bounds how long a stale plan/quota shape can
+ * be held against a provider.
+ */
+const RECORDED_USAGE_EXHAUSTION_MAX_AGE_MS = 24 * 60 * 60_000;
+/**
  * Downsample usage history to at most one row per hour per account window: a
  * snapshot landing in the same hour bucket as the series' latest row
  * overwrites it in place. That bound makes further retention pruning
@@ -1648,26 +1655,75 @@ export class AuthStorage {
 	}
 
 	/**
-	 * Earliest time this provider frees up when EVERY stored credential is
-	 * currently quota/rate-limit blocked, or `undefined` when at least one is
-	 * usable right now (including when the provider has no credentials at all —
-	 * "not parked" and "not configured" are different questions, and callers
-	 * already gate on credential presence separately).
+	 * Latest still-future reset among `exhausted` windows in the most recent
+	 * recorded usage report for each account, keyed by usage account identity.
 	 *
-	 * Reads the same in-memory + persisted block state credential selection
-	 * consults, so a freshly started process still observes a park recorded by
-	 * an earlier one ({@link markUsageLimitReached} writes it through
-	 * `store.upsertCredentialBlock`). Deliberately unscoped: callers routing
-	 * work *before* issuing a request have no model/blockScope context yet, so
-	 * this answers the coarse "is this provider parked at all" question.
+	 * `resetsAt` is absolute, so a report is authoritative for as long as the
+	 * window it describes has not reset — no short freshness window needed.
+	 * Rows older than {@link RECORDED_USAGE_EXHAUSTION_MAX_AGE_MS} are still
+	 * dropped so a plan change eventually stops being held against a provider.
+	 * Any exhausted window counts: a spent 5h window blocks requests even when
+	 * the 7d window has room, which is the same reading `#isUsageLimitReached`
+	 * applies when it extends a block to the served reset time.
+	 */
+	#recordedUsageExhaustionByAccount(provider: string, nowMs: number): Map<string, number> {
+		const exhaustedUntilByAccount = new Map<string, number>();
+		const entries = this.listUsageHistory({
+			provider,
+			sinceMs: nowMs - RECORDED_USAGE_EXHAUSTION_MAX_AGE_MS,
+		});
+		const latestPerWindow = new Map<string, UsageHistoryEntry>();
+		for (const entry of entries) {
+			const key = `${entry.accountKey}\u0000${entry.limitId}`;
+			const previous = latestPerWindow.get(key);
+			if (!previous || entry.recordedAt > previous.recordedAt) latestPerWindow.set(key, entry);
+		}
+		for (const entry of latestPerWindow.values()) {
+			if (entry.status !== "exhausted") continue;
+			const resetsAt = entry.resetsAt;
+			if (resetsAt === undefined || resetsAt <= nowMs) continue;
+			const previous = exhaustedUntilByAccount.get(entry.accountKey);
+			if (previous === undefined || resetsAt > previous) exhaustedUntilByAccount.set(entry.accountKey, resetsAt);
+		}
+		return exhaustedUntilByAccount;
+	}
+
+	/**
+	 * Earliest time this provider frees up when EVERY stored credential is
+	 * currently unusable, or `undefined` when at least one is usable right now
+	 * (including when the provider has no credentials at all — "not parked" and
+	 * "not configured" are different questions, and callers already gate on
+	 * credential presence separately).
+	 *
+	 * Merges the two durable signals that outlive a process, so work can be
+	 * routed away from a spent provider *before* spending a request to
+	 * rediscover it:
+	 * - the credential block {@link markUsageLimitReached} persists through
+	 *   `store.upsertCredentialBlock` (short-lived by default, extended to the
+	 *   served reset when a usage report supplies one);
+	 * - a recorded usage report whose window is exhausted and has not reset,
+	 *   which survives long after the block was pruned.
+	 *
+	 * Deliberately unscoped: callers routing work before issuing a request have
+	 * no model/blockScope context yet, so this answers the coarse "is this
+	 * provider spent at all" question.
 	 */
 	providerBlockedUntil(provider: string): number | undefined {
 		const stored = this.#getStoredCredentials(provider);
 		if (stored.length === 0) return undefined;
+		const nowMs = Date.now();
+		const exhaustedUntilByAccount = this.#recordedUsageExhaustionByAccount(provider, nowMs);
 		let earliest: number | undefined;
 		for (const [index, entry] of stored.entries()) {
 			const providerKey = this.#getProviderTypeKey(provider, entry.credential.type);
-			const blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index);
+			let blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index);
+			if (exhaustedUntilByAccount.size > 0) {
+				const accountKey = this.#buildUsageCacheIdentity(this.#buildUsageCredential(entry.credential));
+				const exhaustedUntil = exhaustedUntilByAccount.get(accountKey);
+				if (exhaustedUntil !== undefined && (blockedUntil === undefined || exhaustedUntil > blockedUntil)) {
+					blockedUntil = exhaustedUntil;
+				}
+			}
 			if (blockedUntil === undefined) return undefined;
 			if (earliest === undefined || blockedUntil < earliest) earliest = blockedUntil;
 		}
