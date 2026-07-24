@@ -406,6 +406,30 @@ export const DEVIN_VARIANT_COLLAPSE_TABLE: VariantCollapseTable = {
 			DEVIN_FIVE_TIER_EFFORTS,
 		),
 		devinTierFamily(
+			"claude-opus-5",
+			"Claude Opus 5",
+			{
+				low: "claude-opus-5-low",
+				medium: "claude-opus-5-medium",
+				high: "claude-opus-5-high",
+				xhigh: "claude-opus-5-xhigh",
+				max: "claude-opus-5-max",
+			},
+			DEVIN_FIVE_TIER_EFFORTS,
+		),
+		devinTierFamily(
+			"claude-opus-5-fast",
+			"Claude Opus 5 Fast",
+			{
+				low: "claude-opus-5-low-fast",
+				medium: "claude-opus-5-medium-fast",
+				high: "claude-opus-5-high-fast",
+				xhigh: "claude-opus-5-xhigh-fast",
+				max: "claude-opus-5-max-fast",
+			},
+			DEVIN_FIVE_TIER_EFFORTS,
+		),
+		devinTierFamily(
 			"gpt-5-2",
 			"GPT-5.2",
 			{
