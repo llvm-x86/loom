@@ -1647,6 +1647,33 @@ export class AuthStorage {
 		return this.#getCredentialBlockedUntil(provider, providerKey, credentialIndex, blockScope) !== undefined;
 	}
 
+	/**
+	 * Earliest time this provider frees up when EVERY stored credential is
+	 * currently quota/rate-limit blocked, or `undefined` when at least one is
+	 * usable right now (including when the provider has no credentials at all —
+	 * "not parked" and "not configured" are different questions, and callers
+	 * already gate on credential presence separately).
+	 *
+	 * Reads the same in-memory + persisted block state credential selection
+	 * consults, so a freshly started process still observes a park recorded by
+	 * an earlier one ({@link markUsageLimitReached} writes it through
+	 * `store.upsertCredentialBlock`). Deliberately unscoped: callers routing
+	 * work *before* issuing a request have no model/blockScope context yet, so
+	 * this answers the coarse "is this provider parked at all" question.
+	 */
+	providerBlockedUntil(provider: string): number | undefined {
+		const stored = this.#getStoredCredentials(provider);
+		if (stored.length === 0) return undefined;
+		let earliest: number | undefined;
+		for (const [index, entry] of stored.entries()) {
+			const providerKey = this.#getProviderTypeKey(provider, entry.credential.type);
+			const blockedUntil = this.#getCredentialBlockedUntil(provider, providerKey, index);
+			if (blockedUntil === undefined) return undefined;
+			if (earliest === undefined || blockedUntil < earliest) earliest = blockedUntil;
+		}
+		return earliest;
+	}
+
 	/** Marks a credential as blocked until the specified time. */
 	#markCredentialBlocked(
 		provider: string,

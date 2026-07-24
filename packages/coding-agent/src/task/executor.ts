@@ -65,6 +65,7 @@ import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
+	type ModelRedirectNote,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
@@ -248,6 +249,56 @@ function buildImplicitSubagentFallbackChain(
 		pushProviderModel(flagship);
 	}
 	return chain.slice(0, IMPLICIT_SUBAGENT_FALLBACK_LIMIT);
+}
+
+/**
+ * Redirect a subagent's primary model when EVERY credential on its provider is
+ * quota-parked right now.
+ *
+ * Reactive fallback cannot cover this: the park is recorded durably by
+ * `markUsageLimitReached`, so a fan-out of N subagents against a parked
+ * provider burns N instant-fail requests (~300ms each) rediscovering what the
+ * credential store already knew — and a fresh process has no in-memory
+ * cooldown to consult. Candidates come from the same ordering the retry chain
+ * uses; each is itself checked for a park, so an all-parked machine returns
+ * `undefined` and the caller keeps the original model rather than rerouting to
+ * something equally dead.
+ */
+function redirectAwayFromParkedProvider(
+	primary: Model<Api>,
+	modelRegistry: ModelRegistry,
+	authStorage: AuthStorage,
+	settings: Settings,
+	configuredChain: string[] | undefined,
+): (ModelRedirectNote & { model: Model<Api> }) | undefined {
+	// Extensions may supply their own ModelRegistry (`registerProvider`), so the
+	// accessor is not guaranteed to exist on every registry's auth storage.
+	// Treat its absence as "nothing known to be parked" rather than failing the spawn.
+	if (typeof authStorage?.providerBlockedUntil !== "function") return undefined;
+	const blockedUntilMs = authStorage.providerBlockedUntil(primary.provider);
+	if (blockedUntilMs === undefined) return undefined;
+	const seen = new Set<string>();
+	const candidates = [
+		...(configuredChain ?? []),
+		...buildImplicitSubagentFallbackChain(primary, modelRegistry, settings),
+	];
+	for (const selector of candidates) {
+		if (seen.has(selector)) continue;
+		seen.add(selector);
+		const parsed = parseModelString(selector);
+		// Same-provider entries (possible in a configured chain) are parked too.
+		if (!parsed || parsed.provider === primary.provider) continue;
+		if (authStorage.providerBlockedUntil(parsed.provider) !== undefined) continue;
+		const candidate = modelRegistry.find(parsed.provider, parsed.id);
+		if (!candidate) continue;
+		return {
+			model: candidate,
+			from: formatModelString(primary),
+			to: formatModelString(candidate),
+			blockedUntilMs,
+		};
+	}
+	return undefined;
 }
 
 function installSubagentRetryFallbackChain(args: {
@@ -2011,6 +2062,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		contextWindow: progress.contextWindow,
 		modelOverride,
 		resolvedModel: progress.resolvedModel,
+		modelRedirect: progress.modelRedirect,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -2426,7 +2478,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					? resolveSubagentDefaultRetryFallbackChain(subagentSettings)
 					: undefined;
 			const {
-				model,
+				model: resolvedPrimaryModel,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
@@ -2440,6 +2492,33 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 				),
 			);
+			// Every credential on the resolved provider may be quota-parked right
+			// now (a park an earlier process persisted). Requests against it
+			// instant-fail, so reroute here rather than spending the spawn to
+			// rediscover it.
+			const parkedRedirect = resolvedPrimaryModel
+				? redirectAwayFromParkedProvider(
+						resolvedPrimaryModel,
+						modelRegistry,
+						authStorage,
+						subagentSettings,
+						defaultRetryFallbackChain,
+					)
+				: undefined;
+			const model = parkedRedirect?.model ?? resolvedPrimaryModel;
+			if (parkedRedirect) {
+				progress.modelRedirect = {
+					from: parkedRedirect.from,
+					to: parkedRedirect.to,
+					blockedUntilMs: parkedRedirect.blockedUntilMs,
+				};
+				logger.warn("Subagent provider quota-parked; redirected before spawn", {
+					from: parkedRedirect.from,
+					to: parkedRedirect.to,
+					blockedUntil: new Date(parkedRedirect.blockedUntilMs).toISOString(),
+					requested: modelPatterns,
+				});
+			}
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
