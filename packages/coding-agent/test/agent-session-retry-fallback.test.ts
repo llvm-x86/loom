@@ -221,6 +221,56 @@ describe("AgentSession retry fallback", () => {
 		]);
 	});
 
+	it("synthesizes a fallback when a hard error hits a model with no configured chain", async () => {
+		// No `retry.fallbackChains` entry anywhere — the default for every user
+		// who never touched that setting. A hard (non-retryable, non-quota)
+		// provider error — e.g. "this model id isn't available on your plan" —
+		// must still land on a different credentialed model instead of failing
+		// the turn outright.
+		const primaryModel = getBundledModel("anthropic", "claude-sonnet-4-5");
+		if (!primaryModel) throw new Error("Expected bundled test model to exist");
+
+		const requestedModels: string[] = [];
+		const mock = createMockModel();
+		let primaryAttempts = 0;
+		const agent = new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: { model: primaryModel, systemPrompt: ["Test"], tools: [], messages: [] },
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id && primaryAttempts === 0) {
+					primaryAttempts += 1;
+					mock.push({ throw: "This model is not available on your current plan (403)" });
+				} else {
+					mock.push({ content: [`ok:${model.provider}/${model.id}`] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+
+		const settings = Settings.isolated({ "compaction.enabled": false, "retry.baseDelayMs": 5 });
+		settings.setModelRole("default", `${primaryModel.provider}/${primaryModel.id}`);
+
+		session = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings,
+			modelRegistry,
+		});
+
+		const { retryStartEvents } = trackRetryEvents(session);
+		await session.prompt("Trigger a hard, non-retryable provider error");
+		await session.waitForIdle();
+
+		expect(requestedModels).toHaveLength(2);
+		expect(requestedModels[0]).toBe(`${primaryModel.provider}/${primaryModel.id}`);
+		expect(requestedModels[1]).not.toBe(`${primaryModel.provider}/${primaryModel.id}`);
+		expect(retryStartEvents.length).toBeGreaterThan(0);
+		const lastMessage = getLastAssistantMessage(session);
+		expect(lastMessage.stopReason).toBe("stop");
+		expect(session.model && `${session.model.provider}/${session.model.id}`).toBe(requestedModels[1]);
+	});
+
 	it("applies a model-keyed fallback chain to advisor quota failures", async () => {
 		const mainModel = getBundledModel("openai", "gpt-4o-mini");
 		const advisorPrimary = getBundledModel("devin", "gpt-5-6-sol");

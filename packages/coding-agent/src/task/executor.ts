@@ -8,12 +8,11 @@ import path from "node:path";
 import type { AgentEvent, AgentIdentity, AgentTelemetryConfig } from "@oh-my-pi/pi-agent-core";
 import { recordHandoff, resolveTelemetry } from "@oh-my-pi/pi-agent-core";
 import type { Api, Model, ServiceTierByFamily, Usage } from "@oh-my-pi/pi-ai";
-import { DEFAULT_MODEL_PER_PROVIDER } from "@oh-my-pi/pi-catalog/provider-models";
 import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-my-pi/pi-utils";
 import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
 import {
-	filterAvailableModelsByEnabledPatterns,
+	buildImplicitModelFallbackChain,
 	formatModelSelectorValue,
 	formatModelString,
 	formatModelStringWithRouting,
@@ -141,14 +140,6 @@ function normalizeModelPatterns(value: string | string[] | undefined): string[] 
 }
 
 const SUBAGENT_RETRY_FALLBACK_ROLE_PREFIX = "subagent:";
-/** Upper bound on synthesized cross-provider fallback entries for one subagent. */
-const IMPLICIT_SUBAGENT_FALLBACK_LIMIT = 5;
-/**
- * Providers that run on the user's own machine: they do not return
- * capacity/quota errors, so a subagent pinned to one must never silently
- * escalate to a paid cloud API it happens to hold credentials for.
- */
-const ON_DEVICE_PROVIDERS: Record<string, true> = { ollama: true, "lm-studio": true, "llama.cpp": true };
 
 interface SubagentRetryFallbackCandidate {
 	model: Model<Api>;
@@ -200,56 +191,6 @@ function resolveSubagentDefaultRetryFallbackChain(settings: Settings): string[] 
  * credentialed provider, so an all-one-provider box still reaches its other
  * logins. The child's retry engine re-validates auth and cooldown per candidate.
  */
-function buildImplicitSubagentFallbackChain(
-	primary: Model<Api>,
-	modelRegistry: ModelRegistry,
-	settings: Settings,
-): string[] {
-	if (ON_DEVICE_PROVIDERS[primary.provider]) return [];
-	const available = filterAvailableModelsByEnabledPatterns(
-		modelRegistry.getAvailable(),
-		settings.get("enabledModels") ?? [],
-		settings,
-	);
-	const primarySelector = formatModelString(primary);
-	const roleModelSelectors = new Set<string>();
-	const roles = settings.getModelRoles();
-	for (const role in roles) {
-		const value = roles[role];
-		if (!value) continue;
-		const parsed = parseModelString(value);
-		if (parsed) roleModelSelectors.add(`${parsed.provider}/${parsed.id}`);
-	}
-
-	const seenProviders = new Set<string>([primary.provider]);
-	const chain: string[] = [];
-	const pushProviderModel = (candidate: Model<Api>): void => {
-		if (seenProviders.has(candidate.provider)) return;
-		const selector = formatModelString(candidate);
-		if (selector === primarySelector) return;
-		seenProviders.add(candidate.provider);
-		chain.push(selector);
-	};
-
-	// 1. Role-configured models on a different provider — the user's own picks.
-	for (const candidate of available) {
-		if (roleModelSelectors.has(formatModelString(candidate))) pushProviderModel(candidate);
-	}
-	// 2. Remaining credentialed providers, preferring each provider's flagship.
-	const byProvider = new Map<string, Model<Api>[]>();
-	for (const candidate of available) {
-		if (seenProviders.has(candidate.provider)) continue;
-		const group = byProvider.get(candidate.provider);
-		if (group) group.push(candidate);
-		else byProvider.set(candidate.provider, [candidate]);
-	}
-	for (const [provider, models] of byProvider) {
-		const defaultId = DEFAULT_MODEL_PER_PROVIDER[provider as keyof typeof DEFAULT_MODEL_PER_PROVIDER];
-		const flagship = models.find(candidate => candidate.id === defaultId) ?? models[0];
-		pushProviderModel(flagship);
-	}
-	return chain.slice(0, IMPLICIT_SUBAGENT_FALLBACK_LIMIT);
-}
 
 /**
  * Redirect a subagent's primary model when EVERY credential on its provider is
@@ -280,7 +221,7 @@ function redirectAwayFromParkedProvider(
 	const seen = new Set<string>();
 	const candidates = [
 		...(configuredChain ?? []),
-		...buildImplicitSubagentFallbackChain(primary, modelRegistry, settings),
+		...buildImplicitModelFallbackChain(primary, modelRegistry, settings),
 	];
 	for (const selector of candidates) {
 		if (seen.has(selector)) continue;
@@ -326,7 +267,7 @@ function installSubagentRetryFallbackChain(args: {
 			? fallbackSelectors
 			: defaultFallbackChain && defaultFallbackChain.length > 0
 				? defaultFallbackChain
-				: buildImplicitSubagentFallbackChain(model, modelRegistry, settings);
+				: buildImplicitModelFallbackChain(model, modelRegistry, settings);
 	if (
 		!Array.isArray(fallbackChain) ||
 		fallbackChain.length === 0 ||

@@ -1599,6 +1599,98 @@ export function filterAvailableModelsByEnabledPatterns(
 	return includeSyntheticAllowedModels(available, allowedModels);
 }
 
+/** Providers that run entirely on the user's own hardware — no account-wide quota to fall back away from. */
+export const ON_DEVICE_PROVIDERS: Record<string, true> = { ollama: true, "lm-studio": true, "llama.cpp": true };
+
+/** Cap on synthesized fallback candidates: enough breadth without turning one failure into a five-model tour. */
+const IMPLICIT_MODEL_FALLBACK_LIMIT = 5;
+
+/**
+ * Synthesize a fallback chain for `primary` from every other credentialed,
+ * enabled model on the box, for callers that never configured
+ * `retry.fallbackChains` — which is the default. Without this, a hard
+ * provider error (a model id the account isn't entitled to, a dead
+ * credential, a persistent 4xx) has nowhere to route and the turn just
+ * fails, even though a perfectly usable alternative sits one selector away.
+ *
+ * Ordered by how likely a candidate is to actually work and how little it
+ * changes the user's intent:
+ *  1. Other models on `primary`'s own provider, closest in output price —
+ *     the direct fix for "this specific model id isn't available on the
+ *     plan/account but the provider and every other model on it are fine"
+ *     (e.g. a Cursor seat that excludes one premium model).
+ *  2. Role-configured models on providers not yet covered — the user's own
+ *     picks, so switching providers still lands somewhere they chose.
+ *  3. Remaining credentialed providers, one representative (role-preferred,
+ *     else flagship, else first available) each.
+ *
+ * Returns `[]` for an on-device primary (`ON_DEVICE_PROVIDERS`): a local
+ * model has no plan/quota to be short on, so a "failure" here is a real bug
+ * worth surfacing, not something to paper over with a cloud fallback the
+ * user never asked to pay for.
+ */
+export function buildImplicitModelFallbackChain(
+	primary: Model<Api>,
+	modelRegistry: ModelRegistry,
+	settings: Settings,
+	limit: number = IMPLICIT_MODEL_FALLBACK_LIMIT,
+): string[] {
+	if (ON_DEVICE_PROVIDERS[primary.provider]) return [];
+	const available = filterAvailableModelsByEnabledPatterns(
+		modelRegistry.getAvailable(),
+		settings.get("enabledModels") ?? [],
+		settings,
+	);
+	const primarySelector = formatModelString(primary);
+	const roleModelSelectors = new Set<string>();
+	const roles = settings.getModelRoles();
+	for (const role in roles) {
+		const value = roles[role];
+		if (!value) continue;
+		const parsed = parseModelString(value);
+		if (parsed) roleModelSelectors.add(`${parsed.provider}/${parsed.id}`);
+	}
+
+	const chain: string[] = [];
+	const seenSelectors = new Set<string>([primarySelector]);
+	const pushModel = (candidate: Model<Api>): void => {
+		const selector = formatModelString(candidate);
+		if (seenSelectors.has(selector)) return;
+		seenSelectors.add(selector);
+		chain.push(selector);
+	};
+
+	// 1. Same-provider alternates, nearest in output price.
+	const priceDistance = (candidate: Model<Api>): number => Math.abs(candidate.cost.output - primary.cost.output);
+	const sameProvider = available
+		.filter(candidate => candidate.provider === primary.provider && formatModelString(candidate) !== primarySelector)
+		.sort((a, b) => priceDistance(a) - priceDistance(b));
+	for (const candidate of sameProvider.slice(0, 2)) pushModel(candidate);
+
+	// 2. Role-configured models on providers not yet covered.
+	const seenProviders = new Set<string>([primary.provider]);
+	for (const candidate of available) {
+		if (seenProviders.has(candidate.provider) || !roleModelSelectors.has(formatModelString(candidate))) continue;
+		seenProviders.add(candidate.provider);
+		pushModel(candidate);
+	}
+	// 3. Remaining credentialed providers, preferring each provider's flagship.
+	const byProvider = new Map<string, Model<Api>[]>();
+	for (const candidate of available) {
+		if (seenProviders.has(candidate.provider)) continue;
+		const group = byProvider.get(candidate.provider);
+		if (group) group.push(candidate);
+		else byProvider.set(candidate.provider, [candidate]);
+	}
+	for (const [provider, models] of byProvider) {
+		seenProviders.add(provider);
+		const defaultId = DEFAULT_MODEL_PER_PROVIDER[provider as keyof typeof DEFAULT_MODEL_PER_PROVIDER];
+		const flagship = models.find(candidate => candidate.id === defaultId) ?? models[0];
+		pushModel(flagship);
+	}
+	return chain.slice(0, limit);
+}
+
 export interface ResolveCliModelResult {
 	model: Model<Api> | undefined;
 	/** configuredPatterns is the full configured fallback chain when the selector resolves through a role. */
