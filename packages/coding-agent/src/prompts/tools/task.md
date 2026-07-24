@@ -14,7 +14,6 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - **Agent typing:** Pick each item's `agent` type. Read-only research MUST use `agent: "scout"` (faster model). Use default worker only when no specialist fits.
 - **No overhead:** Each `task` MUST instruct its agent to skip formatters, linters, and project-wide test suites. Run those once at the end.
 - **One-pass:** Prefer agents that investigate AND edit in one pass; spin a read-only scout only when affected files are genuinely unknown.
-- **Provider health:** Omit `model` to inherit the role's configured default. Override only toward a provider with available quota — NEVER pin a model on a provider you have already seen quota-exhausted or on cooldown this session; that spawn fails fast rather than rerouting.
 
 # Inputs
 {{#if batchEnabled}}
