@@ -15298,7 +15298,7 @@ export class AgentSession {
 		options?: { pinFallback?: boolean; allowImplicit?: boolean },
 	): Promise<boolean> {
 		const role = this.#activeRetryFallback?.role ?? this.#resolveRetryFallbackRole(currentSelector);
-		if (role) {
+		if (role && role !== IMPLICIT_RETRY_FALLBACK_ROLE) {
 			for (const selector of this.#findRetryFallbackCandidates(role, currentSelector)) {
 				if (this.#isRetryFallbackSelectorSuppressed(selector)) continue;
 				const resolved = resolveModelOverride([selector.raw], this.#modelRegistry, this.settings);
@@ -15390,7 +15390,8 @@ export class AgentSession {
 		if (this.#hasReplayUnsafeToolOutput(message)) return false;
 		const currentSelector = formatRetryFallbackSelector(model, this.thinkingLevel);
 		const role = this.#activeRetryFallback?.role ?? this.#resolveRetryFallbackRole(currentSelector);
-		if (role) return this.#findRetryFallbackCandidates(role, currentSelector).length > 0;
+		if (role && role !== IMPLICIT_RETRY_FALLBACK_ROLE)
+			return this.#findRetryFallbackCandidates(role, currentSelector).length > 0;
 		if (ON_DEVICE_PROVIDERS[model.provider]) return false;
 		return buildImplicitModelFallbackChain(model, this.#modelRegistry, this.settings).length > 0;
 	}

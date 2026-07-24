@@ -16820,11 +16820,11 @@
 				],
 				"requiresEffort": true,
 				"effortRouting": {
-					"low": "claude-opus-4-8-low",
-					"medium": "claude-opus-4-8-medium",
-					"high": "claude-opus-4-8-high",
-					"xhigh": "claude-opus-4-8-xhigh",
-					"max": "claude-opus-4-8-max"
+					"low": "claude-opus-5-low",
+					"medium": "claude-opus-5-medium",
+					"high": "claude-opus-5-high",
+					"xhigh": "claude-opus-5-xhigh",
+					"max": "claude-opus-5-max"
 				}
 			},
 			"requestModelId": "claude-opus-5-low"
@@ -16900,11 +16900,11 @@
 				],
 				"requiresEffort": true,
 				"effortRouting": {
-					"low": "claude-opus-4-8-low-fast",
-					"medium": "claude-opus-4-8-medium-fast",
-					"high": "claude-opus-4-8-high-fast",
-					"xhigh": "claude-opus-4-8-xhigh-fast",
-					"max": "claude-opus-4-8-max-fast"
+					"low": "claude-opus-5-low-fast",
+					"medium": "claude-opus-5-medium-fast",
+					"high": "claude-opus-5-high-fast",
+					"xhigh": "claude-opus-5-xhigh-fast",
+					"max": "claude-opus-5-max-fast"
 				}
 			},
 			"requestModelId": "claude-opus-5-low-fast"
@@ -22510,7 +22510,7 @@
 			"name": "Claude Opus 5",
 			"api": "anthropic-messages",
 			"provider": "google-vertex",
-			"baseUrl": "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-opus-4-8@default:streamRawPredict",
+			"baseUrl": "https://{location}-aiplatform.googleapis.com/v1/projects/{project}/locations/{location}/publishers/anthropic/models/claude-opus-5@default:streamRawPredict",
 			"reasoning": true,
 			"input": [
 				"text",

@@ -1621,8 +1621,9 @@ const IMPLICIT_MODEL_FALLBACK_LIMIT = 5;
  *     (e.g. a Cursor seat that excludes one premium model).
  *  2. Role-configured models on providers not yet covered — the user's own
  *     picks, so switching providers still lands somewhere they chose.
- *  3. Remaining credentialed providers, one representative (role-preferred,
- *     else flagship, else first available) each.
+ *  3. Remaining credentialed providers (none have a role-configured model —
+ *     step 2 already claimed every provider that does), each provider's
+ *     flagship, else its first available model.
  *
  * Returns `[]` for an on-device primary (`ON_DEVICE_PROVIDERS`): a local
  * model has no plan/quota to be short on, so a "failure" here is a real bug
@@ -1674,7 +1675,9 @@ export function buildImplicitModelFallbackChain(
 		seenProviders.add(candidate.provider);
 		pushModel(candidate);
 	}
-	// 3. Remaining credentialed providers, preferring each provider's flagship.
+	// 3. Remaining credentialed providers — none have a role-configured model
+	//    (step 2 already claimed every provider that does), so just prefer
+	//    each provider's flagship, else its first available model.
 	const byProvider = new Map<string, Model<Api>[]>();
 	for (const candidate of available) {
 		if (seenProviders.has(candidate.provider)) continue;
