@@ -2,6 +2,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { $ } from "bun";
 import { detectHostAvx2Support } from "../../../scripts/host-detect";
+import { fetchPrebuiltNative } from "./fetch-prebuilt-native";
 import { generateEnumExports } from "./gen-enums";
 
 // pcre2-sys prefers a system libpcre2 when pkg-config finds one. Release addons
@@ -53,6 +54,96 @@ if (!isCrossCompile && !Bun.env.RUSTFLAGS) {
 	} else {
 		Bun.env.RUSTFLAGS = "-C target-cpu=native";
 	}
+}
+
+// =========================================================================
+// Prebuilt fallback: skip the from-source build when no Rust toolchain is
+// present. Every supported target's addon is published on npm as
+// `@oh-my-pi/pi-natives-<platform>-<arch>` at the lockstep version, so a fresh
+// dev box (most painfully Windows, which ships no checked-in win32 .node) can
+// download the already-built `.node` instead of failing deep inside the napi
+// CLI with the opaque `cargo metadata failed to run`.
+//
+//   PI_NATIVE_PREBUILT=1  force the prebuilt download even when cargo exists
+//   PI_NATIVE_PREBUILT=0  never fall back; surface the missing-cargo error
+//
+// Default: use cargo when present, otherwise fetch the prebuilt.
+function missingCargoMessage(fetchError?: unknown): string {
+	const detail = fetchError
+		? `\n\nPrebuilt fallback also failed:\n  ${fetchError instanceof Error ? fetchError.message : String(fetchError)}`
+		: "";
+	const windows =
+		targetPlatform === "win32"
+			? [
+					"",
+					"On Windows, install the Rust toolchain:",
+					"  1. Download the bootstrapper AS rustup-init.exe (the name matters —",
+					"     the win.rustup.rs proxy rejects `-y` unless the file is rustup-init.exe):",
+					"       curl.exe -sSfL https://win.rustup.rs/x86_64 -o rustup-init.exe",
+					"  2. Run it non-interactively:",
+					"       .\\rustup-init.exe -y",
+					'  3. Reopen the shell (or `$env:Path += ";$env:USERPROFILE\\.cargo\\bin"`).',
+					"",
+					"Building from source needs a C toolchain (this crate compiles pcre2 and",
+					"tree-sitter C sources). The best-supported option is the default",
+					"x86_64-pc-windows-msvc toolchain + VS Build Tools ('Desktop development",
+					"with C++', which provides cl.exe and the MSVC linker). The GNU toolchain",
+					"is an alternative but still needs MinGW-w64 gcc on PATH:",
+					"       rustup toolchain install stable-x86_64-pc-windows-gnu",
+					"       rustup default stable-x86_64-pc-windows-gnu",
+					"",
+					"Or skip the compiler entirely and pull the published prebuilt addon:",
+					"       bun --cwd=packages/natives run gen:native:prebuilt",
+				]
+			: [
+					"",
+					"Install the Rust toolchain from https://rustup.rs, e.g.:",
+					"       curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y",
+					"",
+					"Or pull the published prebuilt addon instead of building:",
+					"       bun --cwd=packages/natives run gen:native:prebuilt",
+				];
+	return (
+		`Cannot build @oh-my-pi/pi-natives for ${targetPlatform}-${targetArch}: the Rust toolchain (cargo) was not found on PATH.` +
+		`${windows.join("\n")}${detail}`
+	);
+}
+
+async function runPrebuiltFallback(): Promise<void> {
+	const { version } = (await Bun.file(packageJsonPath).json()) as { version: string };
+	console.log(`No cargo toolchain; fetching prebuilt pi-natives ${targetPlatform}-${targetArch}@${version} from npm…`);
+	try {
+		const result = await fetchPrebuiltNative({
+			platform: targetPlatform,
+			arch: targetArch,
+			version,
+			nativeDir,
+			// Reuse an already-staged addon (e.g. from `gen:native:prebuilt`) so a
+			// repeat `bun run build` does not re-download the ~130 MB payload.
+			force: false,
+		});
+		for (const file of result.written) {
+			console.log(`  installed ${path.basename(file)} from ${result.packageName}@${result.version}`);
+		}
+		// Keep the checked-in ESM/enum surface in lockstep with the fetched addon.
+		await generateEnumExports();
+		console.log("Prebuilt install complete.");
+	} catch (fetchError) {
+		throw new Error(missingCargoMessage(fetchError));
+	}
+}
+
+const cargoBin = Bun.which("cargo");
+const prebuiltPref = Bun.env.PI_NATIVE_PREBUILT;
+if (prebuiltPref === "1" || (!cargoBin && prebuiltPref !== "0")) {
+	if (isCrossCompile && !cargoBin) {
+		throw new Error(missingCargoMessage());
+	}
+	await runPrebuiltFallback();
+	process.exit(0);
+}
+if (!cargoBin) {
+	throw new Error(missingCargoMessage());
 }
 
 async function cleanupStaleTemps(dir: string): Promise<void> {
