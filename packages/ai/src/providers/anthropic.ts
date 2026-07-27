@@ -1800,6 +1800,7 @@ const streamAnthropicOnce = (
 				(providerSessionState?.strictToolsDisabled ?? false) || (model.compat?.disableStrictTools ?? false);
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
+			let forceStripThinkingSignatures = false;
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
@@ -1941,6 +1942,7 @@ const streamAnthropicOnce = (
 					disableStrictTools,
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,
+					forceStripThinkingSignatures,
 					supportsEagerToolInputStreaming,
 					fallbacks,
 				});
@@ -2547,6 +2549,7 @@ const streamAnthropicOnce = (
 							providerSessionState.replayUnsignedThinkingDisabled = true;
 						}
 						forceDemoteUnsignedThinking = true;
+						forceStripThinkingSignatures = true;
 						params = await prepareParams();
 						providerRetryAttempt = 0;
 						output.content.length = 0;
@@ -3215,6 +3218,10 @@ type AnthropicParamBuildOptions = {
 	disableStrictTools: boolean;
 	useUmansGatewayWebSearch: boolean;
 	forceDemoteUnsignedThinking: boolean;
+	/** Set after a live `Invalid signature in thinking block` 400: strip every
+	 * thinking signature (not just unsigned demotion) so transform's existing
+	 * drop/demote rules remove the poisoned blocks from the wire. */
+	forceStripThinkingSignatures?: boolean;
 	supportsEagerToolInputStreaming: boolean;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
@@ -3231,6 +3238,7 @@ function buildParams(
 		disableStrictTools,
 		useUmansGatewayWebSearch,
 		forceDemoteUnsignedThinking,
+		forceStripThinkingSignatures = false,
 		supportsEagerToolInputStreaming,
 		fallbacks = options?.fallbacks,
 	} = buildOptions;
@@ -3242,6 +3250,24 @@ function buildParams(
 		forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking
 			? { ...model, compat: { ...model.compat, replayUnsignedThinking: false } }
 			: model;
+	// Learned from a live `Invalid signature in thinking block` 400: a signed
+	// thinking block in history is invalid for this key+model (cross-key auth
+	// swap, proxy-minted signature, or signature corruption), and unsigned
+	// demotion alone cannot remove it. Strip every thinking signature up front
+	// so transform's normal rules drop (signing target, same model) or demote
+	// the blocks instead of replaying the invalid signature again.
+	const contextMessages = forceStripThinkingSignatures
+		? context.messages.map((msg): Message => {
+				if (msg.role !== "assistant" || !Array.isArray(msg.content)) return msg;
+				if (!msg.content.some(b => b.type === "thinking" && b.thinkingSignature)) return msg;
+				return {
+					...msg,
+					content: msg.content.map(b =>
+						b.type === "thinking" && b.thinkingSignature ? { ...b, thinkingSignature: undefined } : b,
+					),
+				};
+			})
+		: context.messages;
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention, isOAuthToken);
 
 	// Pre-compute system blocks so they occupy the right slot in the serialized body.
@@ -3370,7 +3396,7 @@ function buildParams(
 	// metadata → max_tokens → thinking → context_management → output_config → stream.
 	const params: MessageCreateParamsStreaming = {
 		model: options?.requestModelId ?? model.requestModelId ?? model.id,
-		messages: convertAnthropicMessages(context.messages, effectiveModel, isOAuthToken, {
+		messages: convertAnthropicMessages(contextMessages, effectiveModel, isOAuthToken, {
 			serverSideFallbackEnabled: !!fallbacks?.length,
 		}),
 		...(systemBlocks && { system: systemBlocks }),

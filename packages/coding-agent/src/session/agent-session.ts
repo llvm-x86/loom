@@ -13512,6 +13512,7 @@ export class AgentSession {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
+		let lastCandidateError: unknown;
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
@@ -13553,12 +13554,25 @@ export class AgentSession {
 					},
 				);
 			} catch (error) {
-				if (!AIError.is(AIError.classify(error, candidate.api), AIError.Flag.AuthFailed)) {
-					throw error;
-				}
+				const flags = AIError.classify(error, candidate.api);
+				if (AIError.is(flags, AIError.Flag.AuthFailed)) continue;
+				// Quota/rate-limit, transient, and context-overflow failures are
+				// candidate-local: an exhausted provider (e.g. cursor quota) must
+				// not kill compaction while another enabled model can still
+				// summarize. Fall through and remember the failure so an
+				// all-candidates-exhausted outcome reports the real provider
+				// error instead of a misleading auth message.
+				const candidateLocal =
+					AIError.is(flags, AIError.Flag.UsageLimit) ||
+					AIError.is(flags, AIError.Flag.Transient) ||
+					AIError.is(flags, AIError.Flag.Timeout) ||
+					AIError.is(flags, AIError.Flag.ContextOverflow);
+				if (!candidateLocal) throw error;
+				lastCandidateError = error;
 			}
 		}
 
+		if (lastCandidateError) throw lastCandidateError;
 		throw this.#buildCompactionAuthError();
 	}
 
