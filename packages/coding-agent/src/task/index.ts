@@ -48,7 +48,7 @@ import { AgentOutputManager } from "./output-manager";
 import { mapWithConcurrencyLimitAllSettled, Semaphore } from "./parallel";
 import { renderResult, renderCall as renderTaskCall } from "./render";
 import { repairTaskParams } from "./repair-args";
-import { appendSpawnErrorGuidance } from "./spawn-error-guidance";
+import { appendModelRedirectNote, appendSpawnErrorGuidance } from "./spawn-error-guidance";
 import { resolveEffectiveSubagentPolicy, runStructuredSubagent, StructuredSubagentError } from "./structured-subagent";
 
 function renderSubagentUserPrompt(assignment: string): string {
@@ -1487,7 +1487,7 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 				: undefined,
 			mergeSummary,
 		});
-		const text = appendSpawnErrorGuidance(summary, result);
+		const text = appendModelRedirectNote(appendSpawnErrorGuidance(summary, result), result.modelRedirect);
 
 		return {
 			content: [{ type: "text", text }],

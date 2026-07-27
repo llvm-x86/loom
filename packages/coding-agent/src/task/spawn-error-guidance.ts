@@ -14,7 +14,7 @@
  * to a text match when that structured signal isn't present (e.g. the
  * failure surfaced from `stderr` rather than the retry loop).
  */
-import type { SingleResult } from "./types";
+import type { ModelRedirectNote, SingleResult } from "./types";
 
 /** Mirrors the provider-side classification pi-ai uses for quota/rate-limit errors. */
 const RATE_LIMIT_TEXT_PATTERN = /resource_exhausted|usage.?limit|rate.?limit|insufficient_quota|429/i;
@@ -23,6 +23,29 @@ const RATE_LIMIT_TEXT_PATTERN = /resource_exhausted|usage.?limit|rate.?limit|ins
 const GUIDANCE_MARKER = "Do NOT retry the same model";
 
 type ClassifiableResult = Pick<SingleResult, "retryFailure" | "error" | "stderr" | "resolvedModel" | "agent">;
+
+/** Marker used both to compose and to detect an already-appended redirect note. */
+const REDIRECT_MARKER = "[model redirected]";
+
+/**
+ * Tell the parent agent that a spawn ran somewhere other than what it resolved,
+ * because every credential on the requested provider was quota-parked at spawn
+ * time. Without this the reroute is invisible: the parent sees a normal success
+ * and keeps pinning the parked provider on the next batch.
+ *
+ * Applies to successes as well as failures (the redirect is independent of the
+ * outcome) and is idempotent on text that already carries the note.
+ */
+export function appendModelRedirectNote(text: string, redirect: ModelRedirectNote | undefined): string {
+	if (!redirect) return text;
+	if (text.includes(REDIRECT_MARKER)) return text;
+	const frees = new Date(redirect.blockedUntilMs).toISOString().slice(11, 16);
+	return (
+		`${text}\n\n${REDIRECT_MARKER} \`${redirect.from}\` is quota-parked (every credential blocked, ` +
+		`earliest frees ~${frees}Z), so this ran on \`${redirect.to}\`. Routing already skips parked ` +
+		`providers, so omit \`model\` — or pin a provider you have not seen parked — instead of retrying \`${redirect.from}\`.`
+	);
+}
 
 /**
  * True when a failed spawn's error should be treated as a provider

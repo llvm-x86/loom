@@ -12,8 +12,11 @@ import { logger, popLoopPhase, prompt, pushLoopPhase, untilAborted } from "@oh-m
 import type { Rule } from "../capability/rule";
 import { ModelRegistry } from "../config/model-registry";
 import {
+	buildImplicitModelFallbackChain,
 	formatModelSelectorValue,
+	formatModelString,
 	formatModelStringWithRouting,
+	parseModelString,
 	resolveAgentPrewalkPattern,
 	resolveConfiguredModelPatterns,
 	resolveModelOverride,
@@ -61,6 +64,7 @@ import {
 	type AgentProgress,
 	MAX_OUTPUT_BYTES,
 	MAX_OUTPUT_LINES,
+	type ModelRedirectNote,
 	type SingleResult,
 	type StructuredSubagentOutput,
 	type StructuredSubagentSchemaMode,
@@ -174,6 +178,70 @@ function resolveSubagentDefaultRetryFallbackChain(settings: Settings): string[] 
 	return fallbackChain;
 }
 
+/**
+ * Build a runtime fallback chain of OTHER healthy providers for a subagent whose
+ * primary model has no configured `retry.fallbackChains` entry — the dynamic
+ * default so a capacity/quota error on one provider reroutes instead of failing
+ * the spawn. `getAvailable()` already drops providers without credentials or that
+ * are disabled, and `enabledModels` (when set) scopes it further, so every
+ * candidate is a provider this machine can actually reach. The primary's own
+ * provider is excluded (it just failed and will not recover mid-turn) and
+ * on-device primaries get no chain at all. Models the user configured for a role
+ * come first — their chosen cost/quality — then one flagship per remaining
+ * credentialed provider, so an all-one-provider box still reaches its other
+ * logins. The child's retry engine re-validates auth and cooldown per candidate.
+ */
+
+/**
+ * Redirect a subagent's primary model when EVERY credential on its provider is
+ * quota-parked right now.
+ *
+ * Reactive fallback cannot cover this: the park is recorded durably by
+ * `markUsageLimitReached`, so a fan-out of N subagents against a parked
+ * provider burns N instant-fail requests (~300ms each) rediscovering what the
+ * credential store already knew — and a fresh process has no in-memory
+ * cooldown to consult. Candidates come from the same ordering the retry chain
+ * uses; each is itself checked for a park, so an all-parked machine returns
+ * `undefined` and the caller keeps the original model rather than rerouting to
+ * something equally dead.
+ */
+function redirectAwayFromParkedProvider(
+	primary: Model<Api>,
+	modelRegistry: ModelRegistry,
+	authStorage: AuthStorage,
+	settings: Settings,
+	configuredChain: string[] | undefined,
+): (ModelRedirectNote & { model: Model<Api> }) | undefined {
+	// Extensions may supply their own ModelRegistry (`registerProvider`), so the
+	// accessor is not guaranteed to exist on every registry's auth storage.
+	// Treat its absence as "nothing known to be parked" rather than failing the spawn.
+	if (typeof authStorage?.providerBlockedUntil !== "function") return undefined;
+	const blockedUntilMs = authStorage.providerBlockedUntil(primary.provider);
+	if (blockedUntilMs === undefined) return undefined;
+	const seen = new Set<string>();
+	const candidates = [
+		...(configuredChain ?? []),
+		...buildImplicitModelFallbackChain(primary, modelRegistry, settings),
+	];
+	for (const selector of candidates) {
+		if (seen.has(selector)) continue;
+		seen.add(selector);
+		const parsed = parseModelString(selector);
+		// Same-provider entries (possible in a configured chain) are parked too.
+		if (!parsed || parsed.provider === primary.provider) continue;
+		if (authStorage.providerBlockedUntil(parsed.provider) !== undefined) continue;
+		const candidate = modelRegistry.find(parsed.provider, parsed.id);
+		if (!candidate) continue;
+		return {
+			model: candidate,
+			from: formatModelString(primary),
+			to: formatModelString(candidate),
+			blockedUntilMs,
+		};
+	}
+	return undefined;
+}
+
 function installSubagentRetryFallbackChain(args: {
 	settings: Settings;
 	id: string;
@@ -181,8 +249,9 @@ function installSubagentRetryFallbackChain(args: {
 	defaultFallbackChain: string[] | undefined;
 	model: Model<Api> | undefined;
 	authFallbackUsed: boolean;
+	modelRegistry: ModelRegistry;
 }): string | undefined {
-	const { settings, id, candidates, defaultFallbackChain, model, authFallbackUsed } = args;
+	const { settings, id, candidates, defaultFallbackChain, model, authFallbackUsed, modelRegistry } = args;
 	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
 
 	const selectedIndex = candidates.findIndex(
@@ -191,8 +260,14 @@ function installSubagentRetryFallbackChain(args: {
 	if (selectedIndex < 0) return undefined;
 	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
 	const existingFallbackChains = settings.get("retry.fallbackChains");
-	// A single explicit model may reuse a configured default chain, but never an implicit parent fallback.
-	const fallbackChain = fallbackSelectors.length > 0 ? fallbackSelectors : defaultFallbackChain;
+	// A single explicit model may reuse a configured default chain, then a
+	// dynamically discovered cross-provider chain, but never an implicit parent fallback.
+	const fallbackChain =
+		fallbackSelectors.length > 0
+			? fallbackSelectors
+			: defaultFallbackChain && defaultFallbackChain.length > 0
+				? defaultFallbackChain
+				: buildImplicitModelFallbackChain(model, modelRegistry, settings);
 	if (
 		!Array.isArray(fallbackChain) ||
 		fallbackChain.length === 0 ||
@@ -1928,6 +2003,7 @@ async function finalizeRunResult(args: FinalizeRunArgs): Promise<SingleResult> {
 		contextWindow: progress.contextWindow,
 		modelOverride,
 		resolvedModel: progress.resolvedModel,
+		modelRedirect: progress.modelRedirect,
 		error: exitCode !== 0 && stderr ? stderr : undefined,
 		aborted: wasAborted,
 		abortReason: finalAbortReason,
@@ -2343,7 +2419,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					? resolveSubagentDefaultRetryFallbackChain(subagentSettings)
 					: undefined;
 			const {
-				model,
+				model: resolvedPrimaryModel,
 				thinkingLevel: resolvedThinkingLevel,
 				explicitThinkingLevel,
 				authFallbackUsed,
@@ -2357,6 +2433,33 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 				),
 			);
+			// Every credential on the resolved provider may be quota-parked right
+			// now (a park an earlier process persisted). Requests against it
+			// instant-fail, so reroute here rather than spending the spawn to
+			// rediscover it.
+			const parkedRedirect = resolvedPrimaryModel
+				? redirectAwayFromParkedProvider(
+						resolvedPrimaryModel,
+						modelRegistry,
+						authStorage,
+						subagentSettings,
+						defaultRetryFallbackChain,
+					)
+				: undefined;
+			const model = parkedRedirect?.model ?? resolvedPrimaryModel;
+			if (parkedRedirect) {
+				progress.modelRedirect = {
+					from: parkedRedirect.from,
+					to: parkedRedirect.to,
+					blockedUntilMs: parkedRedirect.blockedUntilMs,
+				};
+				logger.warn("Subagent provider quota-parked; redirected before spawn", {
+					from: parkedRedirect.from,
+					to: parkedRedirect.to,
+					blockedUntil: new Date(parkedRedirect.blockedUntilMs).toISOString(),
+					requested: modelPatterns,
+				});
+			}
 			if (modelResolutionWarning) {
 				logger.warn("Subagent model resolution warning", {
 					warning: modelResolutionWarning,
@@ -2378,6 +2481,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				defaultFallbackChain: defaultRetryFallbackChain,
 				model,
 				authFallbackUsed,
+				modelRegistry,
 			});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {

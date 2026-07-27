@@ -1,4 +1,6 @@
 import * as fs from "node:fs";
+import * as os from "node:os";
+import * as path from "node:path";
 import type {
 	AgentTool,
 	AgentToolContext,
@@ -51,6 +53,46 @@ export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
 
 const BASH_ENV_NAME_PATTERN = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const DEFAULT_AUTO_BACKGROUND_THRESHOLD_MS = 60_000;
+
+interface SudoPasswordContext {
+	command: string;
+	env: Record<string, string> | undefined;
+	cleanup: () => Promise<void>;
+}
+
+async function prepareSudoPasswordContext(
+	sudoPassword: string,
+	command: string,
+	env: Record<string, string> | undefined,
+): Promise<SudoPasswordContext> {
+	const trimmed = command.trim();
+	if (!trimmed.startsWith("sudo")) {
+		throw new ToolError("`sudoPassword` can only be used with commands that begin with `sudo`.");
+	}
+
+	const askpassDir = path.join(os.tmpdir(), "loom-sudo-askpass");
+	await fs.promises.mkdir(askpassDir, { recursive: true, mode: 0o700 });
+	const scriptPath = path.join(
+		askpassDir,
+		`askpass-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}.sh`,
+	);
+	const script = `#!/bin/sh\nprintf '%s\\n' ${JSON.stringify(sudoPassword)}\n`;
+	await fs.promises.writeFile(scriptPath, script, { mode: 0o700 });
+
+	// Only insert -A if the command doesn't already contain a leading -A/--askpass.
+	const hasDashA = /^\s*sudo(?:\s+-[A-Za-z]+)*\s+(-A|--askpass)\b/.test(command);
+	const rewritten = hasDashA
+		? command
+		: command.replace(/^\s*sudo(\s+|$)/, match => `${match.trimEnd()} -A${match.endsWith(" ") ? " " : ""}`);
+
+	return {
+		command: rewritten,
+		env: { ...(env ?? {}), SUDO_ASKPASS: scriptPath },
+		cleanup: async () => {
+			await fs.promises.rm(scriptPath, { force: true }).catch(() => undefined);
+		},
+	};
+}
 
 /**
  * Shape a shell command line for an ACP-conformant `terminal/create` request.
@@ -146,6 +188,9 @@ const bashSchemaBase = type({
 	"timeout?": type("number").describe(BASH_TIMEOUT_DESCRIPTION),
 	"cwd?": type("string").describe("working directory"),
 	"pty?": type("boolean").describe("run in pty mode"),
+	"sudoPassword?": type("string").describe(
+		"sudo password for inline injection with sudo -A; never put the password in command or env",
+	),
 });
 
 const bashSchemaWithAsync = type({
@@ -155,6 +200,9 @@ const bashSchemaWithAsync = type({
 	"cwd?": "string",
 	"pty?": "boolean",
 	"async?": type("boolean").describe("run in background"),
+	"sudoPassword?": type("string").describe(
+		"sudo password for inline injection with sudo -A; never put the password in command or env",
+	),
 });
 
 type BashToolSchema = typeof bashSchemaBase | typeof bashSchemaWithAsync;
@@ -167,6 +215,7 @@ export interface BashToolInput {
 
 	async?: boolean;
 	pty?: boolean;
+	sudoPassword?: string;
 }
 
 export interface BashToolDetails {
@@ -735,6 +784,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			env: rawEnv,
 			timeout: rawTimeout = 300,
 			cwd,
+			sudoPassword,
 
 			async: asyncRequested = false,
 			pty = false,
@@ -762,6 +812,9 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		if (asyncRequested && !this.#asyncEnabled) {
 			throw new ToolError("Async bash execution is disabled. Enable async.enabled to use async mode.");
 		}
+		if (asyncRequested && sudoPassword) {
+			throw new ToolError("`sudoPassword` cannot be used with async bash execution.");
+		}
 
 		// Check both the original command and the cwd-normalized command so
 		// leading `cd ... &&` wrappers do not hide either shell-navigation rules
@@ -787,7 +840,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			},
 		};
 		command = await expandInternalUrls(command, { ...internalUrlOptions, ensureLocalParentDirs: true });
-		const resolvedEnv = env
+		let resolvedEnv = env
 			? Object.fromEntries(
 					await Promise.all(
 						Object.entries(env).map(async ([key, value]) => [
@@ -802,358 +855,372 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 				)
 			: undefined;
 
-		// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
-		if (cwd?.includes("://") || cwd?.includes("local:/")) {
-			cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });
+		let sudoCtx: SudoPasswordContext | undefined;
+		if (sudoPassword) {
+			sudoCtx = await prepareSudoPasswordContext(sudoPassword, command, resolvedEnv);
+			command = sudoCtx.command;
+			resolvedEnv = sudoCtx.env;
 		}
-
-		// Best-effort cache invalidation: drop github-cache rows for any issue/PR
-		// number touched by a mutating `gh` subcommand inside this bash call so
-		// subsequent issue:// / pr:// reads pick up the post-mutation state
-		// instead of the cached pre-mutation snapshot.
-		invalidateGithubCacheForBashCommand(command);
-
-		const commandCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd;
-		let cwdStat: fs.Stats;
 		try {
-			cwdStat = await fs.promises.stat(commandCwd);
-		} catch (err) {
-			if (isEnoent(err)) {
-				throw new ToolError(`Working directory does not exist: ${commandCwd}`);
+			// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
+			if (cwd?.includes("://") || cwd?.includes("local:/")) {
+				cwd = await expandInternalUrls(cwd, { ...internalUrlOptions, noEscape: true });
 			}
-			throw err;
-		}
-		if (!cwdStat.isDirectory()) {
-			throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
-		}
 
-		// A timeout of 0 is an explicit long-running-command contract: the user
-		// must still cancel the call or job, but OMP does not impose a deadline.
-		const requestedTimeoutSec = rawTimeout;
-		const timeoutDisabled = requestedTimeoutSec === 0;
-		const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec);
-		const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
-		const pendingNotices: string[] = [];
-		if (timeoutSec !== undefined) {
-			const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec);
-			if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
-		}
+			// Best-effort cache invalidation: drop github-cache rows for any issue/PR
+			// number touched by a mutating `gh` subcommand inside this bash call so
+			// subsequent issue:// / pr:// reads pick up the post-mutation state
+			// instead of the cached pre-mutation snapshot.
+			invalidateGithubCacheForBashCommand(command);
 
-		if (asyncRequested) {
-			if (!this.session.asyncJobManager) {
-				throw new ToolError("Async job manager unavailable for this session.");
+			const commandCwd = cwd ? resolveToCwd(cwd, this.session.cwd) : this.session.cwd;
+			let cwdStat: fs.Stats;
+			try {
+				cwdStat = await fs.promises.stat(commandCwd);
+			} catch (err) {
+				if (isEnoent(err)) {
+					throw new ToolError(`Working directory does not exist: ${commandCwd}`);
+				}
+				throw err;
 			}
-			const job = this.#startManagedBashJob({
-				command,
-				commandCwd,
-				timeoutMs,
-				timeoutSec,
-				requestedTimeoutSec,
-				notices: pendingNotices,
+			if (!cwdStat.isDirectory()) {
+				throw new ToolError(`Working directory is not a directory: ${commandCwd}`);
+			}
 
-				resolvedEnv,
-				onUpdate,
-				forwardUpdates: false,
-			});
-			return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
-				requestedTimeoutSec,
-				notices: pendingNotices,
-			});
-		}
+			// A timeout of 0 is an explicit long-running-command contract: the user
+			// must still cancel the call or job, but OMP does not impose a deadline.
+			const requestedTimeoutSec = rawTimeout;
+			const timeoutDisabled = requestedTimeoutSec === 0;
+			const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec);
+			const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
+			const pendingNotices: string[] = [];
+			if (timeoutSec !== undefined) {
+				const timeoutClampNotice = formatTimeoutClampNotice(requestedTimeoutSec, timeoutSec);
+				if (timeoutClampNotice) pendingNotices.push(timeoutClampNotice);
+			}
 
-		// The client-bridge terminal provides a live terminal card in the editor;
-		// when available it wins over auto-backgrounding (both are opt-in, and
-		// auto-background would otherwise silently disable the terminal route).
-		const clientBridge = this.session.getClientBridge?.();
-		const bridgeTerminalAvailable = Boolean(
-			clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
-		);
+			if (asyncRequested) {
+				if (!this.session.asyncJobManager) {
+					throw new ToolError("Async job manager unavailable for this session.");
+				}
+				const job = this.#startManagedBashJob({
+					command,
+					commandCwd,
+					timeoutMs,
+					timeoutSec,
+					requestedTimeoutSec,
+					notices: pendingNotices,
 
-		const autoBgManager = this.session.asyncJobManager;
-		// At the running-job cap, fall through to direct foreground execution
-		// instead of failing every bash call until a slot frees up.
-		if (
-			this.#autoBackgroundEnabled &&
-			!pty &&
-			!bridgeTerminalAvailable &&
-			autoBgManager &&
-			!autoBgManager.atCapacity
-		) {
-			const autoBackgroundWaitMs = this.#resolveAutoBackgroundWaitMs(timeoutMs);
-			const startBackgrounded = autoBackgroundWaitMs === 0;
-			const job = this.#startManagedBashJob({
-				command,
-				commandCwd,
-				timeoutMs,
-				timeoutSec,
-				requestedTimeoutSec,
-				notices: pendingNotices,
-
-				resolvedEnv,
-				onUpdate,
-				forwardUpdates: !startBackgrounded,
-			});
-			if (startBackgrounded) {
+					resolvedEnv,
+					onUpdate,
+					forwardUpdates: false,
+				});
 				return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
 					requestedTimeoutSec,
 					notices: pendingNotices,
 				});
 			}
-			// Suppress the completion delivery up front so a job finishing while we
-			// foreground-wait cannot also be injected by the delivery loop. Lifted
-			// via resumeDeliveries() if we end up backgrounding after all.
-			autoBgManager.acknowledgeDeliveries([job.jobId]);
-			const waitResult = await this.#waitForManagedBashJob(job, autoBackgroundWaitMs, signal);
-			if (waitResult.kind === "completed") {
-				return waitResult.result;
-			}
-			if (waitResult.kind === "failed") {
-				throw waitResult.error;
-			}
-			if (waitResult.kind === "aborted") {
-				autoBgManager.cancel(job.jobId);
-				throw new ToolAbortError(job.getLatestText() || "Command aborted");
-			}
-			job.stopUpdates();
-			autoBgManager.resumeDeliveries([job.jobId]);
-			return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
-				requestedTimeoutSec,
-				notices: pendingNotices,
-			});
-		}
 
-		// Route through the client terminal when the client advertises the terminal capability.
-		// Skip when pty=true (PTY needs the local terminal UI).
-		if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
-			const bridgeWallTimeStart = performance.now();
-			const shellSpawn = wrapShellLineForClientTerminal(command, this.session.settings.getShellConfig());
-			const handle = await clientBridge.createTerminal({
-				command: shellSpawn.command,
-				args: shellSpawn.args,
-				cwd: commandCwd,
-				env: resolvedEnv
-					? Object.entries(resolvedEnv).map(([name, value]) => ({ name, value: value as string }))
-					: undefined,
-				outputByteLimit: DEFAULT_MAX_BYTES,
-			});
+			// The client-bridge terminal provides a live terminal card in the editor;
+			// when available it wins over auto-backgrounding (both are opt-in, and
+			// auto-background would otherwise silently disable the terminal route).
+			const clientBridge = this.session.getClientBridge?.();
+			const bridgeTerminalAvailable = Boolean(
+				clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty,
+			);
 
-			// Emit partial update so the editor can embed the live terminal card.
-			onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
+			const autoBgManager = this.session.asyncJobManager;
+			// At the running-job cap, fall through to direct foreground execution
+			// instead of failing every bash call until a slot frees up.
+			if (
+				this.#autoBackgroundEnabled &&
+				!pty &&
+				!bridgeTerminalAvailable &&
+				autoBgManager &&
+				!autoBgManager.atCapacity
+			) {
+				const autoBackgroundWaitMs = this.#resolveAutoBackgroundWaitMs(timeoutMs);
+				const startBackgrounded = autoBackgroundWaitMs === 0;
+				const job = this.#startManagedBashJob({
+					command,
+					commandCwd,
+					timeoutMs,
+					timeoutSec,
+					requestedTimeoutSec,
+					notices: pendingNotices,
 
-			const exitPromise = handle.waitForExit();
-			let exitStatus!: ClientBridgeTerminalExitStatus;
-
-			type BridgeRaceResult =
-				| { kind: "exit"; status: ClientBridgeTerminalExitStatus }
-				| { kind: "poll" }
-				| { kind: "timeout" }
-				| { kind: "aborted" };
-
-			// Set up abort listener before entering the poll loop. The listener
-			// kicks off `handle.kill()` synchronously so a `session/cancel`
-			// arriving mid-poll terminates the remote command immediately,
-			// instead of waiting for the next `currentOutput()` to return.
-			const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
-			let killStarted = false;
-			const fireKill = (): Promise<void> => {
-				if (killStarted) return Promise.resolve();
-				killStarted = true;
-				return handle.kill().catch((error: unknown) => {
-					logger.warn("ACP terminal kill failed", { terminalId: handle.terminalId, error });
+					resolvedEnv,
+					onUpdate,
+					forwardUpdates: !startBackgrounded,
 				});
-			};
-			const onAbortSignal = () => {
-				resolveAborted();
-				void fireKill();
-			};
-			signal?.addEventListener("abort", onAbortSignal, { once: true });
+				if (startBackgrounded) {
+					return this.#buildBackgroundStartResult(job.jobId, "", timeoutSec, {
+						requestedTimeoutSec,
+						notices: pendingNotices,
+					});
+				}
+				// Suppress the completion delivery up front so a job finishing while we
+				// foreground-wait cannot also be injected by the delivery loop. Lifted
+				// via resumeDeliveries() if we end up backgrounding after all.
+				autoBgManager.acknowledgeDeliveries([job.jobId]);
+				const waitResult = await this.#waitForManagedBashJob(job, autoBackgroundWaitMs, signal);
+				if (waitResult.kind === "completed") {
+					return waitResult.result;
+				}
+				if (waitResult.kind === "failed") {
+					throw waitResult.error;
+				}
+				if (waitResult.kind === "aborted") {
+					autoBgManager.cancel(job.jobId);
+					throw new ToolAbortError(job.getLatestText() || "Command aborted");
+				}
+				job.stopUpdates();
+				autoBgManager.resumeDeliveries([job.jobId]);
+				return this.#buildBackgroundStartResult(job.jobId, job.getLatestText(), timeoutSec, {
+					requestedTimeoutSec,
+					notices: pendingNotices,
+				});
+			}
 
-			try {
+			// Route through the client terminal when the client advertises the terminal capability.
+			// Skip when pty=true (PTY needs the local terminal UI).
+			if (clientBridge?.capabilities.terminal && clientBridge.createTerminal && !pty) {
+				const bridgeWallTimeStart = performance.now();
+				const shellSpawn = wrapShellLineForClientTerminal(command, this.session.settings.getShellConfig());
+				const handle = await clientBridge.createTerminal({
+					command: shellSpawn.command,
+					args: shellSpawn.args,
+					cwd: commandCwd,
+					env: resolvedEnv
+						? Object.entries(resolvedEnv).map(([name, value]) => ({ name, value: value as string }))
+						: undefined,
+					outputByteLimit: DEFAULT_MAX_BYTES,
+				});
+
+				// Emit partial update so the editor can embed the live terminal card.
+				onUpdate?.({ content: [], details: { terminalId: handle.terminalId } });
+
+				const exitPromise = handle.waitForExit();
+				let exitStatus!: ClientBridgeTerminalExitStatus;
+
+				type BridgeRaceResult =
+					| { kind: "exit"; status: ClientBridgeTerminalExitStatus }
+					| { kind: "poll" }
+					| { kind: "timeout" }
+					| { kind: "aborted" };
+
+				// Set up abort listener before entering the poll loop. The listener
+				// kicks off `handle.kill()` synchronously so a `session/cancel`
+				// arriving mid-poll terminates the remote command immediately,
+				// instead of waiting for the next `currentOutput()` to return.
+				const { promise: abortedP, resolve: resolveAborted } = Promise.withResolvers<void>();
+				let killStarted = false;
+				const fireKill = (): Promise<void> => {
+					if (killStarted) return Promise.resolve();
+					killStarted = true;
+					return handle.kill().catch((error: unknown) => {
+						logger.warn("ACP terminal kill failed", { terminalId: handle.terminalId, error });
+					});
+				};
+				const onAbortSignal = () => {
+					resolveAborted();
+					void fireKill();
+				};
+				signal?.addEventListener("abort", onAbortSignal, { once: true });
+
 				try {
-					if (signal?.aborted) {
-						await fireKill();
-						throw new ToolAbortError("Command aborted");
-					}
-
-					const timeoutPromise = timeoutMs
-						? Bun.sleep(timeoutMs).then(() => ({ kind: "timeout" as const }))
-						: undefined;
-					// Poll until the process exits, times out, or the caller aborts.
-					for (;;) {
-						const racers: Array<Promise<BridgeRaceResult>> = [
-							exitPromise.then(s => ({ kind: "exit" as const, status: s })),
-							Bun.sleep(250).then(() => ({ kind: "poll" as const })),
-						];
-						if (timeoutPromise) racers.push(timeoutPromise);
-						if (signal) {
-							racers.push(abortedP.then(() => ({ kind: "aborted" as const })));
-						}
-						const raced = await Promise.race(racers);
-
-						if (raced.kind === "aborted" || signal?.aborted) {
+					try {
+						if (signal?.aborted) {
 							await fireKill();
 							throw new ToolAbortError("Command aborted");
 						}
 
-						if (raced.kind === "timeout") {
-							// Kill before reading final output so a slow `terminal/output`
-							// RPC cannot let a timed-out command keep running past the
-							// enforced timeout. The handle stays valid post-kill so the
-							// buffered output is still readable.
-							await fireKill();
-							let current = { output: "", truncated: false };
-							try {
-								current = await handle.currentOutput();
-							} catch (error) {
-								logger.warn("ACP terminal final output read failed", {
-									terminalId: handle.terminalId,
-									error,
-								});
+						const timeoutPromise = timeoutMs
+							? Bun.sleep(timeoutMs).then(() => ({ kind: "timeout" as const }))
+							: undefined;
+						// Poll until the process exits, times out, or the caller aborts.
+						for (;;) {
+							const racers: Array<Promise<BridgeRaceResult>> = [
+								exitPromise.then(s => ({ kind: "exit" as const, status: s })),
+								Bun.sleep(250).then(() => ({ kind: "poll" as const })),
+							];
+							if (timeoutPromise) racers.push(timeoutPromise);
+							if (signal) {
+								racers.push(abortedP.then(() => ({ kind: "aborted" as const })));
 							}
-							const timedOutResult: BashInteractiveResult = {
-								output: current.output,
-								exitCode: undefined,
-								cancelled: false,
-								timedOut: true,
-								truncated: current.truncated,
-								totalLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-								totalBytes: current.output.length,
-								outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
-								outputBytes: current.output.length,
-							};
-							this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
-							throw new ToolError("Command timed out");
-						}
+							const raced = await Promise.race(racers);
 
-						if (raced.kind === "exit") {
-							exitStatus = raced.status;
-							break;
-						}
+							if (raced.kind === "aborted" || signal?.aborted) {
+								await fireKill();
+								throw new ToolAbortError("Command aborted");
+							}
 
-						// Poll tick: push current output so agent-loop transcript stays consistent.
-						// Race the read against abort so a stuck `terminal/output` RPC does not
-						// delay cancellation.
-						const pollOutput = await Promise.race([
-							handle.currentOutput(),
-							abortedP.then(() => undefined as ClientBridgeTerminalOutput | undefined),
-						]);
-						if (pollOutput === undefined) {
-							// Abort fired during the poll-tick read; let the next loop iteration
-							// observe `signal?.aborted` and exit via the abort branch.
-							continue;
+							if (raced.kind === "timeout") {
+								// Kill before reading final output so a slow `terminal/output`
+								// RPC cannot let a timed-out command keep running past the
+								// enforced timeout. The handle stays valid post-kill so the
+								// buffered output is still readable.
+								await fireKill();
+								let current = { output: "", truncated: false };
+								try {
+									current = await handle.currentOutput();
+								} catch (error) {
+									logger.warn("ACP terminal final output read failed", {
+										terminalId: handle.terminalId,
+										error,
+									});
+								}
+								const timedOutResult: BashInteractiveResult = {
+									output: current.output,
+									exitCode: undefined,
+									cancelled: false,
+									timedOut: true,
+									truncated: current.truncated,
+									totalLines: current.output.length > 0 ? current.output.split("\n").length : 0,
+									totalBytes: current.output.length,
+									outputLines: current.output.length > 0 ? current.output.split("\n").length : 0,
+									outputBytes: current.output.length,
+								};
+								this.#throwIfUnfinished(timedOutResult, timeoutSec, this.#formatResultOutput(timedOutResult));
+								throw new ToolError("Command timed out");
+							}
+
+							if (raced.kind === "exit") {
+								exitStatus = raced.status;
+								break;
+							}
+
+							// Poll tick: push current output so agent-loop transcript stays consistent.
+							// Race the read against abort so a stuck `terminal/output` RPC does not
+							// delay cancellation.
+							const pollOutput = await Promise.race([
+								handle.currentOutput(),
+								abortedP.then(() => undefined as ClientBridgeTerminalOutput | undefined),
+							]);
+							if (pollOutput === undefined) {
+								// Abort fired during the poll-tick read; let the next loop iteration
+								// observe `signal?.aborted` and exit via the abort branch.
+								continue;
+							}
+							onUpdate?.({
+								content: [{ type: "text", text: pollOutput.output }],
+								details: { terminalId: handle.terminalId },
+							});
 						}
-						onUpdate?.({
-							content: [{ type: "text", text: pollOutput.output }],
-							details: { terminalId: handle.terminalId },
-						});
+					} finally {
+						signal?.removeEventListener("abort", onAbortSignal);
 					}
+
+					// Fetch final output; the terminal is released in the outer finally.
+					const finalOutput = await handle.currentOutput();
+
+					// Map exit status: null exitCode with a signal → treat as signal kill (137).
+					const rawExitCode = exitStatus.exitCode;
+					const exitCode: number | undefined =
+						rawExitCode != null ? rawExitCode : exitStatus.signal ? 137 : undefined;
+
+					const outputText = finalOutput.output;
+					const outputByteLen = outputText.length;
+					const outputLineCount = outputText.length > 0 ? outputText.split("\n").length : 0;
+
+					const bridgeResult: BashResult = {
+						output: outputText,
+						exitCode,
+						cancelled: false,
+						truncated: finalOutput.truncated,
+						totalLines: outputLineCount,
+						totalBytes: outputByteLen,
+						outputLines: outputLineCount,
+						outputBytes: outputByteLen,
+					};
+
+					const bridgeNotices: string[] = [];
+					if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
+					for (const notice of pendingNotices) bridgeNotices.push(notice);
+
+					return this.#buildCompletedResult(bridgeResult, timeoutSec, {
+						requestedTimeoutSec,
+						notices: bridgeNotices,
+						terminalId: handle.terminalId,
+						wallTimeMs: performance.now() - bridgeWallTimeStart,
+					});
 				} finally {
-					signal?.removeEventListener("abort", onAbortSignal);
-				}
-
-				// Fetch final output; the terminal is released in the outer finally.
-				const finalOutput = await handle.currentOutput();
-
-				// Map exit status: null exitCode with a signal → treat as signal kill (137).
-				const rawExitCode = exitStatus.exitCode;
-				const exitCode: number | undefined =
-					rawExitCode != null ? rawExitCode : exitStatus.signal ? 137 : undefined;
-
-				const outputText = finalOutput.output;
-				const outputByteLen = outputText.length;
-				const outputLineCount = outputText.length > 0 ? outputText.split("\n").length : 0;
-
-				const bridgeResult: BashResult = {
-					output: outputText,
-					exitCode,
-					cancelled: false,
-					truncated: finalOutput.truncated,
-					totalLines: outputLineCount,
-					totalBytes: outputByteLen,
-					outputLines: outputLineCount,
-					outputBytes: outputByteLen,
-				};
-
-				const bridgeNotices: string[] = [];
-				if (finalOutput.truncated) bridgeNotices.push("(output truncated)");
-				for (const notice of pendingNotices) bridgeNotices.push(notice);
-
-				return this.#buildCompletedResult(bridgeResult, timeoutSec, {
-					requestedTimeoutSec,
-					notices: bridgeNotices,
-					terminalId: handle.terminalId,
-					wallTimeMs: performance.now() - bridgeWallTimeStart,
-				});
-			} finally {
-				try {
-					await handle.release();
-				} catch (error) {
-					logger.warn("ACP terminal release failed", { terminalId: handle.terminalId, error });
+					try {
+						await handle.release();
+					} catch (error) {
+						logger.warn("ACP terminal release failed", { terminalId: handle.terminalId, error });
+					}
 				}
 			}
-		}
 
-		// Track output for streaming updates (tail only)
-		const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
+			// Track output for streaming updates (tail only)
+			const tailBuffer = new TailBuffer(DEFAULT_MAX_BYTES);
 
-		// Allocate artifact for truncated output storage
-		const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
+			// Allocate artifact for truncated output storage
+			const { path: artifactPath, id: artifactId } = (await this.session.allocateOutputArtifact?.("bash")) ?? {};
 
-		const interactiveUi = canUseInteractiveBashPty(pty, ctx) ? ctx?.ui : undefined;
-		if (pty && !interactiveUi) {
-			pendingNotices.push("pty requested but unavailable in this environment; ran without a terminal");
-		}
-		const wallTimeStart = performance.now();
-		const result: BashResult | BashInteractiveResult = interactiveUi
-			? await runInteractiveBashPty(interactiveUi, {
-					command,
-					cwd: commandCwd,
-					timeoutMs,
-					signal,
-					env: resolvedEnv,
-					artifactPath,
-					artifactId,
-				})
-			: await executeBash(command, {
-					cwd: commandCwd,
-					sessionKey: this.session.getSessionId?.() ?? undefined,
-					timeout: timeoutMs ?? 0,
-					signal,
-					env: resolvedEnv,
-					artifactPath,
-					artifactId,
-					onChunk: streamTailUpdates(tailBuffer, onUpdate),
-					onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
-				});
-		const wallTimeMs = performance.now() - wallTimeStart;
-		if (result.cancelled) {
-			// A cancelled result is either a timeout (the command's deadline fired)
-			// or a user/system abort. Timeouts are handled by #buildCompletedResult
-			// which returns a non-throwing error result with details.timedOut=true
-			// so the renderer can show a warning border instead of error red.
-			// Both interactive and non-interactive results carry an explicit
-			// `timedOut` field from the executor/PTY layer.
-			const isTimeout = result.timedOut === true;
-			if (!isTimeout) {
-				const out = normalizeResultOutput(result);
-				// The local executor already prepends `[Command cancelled]`; PTY
-				// output does not, so preserve one cancellation notice in either case.
-				const message = out.startsWith("[Command cancelled]")
-					? out
-					: out
-						? `${out}\n\n[Command aborted]`
-						: "Command aborted";
-				if (signal?.aborted) {
-					throw new ToolAbortError(message);
-				}
-				throw new ToolError(message);
+			const interactiveUi = canUseInteractiveBashPty(sudoPassword ? true : pty, ctx) ? ctx?.ui : undefined;
+			if ((pty || sudoPassword) && !interactiveUi) {
+				pendingNotices.push(
+					sudoPassword
+						? "sudo password injection requires a PTY in this environment; ran without a terminal"
+						: "pty requested but unavailable in this environment; ran without a terminal",
+				);
 			}
+			const wallTimeStart = performance.now();
+			const result: BashResult | BashInteractiveResult = interactiveUi
+				? await runInteractiveBashPty(interactiveUi, {
+						command,
+						cwd: commandCwd,
+						timeoutMs,
+						signal,
+						env: resolvedEnv,
+						artifactPath,
+						artifactId,
+					})
+				: await executeBash(command, {
+						cwd: commandCwd,
+						sessionKey: this.session.getSessionId?.() ?? undefined,
+						timeout: timeoutMs ?? 0,
+						signal,
+						env: resolvedEnv,
+						artifactPath,
+						artifactId,
+						onChunk: streamTailUpdates(tailBuffer, onUpdate),
+						onMinimizedSave: originalText => saveBashOriginalArtifact(this.session, originalText),
+					});
+			const wallTimeMs = performance.now() - wallTimeStart;
+			if (result.cancelled) {
+				// A cancelled result is either a timeout (the command's deadline fired)
+				// or a user/system abort. Timeouts are handled by #buildCompletedResult
+				// which returns a non-throwing error result with details.timedOut=true
+				// so the renderer can show a warning border instead of error red.
+				// Both interactive and non-interactive results carry an explicit
+				// `timedOut` field from the executor/PTY layer.
+				const isTimeout = result.timedOut === true;
+				if (!isTimeout) {
+					const out = normalizeResultOutput(result);
+					// The local executor already prepends `[Command cancelled]`; PTY
+					// output does not, so preserve one cancellation notice in either case.
+					const message = out.startsWith("[Command cancelled]")
+						? out
+						: out
+							? `${out}\n\n[Command aborted]`
+							: "Command aborted";
+					if (signal?.aborted) {
+						throw new ToolAbortError(message);
+					}
+					throw new ToolError(message);
+				}
+			}
+			return this.#buildCompletedResult(result, timeoutSec, {
+				requestedTimeoutSec,
+				notices: pendingNotices,
+				wallTimeMs,
+			});
+		} finally {
+			await sudoCtx?.cleanup();
 		}
-		return this.#buildCompletedResult(result, timeoutSec, {
-			requestedTimeoutSec,
-			notices: pendingNotices,
-			wallTimeMs,
-		});
 	}
 }
 

@@ -141,4 +141,78 @@ describe("compaction model routing", () => {
 		expect(candidateProviders.length).toBeGreaterThan(0);
 		expect(candidateProviders[0]).toBe("anthropic");
 	});
+
+	it("falls through a quota-exhausted candidate to another enabled model", async () => {
+		const modelRegistry = await makeRegistry(async authStorage => {
+			await authStorage.set("anthropic", {
+				type: "oauth",
+				access: "sk-ant-oat-test-token",
+				refresh: "refresh-token",
+				expires: Date.now() + 3_600_000,
+			});
+			authStorage.setRuntimeApiKey("openai", "test-openai-key");
+		});
+		const roleModel = modelRegistry.getAvailable().find(model => model.provider === "openai");
+		if (!roleModel) throw new Error("expected an available openai model");
+
+		const dir = TempDir.createSync("@pi-compaction-routing-quota-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateProviders: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateProviders.push(candidate.provider);
+			if (candidateProviders.length === 1) {
+				// Same shape the user hit: exhausted provider (cursor quota).
+				throw new Error("Turn prefix summarization failed: Connect error resource_exhausted: Error");
+			}
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledAnthropic(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+		session.settings.setModelRole("default", `${roleModel.provider}/${roleModel.id}`);
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		// First candidate (exhausted) must not end the run; a later enabled
+		// candidate is tried and completes the compaction.
+		expect(candidateProviders.length).toBeGreaterThan(1);
+		expect(candidateProviders[0]).toBe("openai");
+	});
 });

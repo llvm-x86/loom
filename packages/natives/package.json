@@ -38,6 +38,7 @@
     "fmt": "biome format --write .",
     "gen:native": "bun scripts/embed-native.ts",
     "gen:native:reset": "bun scripts/embed-native.ts --reset",
+    "gen:native:prebuilt": "bun scripts/fetch-prebuilt-native.ts",
     "gen:npm": "bun scripts/gen-npm-packages.ts",
     "bench": "bun bench/grep.ts"
   },

@@ -180,12 +180,14 @@ import type { Rule } from "../capability/rule";
 import { shouldEnableAppendOnlyContext } from "../config/append-only-context-mode";
 import type { ModelRegistry } from "../config/model-registry";
 import {
+	buildImplicitModelFallbackChain,
 	extractExplicitThinkingSelector,
 	filterAvailableModelsByEnabledPatterns,
 	formatModelSelectorValue,
 	formatModelString,
 	formatModelStringWithRouting,
 	getModelMatchPreferences,
+	ON_DEVICE_PROVIDERS,
 	parseModelString,
 	type ResolvedModelRoleValue,
 	resolveAdvisorRoleSelection,
@@ -1333,6 +1335,15 @@ function parseRetryFallbackSelector(
 		thinkingLevel: concreteThinkingLevel(parsed.thinkingLevel),
 	};
 }
+
+/**
+ * `#activeRetryFallback.role` when the applied candidate came from
+ * {@link buildImplicitModelFallbackChain} rather than a configured
+ * `retry.fallbackChains` entry. Never a real config key (roles never contain
+ * `/` or start with `!`), so it can't collide with `#resolveRetryFallbackRole`.
+ * Purely a label for `retry_fallback_applied` events / diagnostics.
+ */
+const IMPLICIT_RETRY_FALLBACK_ROLE = "!implicit";
 
 /**
  * `retry.fallbackChains` keys are either model-role names (`smol`, `default`)
@@ -13501,6 +13512,7 @@ export class AgentSession {
 		const candidates =
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
+		let lastCandidateError: unknown;
 
 		for (const candidate of candidates) {
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
@@ -13542,12 +13554,25 @@ export class AgentSession {
 					},
 				);
 			} catch (error) {
-				if (!AIError.is(AIError.classify(error, candidate.api), AIError.Flag.AuthFailed)) {
-					throw error;
-				}
+				const flags = AIError.classify(error, candidate.api);
+				if (AIError.is(flags, AIError.Flag.AuthFailed)) continue;
+				// Quota/rate-limit, transient, and context-overflow failures are
+				// candidate-local: an exhausted provider (e.g. cursor quota) must
+				// not kill compaction while another enabled model can still
+				// summarize. Fall through and remember the failure so an
+				// all-candidates-exhausted outcome reports the real provider
+				// error instead of a misleading auth message.
+				const candidateLocal =
+					AIError.is(flags, AIError.Flag.UsageLimit) ||
+					AIError.is(flags, AIError.Flag.Transient) ||
+					AIError.is(flags, AIError.Flag.Timeout) ||
+					AIError.is(flags, AIError.Flag.ContextOverflow);
+				if (!candidateLocal) throw error;
+				lastCandidateError = error;
 			}
 		}
 
+		if (lastCandidateError) throw lastCandidateError;
 		throw this.#buildCompactionAuthError();
 	}
 
@@ -15282,21 +15307,45 @@ export class AgentSession {
 		});
 	}
 
-	async #tryRetryModelFallback(currentSelector: string, options?: { pinFallback?: boolean }): Promise<boolean> {
+	async #tryRetryModelFallback(
+		currentSelector: string,
+		options?: { pinFallback?: boolean; allowImplicit?: boolean },
+	): Promise<boolean> {
 		const role = this.#activeRetryFallback?.role ?? this.#resolveRetryFallbackRole(currentSelector);
-		if (!role) return false;
-
-		for (const selector of this.#findRetryFallbackCandidates(role, currentSelector)) {
-			if (this.#isRetryFallbackSelectorSuppressed(selector)) continue;
+		if (role && role !== IMPLICIT_RETRY_FALLBACK_ROLE) {
+			for (const selector of this.#findRetryFallbackCandidates(role, currentSelector)) {
+				if (this.#isRetryFallbackSelectorSuppressed(selector)) continue;
+				const resolved = resolveModelOverride([selector.raw], this.#modelRegistry, this.settings);
+				const candidate = resolved.model ?? this.#modelRegistry.find(selector.provider, selector.id);
+				if (!candidate) continue;
+				const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
+				if (!apiKey) continue;
+				await this.#applyRetryFallbackCandidate(role, selector, currentSelector, options);
+				return true;
+			}
+			return false;
+		}
+		// No `retry.fallbackChains` entry covers this model (the default — nobody
+		// configures one). Only reached from the hard-error path (`allowImplicit`):
+		// a genuinely retryable error must keep retrying the SAME model at its
+		// normal backoff, never jump models on the first hiccup. Synthesizes a
+		// chain from other credentialed, enabled models so a hard provider error
+		// (a model id the account isn't entitled to, a dead credential, ...)
+		// always has somewhere to go instead of failing the turn outright.
+		if (!options?.allowImplicit) return false;
+		const model = this.model;
+		if (!model || ON_DEVICE_PROVIDERS[model.provider]) return false;
+		for (const raw of buildImplicitModelFallbackChain(model, this.#modelRegistry, this.settings)) {
+			const selector = parseRetryFallbackSelector(raw, this.#modelRegistry);
+			if (!selector || this.#isRetryFallbackSelectorSuppressed(selector)) continue;
 			const resolved = resolveModelOverride([selector.raw], this.#modelRegistry, this.settings);
 			const candidate = resolved.model ?? this.#modelRegistry.find(selector.provider, selector.id);
 			if (!candidate) continue;
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 			if (!apiKey) continue;
-			await this.#applyRetryFallbackCandidate(role, selector, currentSelector, options);
+			await this.#applyRetryFallbackCandidate(IMPLICIT_RETRY_FALLBACK_ROLE, selector, currentSelector, options);
 			return true;
 		}
-
 		return false;
 	}
 
@@ -15355,8 +15404,10 @@ export class AgentSession {
 		if (this.#hasReplayUnsafeToolOutput(message)) return false;
 		const currentSelector = formatRetryFallbackSelector(model, this.thinkingLevel);
 		const role = this.#activeRetryFallback?.role ?? this.#resolveRetryFallbackRole(currentSelector);
-		if (!role) return false;
-		return this.#findRetryFallbackCandidates(role, currentSelector).length > 0;
+		if (role && role !== IMPLICIT_RETRY_FALLBACK_ROLE)
+			return this.#findRetryFallbackCandidates(role, currentSelector).length > 0;
+		if (ON_DEVICE_PROVIDERS[model.provider]) return false;
+		return buildImplicitModelFallbackChain(model, this.#modelRegistry, this.settings).length > 0;
 	}
 
 	/**
@@ -15598,7 +15649,10 @@ export class AgentSession {
 				if (!classifierRefusal) {
 					this.#noteRetryFallbackCooldown(currentSelector, parsedRetryAfterMs, errorMessage);
 				}
-				switchedModel = await this.#tryRetryModelFallback(currentSelector, { pinFallback: classifierRefusal });
+				switchedModel = await this.#tryRetryModelFallback(currentSelector, {
+					pinFallback: classifierRefusal,
+					allowImplicit: options?.hardErrorFallback === true,
+				});
 			}
 			// Auto fallback from a Fireworks Fast variant to its base model. Independent
 			// of the role-fallback setting: it's intrinsic to the Fast contract (speed

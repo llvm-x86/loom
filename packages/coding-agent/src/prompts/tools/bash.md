@@ -7,6 +7,8 @@ Use ONLY for: single binary call or short pipeline that COMPUTES a fact (`wc -l`
 <instruction>
 - `cwd` sets working dir (not `cd dir && …`). `env: { NAME: "…" }` for multiline/quote-heavy values; `"$NAME"` to expand.
 - `pty: true` only for real terminal needs (`sudo`, `ssh`); default `false`.
+- For `sudo` commands, prefer `pty: true` so the user types the password directly into the terminal overlay — the password is never shared with you.
+- If the user has already provided their sudo password, set `sudoPassword` (NOT `env`) and begin the command with `sudo` (do not add `-A`; the tool inserts it). The password is never shown in command or env output.
 - Multiple calls run concurrently; NEVER split order-dependent commands — chain with `&&` in one call (`;` only to continue past failure).
 - Internal URIs (`skill://`, `agent://`, …) auto-resolve to FS paths.
 {{#if asyncEnabled}}- `async: true` defers reporting for finite commands needing no later input.{{/if}}
