@@ -137,6 +137,57 @@ Then in any project directory just run `loom`.
 
 (The compiled binary file may be named `dist/omp` or `dist/loom` depending on build config — if `dist/loom` is absent, use `dist/omp`.)
 
+## Windows install
+
+On Windows 11 the whole flow above is scripted. From a PowerShell prompt in the
+repo root:
+
+```powershell
+# Prereqs: git (https://git-scm.com/download/win) and bun
+#   bun: powershell -c "irm bun.sh/install.ps1 | iex"
+git clone https://github.com/llvm-x86/loom.git
+cd loom
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
+```
+
+The script verifies git/bun, runs `bun install` (retrying up to 3× to ride out
+the transient `Integrity check failed for tarball: chart.js` CDN flake),
+bootstraps Rust if `cargo` is missing, builds the native addon, and then builds
+the `loom` binary.
+
+**No Rust toolchain?** The native addon is published as a prebuilt on npm, so you
+can skip the (multi-GB) MSVC/Rust install entirely:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -SkipRust
+```
+
+`-SkipRust` downloads the matching `@oh-my-pi/pi-natives-win32-x64` prebuilt
+(`bun --cwd=packages/natives run gen:native:prebuilt`) instead of compiling.
+
+### Gotchas validated on a real Win11 box
+
+- **`bun install` + chart.js:** `bun install` may fail with
+  `Integrity check failed for tarball: chart.js`. This is a transient CDN hiccup
+  — the installer just retries (up to 3×) and it clears.
+- **rustup bootstrap filename:** `https://win.rustup.rs` serves a proxy binary
+  that **rejects the `-y` flag unless the downloaded file is named
+  `rustup-init.exe`**. Naming it `rustup.exe` drops you into an interactive
+  prompt. Always save it as `rustup-init.exe`:
+  ```powershell
+  curl.exe -sSfL https://win.rustup.rs/x86_64 -o rustup-init.exe
+  .\rustup-init.exe -y
+  ```
+- **From-source needs a C toolchain:** building the addon compiles pcre2 and
+  tree-sitter C sources, so the default `x86_64-pc-windows-msvc` toolchain needs
+  the MSVC linker (VS Build Tools, "Desktop development with C++"). The GNU
+  toolchain (`-GnuToolchain`) avoids MSVC but still needs MinGW-w64 `gcc` on
+  PATH. If you don't want a C compiler at all, use `-SkipRust` (prebuilt).
+- **Manual build without the script:** if you'd rather not compile, run
+  `bun --cwd=packages/natives run gen:native:prebuilt` before
+  `cd packages/coding-agent && bun run build`. A plain `bun run build` also
+  auto-fetches the prebuilt when `cargo` is absent.
+
 ## Credits & license
 
 Loom is built on [oh-my-pi](https://github.com/can1357/oh-my-pi) by can1357. See upstream oh-my-pi for license.
