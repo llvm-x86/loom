@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `TranscriptContainer` now releases a block's per-width render cache once every row it contributed has entered native scrollback, and drops its own recorded copies of that block's rows. The assembled transcript keeps the rows, so the frame is byte-identical and the block is never re-rendered while the assembly holds; a width change, theme invalidation, or destructive scrollback replay rebuilds the assembly and the block re-derives from its own source. `readToolRenderer.renderResult` is the reference implementation of the new `releaseNativeScrollbackRenderCache` hook.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added
