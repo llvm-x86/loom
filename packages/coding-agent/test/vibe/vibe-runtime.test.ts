@@ -530,4 +530,45 @@ describe("vibe session registry", () => {
 
 		for (const gate of gates.values()) gate.resolve();
 	});
+
+	it("forgets the oldest killed workers instead of accumulating one record per spawn", async () => {
+		const gates = new Map<string, Deferred>();
+		vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+			AgentRegistry.global().register({
+				id: options.id,
+				displayName: options.id,
+				kind: "sub",
+				parentId: "Main",
+				session: createFakeWorkerSession().session,
+				status: "running",
+			});
+			const gate = deferred();
+			gates.set(options.id, gate);
+			await gate.promise;
+			return makeResult(options.id);
+		});
+
+		const manager = createManager();
+		const session = createSession({ manager });
+		const registry = VibeSessionRegistry.global();
+
+		// One more than the retained-tombstone budget, killed oldest-first.
+		const total = 20;
+		for (let i = 0; i < total; i++) {
+			const name = `W${i}`;
+			await registry.spawn(session, { cli: "fast", name, prompt: "go" });
+			await pollUntil(() => gates.has(name));
+			await registry.kill(session, name);
+			gates.get(name)?.resolve();
+		}
+
+		const remembered = registry.screens("Main").map(screen => screen.id);
+		expect(remembered.length).toBeLessThan(total);
+		// The most recent kills are still explainable...
+		expect(remembered).toContain(`W${total - 1}`);
+		await expect(registry.send(session, { session: `W${total - 1}`, message: "hi" })).rejects.toThrow("dead");
+		// ...while the oldest have been forgotten entirely.
+		expect(remembered).not.toContain("W0");
+		await expect(registry.send(session, { session: "W0", message: "hi" })).rejects.toThrow("Unknown vibe session");
+	});
 });

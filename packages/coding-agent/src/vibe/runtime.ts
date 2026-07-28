@@ -67,6 +67,12 @@ const TRACE_LINE_MAX = 120;
 const DEFAULT_WAIT_TIMEOUT_MS = 30_000;
 /** Response text cap inside a delivered turn result; full output stays at agent://<id>. */
 const RESPONSE_PREVIEW_MAX = 6000;
+/**
+ * Tombstones (killed workers) retained so `vibe_send` can say "that session is
+ * dead" rather than "unknown session". Beyond this the oldest are dropped —
+ * the roster is a working set, not a log.
+ */
+const MAX_DEAD_RECORDS = 16;
 
 interface VibeTurn {
 	jobId: string;
@@ -300,6 +306,8 @@ export class VibeSessionRegistry {
 		const requestedName = args.name?.replace(/[^A-Za-z0-9_-]+/g, "").slice(0, 48);
 		const id = await session.agentOutputManager.allocate(requestedName || generateTaskName());
 
+		// Reap tombstones from earlier workers before adding another record.
+		this.#pruneDeadRecords();
 		const record: VibeRecord = {
 			id,
 			cli: args.cli,
@@ -468,6 +476,13 @@ export class VibeSessionRegistry {
 		record.state = "dead";
 		record.lastActivityAt = Date.now();
 		record.lastActivity = "killed";
+		// A dead worker has no turn to report and no screen to render; drop the
+		// per-turn trace and live view so the tombstone is metadata only. The
+		// cancelled turn's job id moves to `lastJobId` so an in-flight `vibe_wait`
+		// still resolves it to a `cancelled` result.
+		if (record.turn) record.lastJobId = record.turn.jobId;
+		record.turn = undefined;
+		record.live = undefined;
 		try {
 			await AgentLifecycleManager.global().release(record.id);
 		} catch (error) {
@@ -476,7 +491,34 @@ export class VibeSessionRegistry {
 				error: error instanceof Error ? error.message : String(error),
 			});
 		}
+		this.#pruneDeadRecords();
 		return { id: record.id, cancelledTurn };
+	}
+
+	/**
+	 * Bound the tombstones in `#records`.
+	 *
+	 * A killed worker's session is already freed by `release()`, but its record
+	 * outlives it so `vibe_send` can answer "that session is dead" instead of
+	 * "unknown session". Without a bound, a long vibe-mode run accumulates one
+	 * record per worker ever spawned for the life of the process. Keep the most
+	 * recent {@link MAX_DEAD_RECORDS} and drop the rest oldest-first.
+	 *
+	 * Only records already marked `dead` are considered. Liveness is decided by
+	 * {@link #killRecord} and `#finishTurn` (which consults the agent registry
+	 * at a point where the worker's turn has settled); re-deciding it here would
+	 * race a spawn whose first turn has not registered its agent yet.
+	 */
+	#pruneDeadRecords(): void {
+		const dead: VibeRecord[] = [];
+		for (const record of this.#records.values()) {
+			if (record.state === "dead") dead.push(record);
+		}
+		if (dead.length <= MAX_DEAD_RECORDS) return;
+		dead.sort((a, b) => a.lastActivityAt - b.lastActivityAt);
+		for (const record of dead.slice(0, dead.length - MAX_DEAD_RECORDS)) {
+			this.#records.delete(record.id);
+		}
 	}
 
 	/** Build the ExecutorOptions for a first spawn, mirroring the `task`/eval-bridge plumbing. */
