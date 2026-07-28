@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced resident memory across subagent fan-outs: a finished subagent's lifecycle reviver no longer captures the run that produced it, so parking actually releases the subagent's conversation, session journal, tool registry and settings snapshot instead of only detaching them.
+- Changed the `task.agentIdleTtlMs` default from 420000 to 30000 so a finished subagent's live session is released ~14x sooner. Parked agents stay addressable and are revived from their session file with full history on the next message, resume, or Agent Hub focus.
+- Bounded the vibe worker registry's killed-session tombstones so a long vibe-mode run no longer retains one record per worker ever spawned.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added
