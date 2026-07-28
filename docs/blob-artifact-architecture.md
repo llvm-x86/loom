@@ -73,7 +73,7 @@ Allocation behavior:
 
 If the artifact directory is missing, scanning yields an empty list and allocation starts from `0`.
 
-Non-persistent sessions without an adopted manager can store `saveArtifact(...)` content in memory under numeric IDs, but `artifact://` resolution is file-backed through registered artifact directories.
+Non-persistent sessions without an adopted manager can store `saveArtifact(...)` content in memory under numeric IDs, but `artifact://` resolution is file-backed through registered artifact directories. That in-memory fallback is bounded: `SessionManager` retains at most `MAX_IN_MEMORY_ARTIFACT_BYTES` (4 MiB) in total and evicts oldest-first, and content larger than the whole budget is not retained at all — `saveArtifact` returns `undefined`, the same "no artifact" result callers already handle when file sink creation fails.
 
 ### Agent output IDs (`agent://`)
 
@@ -220,7 +220,8 @@ Blob implications after fork:
 | Registered artifact dirs missing on disk                  | Throws explicit `No artifacts directory found`                       |
 | Artifact ID not found                                     | Throws with available IDs listing                                    |
 | OutputSink artifact writer init fails                     | Continues with bounded in-memory output only                         |
-| Non-persistent `saveArtifact`                             | Stores text in `SessionManager` memory map; not file-backed URL data |
+| Non-persistent `saveArtifact` under budget                | Stores text in `SessionManager` memory map (4 MiB total, FIFO); not file-backed URL data |
+| Non-persistent `saveArtifact` over budget                 | Returns `undefined`; caller omits the `artifact://` recovery link    |
 
 ## Binary blob externalization vs text-output artifacts
 

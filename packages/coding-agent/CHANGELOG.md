@@ -5,6 +5,7 @@
 ### Changed
 
 - Reduced session memory by applying the 500,000-character persistence cap to the in-memory journal entry, not just its serialized JSONL line. Signed and encrypted blocks (`thinkingSignature`, `textSignature`, `thoughtSignature`, `redactedThinking`, Responses `encrypted_content`) are still retained verbatim.
+- Bounded the in-memory artifact fallback used by non-persistent sessions (SDK/headless embedding, `--no-persist`) to 4 MiB total with oldest-first eviction. Output larger than the budget now reports no artifact instead of advertising an `artifact://` id that could never resolve.
 
 ## [17.0.5] - 2026-07-18
 
