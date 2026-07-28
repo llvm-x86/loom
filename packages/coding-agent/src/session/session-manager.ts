@@ -65,7 +65,7 @@ import {
 	resolveManagedSessionRoot,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
-import { prepareEntryForPersistence } from "./session-persistence";
+import { capEntryStringsInMemory, prepareEntryForPersistence } from "./session-persistence";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
@@ -835,6 +835,10 @@ export class SessionManager {
 	}
 
 	#recordEntry(entry: SessionEntry): void {
+		// Cap oversized strings on the retained object, not just on the JSONL
+		// line: the journal is the session's dominant steady-state retainer and
+		// an uncapped in-memory entry would outlive every consumer of it.
+		capEntryStringsInMemory(entry);
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		this.#appendToSessionFile(entry);

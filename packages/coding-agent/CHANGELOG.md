@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced session memory by applying the 500,000-character persistence cap to the in-memory journal entry, not just its serialized JSONL line. Signed and encrypted blocks (`thinkingSignature`, `textSignature`, `thoughtSignature`, `redactedThinking`, Responses `encrypted_content`) are still retained verbatim.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

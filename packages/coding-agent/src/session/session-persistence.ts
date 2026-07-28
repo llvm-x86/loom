@@ -65,6 +65,69 @@ function isNonEmptyString(value: unknown): value is string {
 }
 
 /**
+ * True for an OpenAI image-generation result whose base64 payload persistence
+ * externalizes to the blob store instead of truncating.
+ */
+function isGeneratedImageNode(value: object): value is { type: "image_generation_call"; result: string } {
+	return (
+		"type" in value &&
+		value.type === "image_generation_call" &&
+		"result" in value &&
+		typeof value.result === "string" &&
+		!isBlobRef(value.result) &&
+		value.result.length >= BLOB_EXTERNALIZE_THRESHOLD
+	);
+}
+
+/**
+ * True for blocks bound to their exact bytes by a signature or by provider-side
+ * encryption. Signed content is bound to its exact bytes: a truncated
+ * `thinking`/`text`/`arguments` no longer matches its signature and a truncated
+ * `redacted_thinking` blob is undecryptable, so the provider 400s the replay.
+ * Such blocks are never truncated, externalized, or descended into — neither on
+ * disk nor in memory. Unsigned blocks (e.g. an interrupted stream) have no such
+ * binding and stay truncatable for size control.
+ */
+function isSignatureBoundBlock(value: object): boolean {
+	if (!("type" in value)) return false;
+	const signed =
+		(value.type === "thinking" && "thinkingSignature" in value && isNonEmptyString(value.thinkingSignature)) ||
+		(value.type === "text" && "textSignature" in value && isNonEmptyString(value.textSignature)) ||
+		(value.type === "toolCall" && "thoughtSignature" in value && isNonEmptyString(value.thoughtSignature));
+	const redacted = value.type === "redactedThinking" && "data" in value && isNonEmptyString(value.data);
+	// OpenAI Responses reasoning items (providerPayload.items) carry
+	// `encrypted_content`, server-validated on replay — atomic like signed blocks.
+	const encryptedReasoning =
+		value.type === "reasoning" && "encrypted_content" in value && isNonEmptyString(value.encrypted_content);
+	return signed || redacted || encryptedReasoning;
+}
+
+/**
+ * The size rule for a single string: its truncated form, or the value unchanged
+ * when it fits or must stay verbatim. Shared by the persistence transform and
+ * the in-memory cap so the two can never disagree on what gets cut.
+ */
+function truncatedString(value: string, key: string | undefined): string {
+	if (value.length <= MAX_PERSIST_CHARS) return value;
+	// Defensive: signature keys normally sit on blocks the signed-block guard
+	// returns verbatim, but if one is reached here (unknown carrier shape),
+	// preserve it — truncation produces an invalid signature the API rejects, and
+	// clearing drops reasoning context the provider needs on replay.
+	if (key === "thinkingSignature" || key === "thoughtSignature" || key === "textSignature") return value;
+	const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);
+	const truncated = `${truncateString(value, limit)}${TRUNCATION_NOTICE}`;
+	// JSC's `slice` returns a substring that shares — and so keeps alive — the
+	// ENTIRE original buffer, and concatenation only wraps that substring in a
+	// rope. Reading one character forces the rope to resolve into a freshly
+	// allocated buffer and drops the reference to the original; without it the
+	// in-memory cap frees nothing until something else happens to flatten the
+	// string. The comparison is never true — it exists so the read cannot be
+	// elided as dead code.
+	if (truncated.charCodeAt(0) < 0) throw new Error("unreachable");
+	return truncated;
+}
+
+/**
  * Recursively truncate large strings in an object for session persistence.
  * - Truncates oversized string fields (key-agnostic), except signed/encrypted
  *   blocks and signature keys, which persist verbatim
@@ -79,55 +142,21 @@ function isNonEmptyString(value: unknown): value is string {
  */
 function truncateForPersistence(obj: unknown, blobStore: BlobStore, key?: string): unknown {
 	if (obj === null || obj === undefined) return obj;
-	if (
-		typeof obj === "object" &&
-		"type" in obj &&
-		obj.type === "image_generation_call" &&
-		"result" in obj &&
-		typeof obj.result === "string" &&
-		!isBlobRef(obj.result) &&
-		obj.result.length >= BLOB_EXTERNALIZE_THRESHOLD
-	) {
-		return { ...obj, result: externalizeImageDataSync(blobStore, obj.result) };
-	}
-	if (shouldExternalizeImagePayload(obj, key)) {
-		return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
-	}
-	// Signed content is bound to its exact bytes: a truncated `thinking`/`text`/
-	// `arguments` no longer matches its signature and a truncated
-	// `redacted_thinking` blob is undecryptable, so the provider 400s the replay.
-	// Persist signed blocks verbatim — never truncate, externalize, or descend.
-	// Unsigned blocks (e.g. an interrupted stream) have no such binding and stay
-	// truncatable for size control.
-	if (typeof obj === "object" && "type" in obj) {
-		const signed =
-			(obj.type === "thinking" && "thinkingSignature" in obj && isNonEmptyString(obj.thinkingSignature)) ||
-			(obj.type === "text" && "textSignature" in obj && isNonEmptyString(obj.textSignature)) ||
-			(obj.type === "toolCall" && "thoughtSignature" in obj && isNonEmptyString(obj.thoughtSignature));
-		const redacted = obj.type === "redactedThinking" && "data" in obj && isNonEmptyString(obj.data);
-		// OpenAI Responses reasoning items (providerPayload.items) carry
-		// `encrypted_content`, server-validated on replay — atomic like signed blocks.
-		const encryptedReasoning =
-			obj.type === "reasoning" && "encrypted_content" in obj && isNonEmptyString(obj.encrypted_content);
-		if (signed || redacted || encryptedReasoning) return obj;
+	if (typeof obj === "object") {
+		if (isGeneratedImageNode(obj)) {
+			return { ...obj, result: externalizeImageDataSync(blobStore, obj.result) };
+		}
+		if (shouldExternalizeImagePayload(obj, key)) {
+			return { ...obj, data: externalizeImageDataSync(blobStore, obj.data, obj.mimeType) };
+		}
+		if (isSignatureBoundBlock(obj)) return obj;
 	}
 
 	if (typeof obj === "string") {
 		if (key === "image_url" && isImageDataUrl(obj)) {
 			return externalizeImageDataUrlSync(blobStore, obj);
 		}
-		if (obj.length > MAX_PERSIST_CHARS) {
-			// Defensive: signature keys normally sit on blocks the guard above returns
-			// verbatim, but if one is reached here (unknown carrier shape), preserve it —
-			// truncation produces an invalid signature the API rejects, and clearing
-			// drops reasoning context the provider needs on replay.
-			if (key === "thinkingSignature" || key === "thoughtSignature" || key === "textSignature") {
-				return obj;
-			}
-			const limit = Math.max(0, MAX_PERSIST_CHARS - TRUNCATION_NOTICE.length);
-			return `${truncateString(obj, limit)}${TRUNCATION_NOTICE}`;
-		}
-		return obj;
+		return truncatedString(obj, key);
 	}
 
 	if (Array.isArray(obj)) {
@@ -274,4 +303,88 @@ function stripReplayedReasoningSignatures(entry: FileEntry): FileEntry {
 
 export function prepareEntryForPersistence(entry: FileEntry, blobStore: BlobStore): FileEntry {
 	return truncateForPersistence(stripReplayedReasoningSignatures(entry), blobStore) as FileEntry;
+}
+
+/**
+ * In-place counterpart of the string-truncation half of
+ * {@link truncateForPersistence}. Returns true when anything was cut.
+ *
+ * Mirrors the persistence walk branch for branch — same externalization skips,
+ * same signed-block exemption, same `lineCount` recompute — so the live entry
+ * and its JSONL line can never disagree about which strings were truncated.
+ */
+function capStringsInPlace(obj: unknown, key: string | undefined): boolean {
+	if (typeof obj !== "object" || obj === null) return false;
+	// Persistence externalizes these payloads to the blob store instead of
+	// truncating them, and signed blocks persist verbatim. Neither may be cut.
+	if (isGeneratedImageNode(obj) || shouldExternalizeImagePayload(obj, key) || isSignatureBoundBlock(obj)) return false;
+
+	let changed = false;
+
+	if (Array.isArray(obj)) {
+		for (let i = 0; i < obj.length; i++) {
+			const item = obj[i];
+			if (typeof item !== "string") {
+				if (capStringsInPlace(item, key)) changed = true;
+				continue;
+			}
+			if (key === "image_url" && isImageDataUrl(item)) continue;
+			const capped = truncatedString(item, key);
+			if (capped === item) continue;
+			obj[i] = capped;
+			changed = true;
+		}
+		return changed;
+	}
+
+	const record = obj as Record<string, unknown>;
+	for (const childKey of Object.keys(record)) {
+		const value = record[childKey];
+		if (typeof value !== "string") {
+			if (capStringsInPlace(value, childKey)) changed = true;
+			continue;
+		}
+		// Data URLs become blob refs on disk, never truncated text.
+		if (childKey === "image_url" && isImageDataUrl(value)) continue;
+		const capped = truncatedString(value, childKey);
+		if (capped === value) continue;
+		record[childKey] = capped;
+		changed = true;
+	}
+	if (!changed) return false;
+
+	const content = record[TEXT_CONTENT_KEY];
+	if (typeof content === "string" && typeof record.lineCount === "number") {
+		// Same recompute persistence performs, counted without materializing the
+		// split array (this runs on strings up to MAX_PERSIST_CHARS).
+		let lineCount = 1;
+		for (let i = content.indexOf("\n"); i !== -1; i = content.indexOf("\n", i + 1)) lineCount++;
+		record.lineCount = lineCount;
+	}
+	return true;
+}
+
+/**
+ * Enforce the persistence size cap on the LIVE entry, in place.
+ *
+ * {@link prepareEntryForPersistence} builds a separate, slimmed object for the
+ * JSONL line, so without this the in-memory journal keeps every oversized
+ * string for the life of the process while disk stays bounded. Applying the
+ * same `MAX_PERSIST_CHARS` rule to the retained entry makes a live session cost
+ * what the same session costs after a resume.
+ *
+ * Deliberately narrower than the persistence transform — it cuts only what
+ * persistence would cut:
+ * - no blob externalization: runtime consumers and the collab replication tap
+ *   need inline image base64, and persistence externalizes those payloads
+ *   rather than truncating them, so they are skipped here as well;
+ * - no transient-field stripping (`jsonlEvents` still feeds in-process renderers);
+ * - no reasoning-signature dedup (a replay concern, not a size concern).
+ *
+ * Idempotent: a truncated string ends up at most `MAX_PERSIST_CHARS` chars, so
+ * the persistence pass that follows finds nothing left to cut and never stacks
+ * a second truncation notice.
+ */
+export function capEntryStringsInMemory(entry: FileEntry): void {
+	capStringsInPlace(entry, undefined);
 }
