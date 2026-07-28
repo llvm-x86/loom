@@ -1,13 +1,20 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, getConfigAgentDirName, getProjectDir, LEGACY_CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 import { expandTilde } from "./tools/path-utils";
 
 export * from "./config/config-file";
 
+/**
+ * Config bases in priority order. The canonical loom directory wins; the
+ * pre-rename `.omp` directory stays as a silent read-only fallback directly
+ * after it, so installs that never migrated keep resolving their rules,
+ * prompts, commands and MCP config.
+ */
 const priorityList = [
 	{ dir: CONFIG_DIR_NAME, globalAgentDir: getConfigAgentDirName },
+	{ dir: LEGACY_CONFIG_DIR_NAME, globalAgentDir: () => path.join(LEGACY_CONFIG_DIR_NAME, "agent") },
 	{ dir: ".claude" },
 	{ dir: ".codex" },
 	{ dir: ".gemini" },
@@ -77,8 +84,8 @@ export function getChangelogPath(): string | undefined {
 
 /**
  * Config directory bases in priority order (highest first).
- * User-level: ~/.omp/agent, ~/.claude, ~/.codex, ~/.gemini
- * Project-level: .omp, .claude, .codex, .gemini
+ * User-level: ~/.loom/agent, ~/.omp/agent (legacy), ~/.claude, ~/.codex, ~/.gemini
+ * Project-level: .loom, .omp (legacy), .claude, .codex, .gemini
  */
 const USER_CONFIG_BASES = priorityList.map(({ dir, globalAgentDir }) => ({
 	base: () => path.join(os.homedir(), globalAgentDir ? globalAgentDir() : dir),
@@ -117,7 +124,7 @@ export interface GetConfigDirsOptions {
  * @example
  * // Get all command directories
  * getConfigDirs("commands")
- * // → [{ path: "~/.omp/agent/commands", source: ".omp", level: "user" }, ...]
+ * // → [{ path: "~/.loom/agent/commands", source: ".loom", level: "user" }, ...]
  *
  * @example
  * // Get only existing project skill directories
@@ -129,8 +136,13 @@ export function getConfigDirs(subpath: string, options: GetConfigDirsOptions = {
 
 	// User-level directories (highest priority)
 	if (user) {
+		// A config-dir env override can collapse the canonical and legacy bases
+		// onto the same directory; keep only the highest-priority entry.
+		const seen = new Set<string>();
 		for (const { base, name } of USER_CONFIG_BASES) {
 			const resolvedPath = path.resolve(base(), subpath);
+			if (seen.has(resolvedPath)) continue;
+			seen.add(resolvedPath);
 			if (!existingOnly || fs.existsSync(resolvedPath)) {
 				results.push({ path: resolvedPath, source: name, level: "user" });
 			}
@@ -207,7 +219,7 @@ export function findConfigFileWithMeta(
 
 /**
  * Find all nearest config directories by walking up from cwd.
- * Returns one entry per config base (.omp, .claude) - the nearest one found.
+ * Returns one entry per config base (.loom, .omp, .claude) - the nearest one found.
  * Results are in priority order (highest first).
  */
 export function findAllNearestProjectConfigDirs(subpath: string, cwd: string = getProjectDir()): ConfigDirEntry[] {

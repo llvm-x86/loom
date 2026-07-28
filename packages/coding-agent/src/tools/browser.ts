@@ -10,6 +10,7 @@ import { resolveCmuxKind } from "./browser/cmux/rpc";
 import { acquireBrowser, type BrowserHandle, type BrowserKind, type BrowserKindTag } from "./browser/registry";
 import type { Observation, ScreenshotResult } from "./browser/tab-protocol";
 import { acquireTab, dropHeadlessTabs, getTab, releaseAllTabs, releaseTab, runInTab } from "./browser/tab-supervisor";
+import { detectConnectedWebBridge, type WebBridgeDetector, webBridgeRoutingMessage } from "./browser/webbridge-detect";
 import type { OutputMeta } from "./output-meta";
 import { resolveToCwd } from "./path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "./tool-errors";
@@ -88,6 +89,11 @@ function resolveBrowserKind(params: BrowserParams, session: ToolSession): Browse
 	}
 	const headless = session.settings.get("browser.headless") as boolean;
 	return { kind: "headless", headless };
+}
+
+/** Injectable collaborators; production uses the defaults. */
+export interface BrowserToolDeps {
+	detectWebBridge?: WebBridgeDetector;
 }
 
 /**
@@ -169,7 +175,10 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 		},
 	];
 
-	constructor(private readonly session: ToolSession) {}
+	constructor(
+		private readonly session: ToolSession,
+		private readonly deps: BrowserToolDeps = {},
+	) {}
 	#description?: string;
 	get description(): string {
 		this.#description ??= prompt.render(browserDescription, {});
@@ -223,6 +232,15 @@ export class BrowserTool implements AgentTool<typeof browserSchema, BrowserToolD
 	): Promise<AgentToolResult<BrowserToolDetails>> {
 		const kind = resolveBrowserKind(params, this.session);
 		details.browser = kind.kind;
+
+		// An implicit headless launch is almost never what the user wants when their
+		// own browser is already reachable through the loom WebBridge. Explicit
+		// `app.path` / `app.cdp_url` opt out of the probe entirely.
+		if (kind.kind === "headless" && !params.app) {
+			const detect = this.deps.detectWebBridge ?? detectConnectedWebBridge;
+			const bridge = await detect();
+			if (bridge) throw new ToolError(webBridgeRoutingMessage(bridge.port));
+		}
 
 		// If a tab with this name already exists on a different browser kind, fail fast — caller must close first.
 		const existing = getTab(name);

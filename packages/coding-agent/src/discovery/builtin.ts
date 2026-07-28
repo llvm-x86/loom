@@ -31,13 +31,14 @@ import {
 	expandEnvVarsDeep,
 	getExtensionNameFromPath,
 	loadFilesFromDir,
+	NATIVE_PROJECT_DIR_NAMES,
 	SOURCE_PATHS,
 	scanSkillsFromDir,
 } from "./helpers";
 
 const PROVIDER_ID = "native";
-const DISPLAY_NAME = "OMP";
-const DESCRIPTION = "Native OMP configuration from ~/.omp and .omp/";
+const DISPLAY_NAME = "Loom";
+const DESCRIPTION = "Native loom configuration from ~/.loom and .loom/";
 const PRIORITY = 100;
 
 const PATHS = SOURCE_PATHS.native;
@@ -54,18 +55,29 @@ async function ifNonEmptyDir(...seg: string[]): Promise<string | null> {
 	return null;
 }
 
-async function getConfigDirs(ctx: LoadContext): Promise<Array<{ dir: string; level: "user" | "project" }>> {
-	const result: Array<{ dir: string; level: "user" | "project" }> = [];
+interface ConfigDir {
+	dir: string;
+	level: "user" | "project";
+	/** True for the pre-rename `.omp/` project dir; canonical `.loom/` entries win collisions. */
+	legacy: boolean;
+}
 
-	const projectDir = await ifNonEmptyDir(ctx.cwd, PATHS.projectDir);
-	if (projectDir) {
-		result.push({ dir: projectDir, level: "project" });
+async function getConfigDirs(ctx: LoadContext): Promise<ConfigDir[]> {
+	const result: ConfigDir[] = [];
+
+	// Canonical `.loom` first so first-wins dedup prefers it; the legacy `.omp`
+	// dir is still scanned so pre-rename repos keep working.
+	for (const name of NATIVE_PROJECT_DIR_NAMES) {
+		const projectDir = await ifNonEmptyDir(ctx.cwd, name);
+		if (projectDir) {
+			result.push({ dir: projectDir, level: "project", legacy: name !== PATHS.projectDir });
+		}
 	}
 	// Native user config is profile-scoped: getAgentDir() points at the active
-	// profile's agent dir (~/.omp/profiles/<name>/agent), like sessions and MCP.
+	// profile's agent dir (~/.loom/profiles/<name>/agent), like sessions and MCP.
 	const userDir = await ifNonEmptyDir(getAgentDir());
 	if (userDir) {
-		result.push({ dir: userDir, level: "user" });
+		result.push({ dir: userDir, level: "user", legacy: false });
 	}
 
 	return result;
@@ -86,13 +98,18 @@ function getAncestorDirs(cwd: string, stopAt?: string | null): Array<{ dir: stri
 	return ancestors;
 }
 
-async function findNearestProjectConfigDir(
+/**
+ * Nearest ancestor holding a native project config dir, canonical `.loom` first
+ * and the legacy `.omp` second when both exist at that ancestor.
+ */
+async function findNearestProjectConfigDirs(
 	cwd: string,
 	repoRoot?: string | null,
-): Promise<{ dir: string; depth: number } | null> {
+): Promise<{ dirs: string[]; depth: number } | null> {
 	for (const ancestor of getAncestorDirs(cwd, repoRoot)) {
-		const configDir = await ifNonEmptyDir(ancestor.dir, PATHS.projectDir);
-		if (configDir) return { dir: configDir, depth: ancestor.depth };
+		const found = await Promise.all(NATIVE_PROJECT_DIR_NAMES.map(name => ifNonEmptyDir(ancestor.dir, name)));
+		const dirs = found.filter((dir): dir is string => dir !== null);
+		if (dirs.length > 0) return { dirs, depth: ancestor.depth };
 	}
 	return null;
 }
@@ -194,8 +211,10 @@ async function loadMCPServers(ctx: LoadContext): Promise<LoadResult<MCPServer>> 
 	// stays in sync with getMCPConfigPath("user") and the /mcp config writer.
 	const userAgentDir = getAgentDir();
 	const paths = [
-		{ path: path.join(ctx.cwd, PATHS.projectDir, "mcp.json"), level: "project" as const },
-		{ path: path.join(ctx.cwd, PATHS.projectDir, ".mcp.json"), level: "project" as const },
+		...NATIVE_PROJECT_DIR_NAMES.flatMap(name => [
+			{ path: path.join(ctx.cwd, name, "mcp.json"), level: "project" as const },
+			{ path: path.join(ctx.cwd, name, ".mcp.json"), level: "project" as const },
+		]),
 		{ path: path.join(userAgentDir, "mcp.json"), level: "user" as const },
 		{ path: path.join(userAgentDir, ".mcp.json"), level: "user" as const },
 	];
@@ -243,9 +262,9 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 		});
 	}
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
-	if (nearestProjectConfigDir) {
-		const projectPath = path.join(nearestProjectConfigDir.dir, "SYSTEM.md");
+	const nearest = await findNearestProjectConfigDirs(ctx.cwd, ctx.repoRoot);
+	for (const dir of nearest?.dirs ?? []) {
+		const projectPath = path.join(dir, "SYSTEM.md");
 		const projectContent = await readFile(projectPath);
 		if (projectContent) {
 			items.push({
@@ -254,6 +273,7 @@ async function loadSystemPrompt(ctx: LoadContext): Promise<LoadResult<SystemProm
 				level: "project",
 				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
 			});
+			break;
 		}
 	}
 
@@ -270,15 +290,17 @@ registerProvider<SystemPrompt>(systemPromptCapability.id, {
 
 // Skills
 async function loadSkills(ctx: LoadContext): Promise<LoadResult<Skill>> {
-	// Walk up from cwd finding .omp/skills/ in ancestors (closest first)
+	// Walk up from cwd finding <ancestor>/.loom/skills/ (and the legacy .omp) closest first
 	const ancestors = getAncestorDirs(ctx.cwd, ctx.repoRoot ?? ctx.home);
-	const projectScans = ancestors.map(({ dir }) =>
-		scanSkillsFromDir(ctx, {
-			dir: path.join(dir, PATHS.projectDir, "skills"),
-			providerId: PROVIDER_ID,
-			level: "project",
-			requireDescription: true,
-		}),
+	const projectScans = ancestors.flatMap(({ dir }) =>
+		NATIVE_PROJECT_DIR_NAMES.map(name =>
+			scanSkillsFromDir(ctx, {
+				dir: path.join(dir, name, "skills"),
+				providerId: PROVIDER_ID,
+				level: "project",
+				requireDescription: true,
+			}),
+		),
 	);
 
 	// User-level scan from ~/.omp/agent/skills/
@@ -383,11 +405,13 @@ async function loadRules(ctx: LoadContext): Promise<LoadResult<Rule>> {
 	const userRule = await loadStickyRulesFile(userRulesFile, "user");
 	if (userRule) items.push(userRule);
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
-	if (nearestProjectConfigDir) {
-		const projectRulesFile = path.join(nearestProjectConfigDir.dir, "RULES.md");
-		const projectRule = await loadStickyRulesFile(projectRulesFile, "project");
-		if (projectRule) items.push(projectRule);
+	const nearest = await findNearestProjectConfigDirs(ctx.cwd, ctx.repoRoot);
+	for (const dir of nearest?.dirs ?? []) {
+		const projectRule = await loadStickyRulesFile(path.join(dir, "RULES.md"), "project");
+		if (projectRule) {
+			items.push(projectRule);
+			break;
+		}
 	}
 
 	return { items, warnings };
@@ -849,7 +873,10 @@ async function loadSettings(ctx: LoadContext): Promise<LoadResult<Settings>> {
 		}
 	};
 
-	for (const { dir, level } of await getConfigDirs(ctx)) {
+	// Settings are deep-merged later-wins downstream, so emit the legacy `.omp`
+	// dir before the canonical `.loom` one (stable sort keeps user/project order).
+	const configDirs = (await getConfigDirs(ctx)).sort((a, b) => Number(b.legacy) - Number(a.legacy));
+	for (const { dir, level } of configDirs) {
 		const settingsPath = path.join(dir, "settings.json");
 		const settingsContent = await readFile(settingsPath);
 		if (settingsContent) {
@@ -908,16 +935,16 @@ async function loadContextFiles(ctx: LoadContext): Promise<LoadResult<ContextFil
 		});
 	}
 
-	const nearestProjectConfigDir = await findNearestProjectConfigDir(ctx.cwd, ctx.repoRoot);
-	if (nearestProjectConfigDir) {
-		const projectPath = path.join(nearestProjectConfigDir.dir, "AGENTS.md");
+	const nearest = await findNearestProjectConfigDirs(ctx.cwd, ctx.repoRoot);
+	for (const dir of nearest?.dirs ?? []) {
+		const projectPath = path.join(dir, "AGENTS.md");
 		const projectContent = await readFile(projectPath);
 		if (projectContent) {
 			items.push({
 				path: projectPath,
 				content: projectContent,
 				level: "project",
-				depth: nearestProjectConfigDir.depth,
+				depth: nearest?.depth,
 				_source: createSourceMeta(PROVIDER_ID, projectPath, "project"),
 			});
 			return { items, warnings };

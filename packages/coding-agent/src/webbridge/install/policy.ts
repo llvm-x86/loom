@@ -6,13 +6,14 @@
  * `ExtensionInstallForcelist` enterprise policy, where the update URL is a
  * `file://` URL pointing at the local Omaha `update.xml` (see crx.ts). The
  * policy store is OS-specific:
- *   - win32  — registry `...\ExtensionInstallForcelist` (HKCU, or HKLM with `system`)
+ *   - win32  — registry `...\ExtensionInstallForcelist` (HKCU; HKLM with `system`,
+ *              falling back to HKCU when the machine-wide write is denied)
  *   - darwin — `defaults` array (user domain, or /Library/Managed Preferences with `system`)
  *   - linux  — JSON file in `/etc/<...>/policies/managed` (always system-wide)
  *
  * Expected permission failures never throw: both exports return
- * `applied: false` with a message containing the exact commands the user can
- * run instead. Only real bugs (e.g. a missing updateManifestPath) throw.
+ * `applied: false` with a `manualCommand` holding the exact command(s) the user
+ * can run instead. Only real bugs (e.g. a missing updateManifestPath) throw.
  */
 import { execFile, spawn } from "node:child_process";
 import { constants as fsConstants } from "node:fs";
@@ -20,7 +21,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { pathToFileURL } from "node:url";
 import { promisify } from "node:util";
-import type { BrowserFamily, PolicyOptions, PolicyResult } from "./types";
+import type { BrowserFamily, CommandResult, CommandRunner, PolicyOptions, PolicyResult } from "./types";
 
 const execFileAsync = promisify(execFile);
 
@@ -99,12 +100,6 @@ export async function removeForcePolicy(opts: PolicyOptions): Promise<PolicyResu
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-interface CommandResult {
-	ok: boolean;
-	stdout: string;
-	stderr: string;
-}
-
 async function run(command: string, args: string[]): Promise<CommandResult> {
 	try {
 		const { stdout, stderr } = await execFileAsync(command, args, { encoding: "utf8" });
@@ -157,8 +152,14 @@ interface RegistryValue {
 	data: string;
 }
 
-async function queryRegistryValues(key: string): Promise<RegistryValue[]> {
-	const query = await run("reg", ["query", key]);
+type RegistryHive = "HKLM" | "HKCU";
+
+function registryKey(family: BrowserFamily, hive: RegistryHive): string {
+	return `${hive}\\${WINDOWS_POLICY_SUBKEYS[family]}\\ExtensionInstallForcelist`;
+}
+
+async function queryRegistryValues(exec: CommandRunner, key: string): Promise<RegistryValue[]> {
+	const query = await exec("reg", ["query", key]);
 	if (!query.ok) return [];
 	const values: RegistryValue[] = [];
 	for (const line of query.stdout.split(/\r?\n/)) {
@@ -168,57 +169,97 @@ async function queryRegistryValues(key: string): Promise<RegistryValue[]> {
 	return values;
 }
 
-async function installWindows(opts: PolicyOptions, entry: string): Promise<PolicyResult> {
-	const key = `${opts.system ? "HKLM" : "HKCU"}\\${WINDOWS_POLICY_SUBKEYS[opts.family]}\\ExtensionInstallForcelist`;
-	const values = await queryRegistryValues(key);
-	const prefix = `${opts.extensionId};`;
-	if (values.some(value => value.data.startsWith(prefix))) {
-		return { family: opts.family, applied: true, location: key, message: `Policy already present. ${RESTART_NOTE}` };
-	}
-	let nextIndex = 1;
+function nextForcelistIndex(values: readonly RegistryValue[]): string {
+	let next = 1;
 	for (const value of values) {
 		const index = Number.parseInt(value.name, 10);
-		if (Number.isFinite(index) && index >= nextIndex) nextIndex = index + 1;
+		if (Number.isFinite(index) && index >= next) next = index + 1;
 	}
-	const added = await run("reg", ["add", key, "/v", String(nextIndex), "/t", "REG_SZ", "/d", entry, "/f"]);
-	if (!added.ok) {
-		const elevation = opts.system ? " (HKLM requires an elevated shell)" : "";
+	return String(next);
+}
+
+/**
+ * Write the forcelist entry for one hive. Machine-wide (`system`) installs fall
+ * back to the per-user hive when HKLM is denied — the common non-admin case —
+ * and every failure carries the verbatim `reg add` the user can run themselves.
+ *
+ * Exported for tests; production callers go through {@link installForcePolicy}.
+ */
+export async function installWindows(opts: PolicyOptions, entry: string): Promise<PolicyResult> {
+	const exec = opts.exec ?? run;
+	const hives: RegistryHive[] = opts.system ? ["HKLM", "HKCU"] : ["HKCU"];
+	let result: PolicyResult | undefined;
+	for (const hive of hives) {
+		const key = registryKey(opts.family, hive);
+		const values = await queryRegistryValues(exec, key);
+		const prefix = `${opts.extensionId};`;
+		if (values.some(value => value.data.startsWith(prefix))) {
+			return {
+				family: opts.family,
+				applied: true,
+				location: key,
+				message: `Policy already present. ${RESTART_NOTE}`,
+			};
+		}
+		const name = nextForcelistIndex(values);
+		const added = await exec("reg", ["add", key, "/v", name, "/t", "REG_SZ", "/d", entry, "/f"]);
+		if (added.ok) {
+			const fellBack = opts.system && hive === "HKCU";
+			return {
+				family: opts.family,
+				applied: true,
+				location: key,
+				message: fellBack
+					? `Machine-wide policy was denied, so the per-user policy (${key}) was written instead. ${RESTART_NOTE}`
+					: RESTART_NOTE,
+			};
+		}
 		const detail = added.stderr.trim() || added.stdout.trim() || "reg add failed";
-		return {
+		result = {
 			family: opts.family,
 			applied: false,
 			location: key,
-			message: `Could not write the force-install policy${elevation}: ${detail}`,
+			message: `Could not write the force-install policy to ${key}: ${detail}`,
+			// `reg` treats a bare `;` as an argument separator: key/name/data must stay quoted.
+			manualCommand: `reg add "${key}" /v "${name}" /t REG_SZ /d "${entry}" /f`,
 		};
+		if (hive === "HKLM" && /access is denied|requires elevation/i.test(detail)) continue;
+		return result;
 	}
-	return { family: opts.family, applied: true, location: key, message: RESTART_NOTE };
+	// Unreachable in practice: the loop always returns unless HKLM was denied.
+	return result ?? { family: opts.family, applied: false, location: "", message: "reg add failed" };
 }
 
-async function removeWindows(opts: PolicyOptions): Promise<PolicyResult> {
-	const key = `${opts.system ? "HKLM" : "HKCU"}\\${WINDOWS_POLICY_SUBKEYS[opts.family]}\\ExtensionInstallForcelist`;
-	const values = await queryRegistryValues(key);
-	const prefix = `${opts.extensionId};`;
-	const target = values.find(value => value.data.startsWith(prefix));
-	if (!target) {
-		return {
-			family: opts.family,
-			applied: true,
-			location: key,
-			message: "No loom force-install entry present; nothing to remove.",
-		};
-	}
-	const deleted = await run("reg", ["delete", key, "/v", target.name, "/f"]);
-	if (!deleted.ok) {
-		const elevation = opts.system ? " (HKLM requires an elevated shell)" : "";
+export async function removeWindows(opts: PolicyOptions): Promise<PolicyResult> {
+	const exec = opts.exec ?? run;
+	const hives: RegistryHive[] = opts.system ? ["HKLM", "HKCU"] : ["HKCU"];
+	let last: PolicyResult | undefined;
+	for (const hive of hives) {
+		const key = registryKey(opts.family, hive);
+		const values = await queryRegistryValues(exec, key);
+		const prefix = `${opts.extensionId};`;
+		const target = values.find(value => value.data.startsWith(prefix));
+		if (!target) {
+			last = {
+				family: opts.family,
+				applied: true,
+				location: key,
+				message: "No loom force-install entry present; nothing to remove.",
+			};
+			continue;
+		}
+		const deleted = await exec("reg", ["delete", key, "/v", target.name, "/f"]);
+		if (deleted.ok) return { family: opts.family, applied: true, location: key, message: RESTART_NOTE };
 		const detail = deleted.stderr.trim() || deleted.stdout.trim() || "reg delete failed";
 		return {
 			family: opts.family,
 			applied: false,
 			location: key,
-			message: `Could not remove the force-install entry${elevation}: ${detail}`,
+			message: `Could not remove the force-install entry from ${key}: ${detail}`,
+			manualCommand: `reg delete "${key}" /v "${target.name}" /f`,
 		};
 	}
-	return { family: opts.family, applied: true, location: key, message: RESTART_NOTE };
+	return last ?? { family: opts.family, applied: true, location: registryKey(opts.family, "HKCU") };
 }
 
 // ---------------------------------------------------------------------------
@@ -295,7 +336,8 @@ async function installMacOS(opts: PolicyOptions, entry: string): Promise<PolicyR
 			family: opts.family,
 			applied: false,
 			location: target.domain,
-			message: `Could not write the force-install policy (${detail}). Run it yourself:\n${printable}\n${RESTART_NOTE}`,
+			message: `Could not write the force-install policy (${detail}). ${RESTART_NOTE}`,
+			manualCommand: printable,
 		};
 	}
 	return { family: opts.family, applied: true, location: target.domain, message: RESTART_NOTE };
@@ -398,11 +440,10 @@ async function installLinux(opts: PolicyOptions, entry: string): Promise<PolicyR
 		family: opts.family,
 		applied: false,
 		location: file,
-		message: [
-			`Need root to write the managed policy for ${opts.family}. Paste these commands:`,
-			`sudo mkdir -p ${shellQuote(dir)}`,
-			`sudo tee ${shellQuote(file)} <<'EOF'\n${content}EOF`,
-		].join("\n"),
+		message: `Need root to write the managed policy for ${opts.family}.`,
+		manualCommand: [`sudo mkdir -p ${shellQuote(dir)}`, `sudo tee ${shellQuote(file)} <<'EOF'\n${content}EOF`].join(
+			"\n",
+		),
 	};
 }
 

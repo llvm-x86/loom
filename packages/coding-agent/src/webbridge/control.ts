@@ -403,13 +403,17 @@ export function formatInstallReport(report: InstallReport): string {
 	if (report.results.some(r => r.applied)) {
 		lines.push("Fully quit and reopen the browser — the extension installs automatically (no Developer mode).");
 	}
+	const manual: string[] = [];
+	for (const result of report.results) {
+		if (result.applied || !result.manualCommand) continue;
+		manual.push(`  ${familyDisplayName(result.family)}:`);
+		for (const line of result.manualCommand.split("\n")) manual.push(`    ${line}`);
+	}
+	if (manual.length > 0) {
+		lines.push("", "Run these yourself to apply the policy:", "", ...manual);
+	}
 	if (report.results.some(r => !r.applied)) {
-		lines.push(
-			"",
-			"For any browser above, run the printed commands or load it manually:",
-			"",
-			devLoadSteps(report.destDir),
-		);
+		lines.push("", "Or load the extension manually:", "", devLoadSteps(report.destDir));
 	}
 	lines.push("", "Then run `loom webbridge start` (or `/webbridge start`) to launch the daemon.");
 	return lines.join("\n");

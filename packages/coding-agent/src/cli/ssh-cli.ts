@@ -1,10 +1,10 @@
 /**
  * SSH CLI command handlers.
  *
- * Handles `omp ssh <command>` subcommands for SSH host configuration management.
+ * Handles `loom ssh <command>` subcommands for SSH host configuration management.
  */
 
-import { getSSHConfigPath } from "@oh-my-pi/pi-utils";
+import { APP_NAME, CONFIG_DIR_NAME, getSSHConfigPath } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
 import { addSSHHost, readSSHConfigFile, removeSSHHost, type SSHHostConfig } from "../ssh/config-writer";
 
@@ -60,7 +60,9 @@ async function handleAdd(cmd: SSHCommandArgs): Promise<void> {
 	if (!name) {
 		process.stdout.write(chalk.red("Error: Host name required\n"));
 		process.stdout.write(
-			chalk.dim("Usage: omp ssh add <name> --host <address> [--user <user>] [--port <port>] [--key <path>]\n"),
+			chalk.dim(
+				`Usage: ${APP_NAME} ssh add <name> --host <address> [--user <user>] [--port <port>] [--key <path>]\n`,
+			),
 		);
 		process.exitCode = 1;
 		return;
@@ -69,7 +71,7 @@ async function handleAdd(cmd: SSHCommandArgs): Promise<void> {
 	const host = cmd.flags.host;
 	if (!host) {
 		process.stdout.write(chalk.red("Error: --host is required\n"));
-		process.stdout.write(chalk.dim("Usage: omp ssh add <name> --host <address>\n"));
+		process.stdout.write(chalk.dim(`Usage: ${APP_NAME} ssh add <name> --host <address>\n`));
 		process.exitCode = 1;
 		return;
 	}
@@ -107,7 +109,7 @@ async function handleRemove(cmd: SSHCommandArgs): Promise<void> {
 	const name = cmd.args[0];
 	if (!name) {
 		process.stdout.write(chalk.red("Error: Host name required\n"));
-		process.stdout.write(chalk.dim("Usage: omp ssh remove <name> [--scope project|user]\n"));
+		process.stdout.write(chalk.dim(`Usage: ${APP_NAME} ssh remove <name> [--scope project|user]\n`));
 		process.exitCode = 1;
 		return;
 	}
@@ -144,12 +146,12 @@ async function handleList(cmd: SSHCommandArgs): Promise<void> {
 
 	if (!hasProject && !hasUser) {
 		process.stdout.write(chalk.dim("No SSH hosts configured\n"));
-		process.stdout.write(chalk.dim("Add one with: omp ssh add <name> --host <address>\n"));
+		process.stdout.write(chalk.dim(`Add one with: ${APP_NAME} ssh add <name> --host <address>\n`));
 		return;
 	}
 
 	if (hasProject) {
-		process.stdout.write(chalk.bold("Project SSH Hosts (.omp/ssh.json):\n"));
+		process.stdout.write(chalk.bold(`Project SSH Hosts (${CONFIG_DIR_NAME}/ssh.json):\n`));
 		printHosts(projectHosts);
 	}
 
@@ -158,7 +160,7 @@ async function handleList(cmd: SSHCommandArgs): Promise<void> {
 	}
 
 	if (hasUser) {
-		process.stdout.write(chalk.bold("User SSH Hosts (~/.omp/agent/ssh.json):\n"));
+		process.stdout.write(chalk.bold(`User SSH Hosts (~/${CONFIG_DIR_NAME}/agent/ssh.json):\n`));
 		printHosts(userHosts);
 	}
 }

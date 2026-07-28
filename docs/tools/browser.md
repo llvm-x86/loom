@@ -15,6 +15,7 @@
   - `packages/coding-agent/src/tools/browser/tab-protocol.ts` — worker init/run/result message schema.
   - `packages/coding-agent/src/tools/browser/readable.ts` — `tab.extract()` readability extraction.
   - `packages/coding-agent/src/tools/browser/aria/aria-snapshot.ts` — `captureAriaSnapshot()` (puppeteer/CDP path) and `buildAriaSnapshotScript()` (cmux path); imports the committed `aria-snapshot.bundle.txt`.
+  - `packages/coding-agent/src/tools/browser/webbridge-detect.ts` — session-cached probe for a live loom WebBridge daemon with a connected extension; gates the implicit headless launch.
   - `packages/coding-agent/src/tools/browser/aria/aria-snapshot.bundle.txt` — generated, committed artifact: Playwright's injected ARIA-snapshot sources (Apache-2.0, (c) Microsoft; ARIA tree + W3C accessible-name computation) bundled to a CJS module. Upstream sources are not vendored into the repo.
   - `packages/coding-agent/scripts/generate-aria-snapshot.ts` — fetches the pinned Playwright sources to a temp dir and bundles them into `aria-snapshot.bundle.txt` (CJS, browser target). Dev-time, network-bound; only the bundle is committed.
   - `packages/coding-agent/src/tools/browser/cmux/rpc.ts` — cmux browser-kind resolution plus snapshot/eval/wait-state helpers for the cmux backend.
@@ -155,6 +156,19 @@ The tool returns one result per call; no streaming partial output is emitted fro
 20. `display()` calls accumulate in an array. After code finishes, the worker posts `{ displays, returnValue, screenshots }`; `BrowserTool.#run()` appends the return value as trailing text content when not `undefined`.
 21. `close` releases one tab or all tabs via `releaseTab()` / `releaseAllTabs()`. Each tab aborts pending runs, asks the worker to close, waits up to `750` ms for a `closed` ack, terminates the worker, decrements browser refcount, and disposes the browser handle when refcount reaches zero.
 
+## WebBridge (real browser)
+The loom WebBridge exposes the user's REAL browser (their live login sessions) over a loopback daemon at `http://127.0.0.1:10088` (override with `LOOM_WEBBRIDGE_PORT`), driven by a Chrome/Edge/Brave extension. See `skill://loom-webbridge`.
+
+`open` will not silently start a hidden headless Chromium when that bridge is available:
+
+1. `resolveBrowserKind()` runs first. If it yields anything other than `headless` — `connected` (`app.cdp_url`), `spawned` (`app.path`), or `cmux` — nothing below applies.
+2. For an implicit `headless` kind (no `app` field at all), `open` awaits `detectConnectedWebBridge()` (`src/tools/browser/webbridge-detect.ts`), which GETs `/status` and `/health` on the resolved port under a shared 300 ms timeout and requires `{ok: true, extensionConnected: true}`.
+3. When that succeeds, `open` throws a `ToolError` carrying `webBridgeRoutingMessage(port)`: the real browser is reachable, headless is being refused, read `skill://loom-webbridge`, and drive it via `curl -s -X POST http://127.0.0.1:<port>/command …` or `loom webbridge call <action> --args '…'` from `bash`.
+
+Headless still applies when the daemon is down, the extension is not connected, or the caller passes an explicit `app.path` / `app.cdp_url` — the explicit forms bypass the probe entirely, so CDP attach and spawned-app flows are unchanged.
+
+Probe results are cached per process: a positive is kept for the process lifetime, a negative for 30 s, so a daemon started mid-session is picked up on the next `open` without probing on every call. `resetWebBridgeDetectionCache()` is the test seam; `BrowserTool`'s optional second constructor argument (`BrowserToolDeps.detectWebBridge`) injects a detector.
+
 ## Modes / Variants
 - **Action dispatch**
   - `open` — acquire/reuse browser + tab.
@@ -224,6 +238,7 @@ The tool returns one result per call; no streaming partial output is emitted fro
 - `BrowserTool.execute()` converts DOM-style `AbortError` into `ToolAbortError`; other errors propagate.
 - `run` hard-fails on missing code: `Missing required parameter 'code' for action 'run'.`
 - `open` fails when reusing a name across browser kinds: `Tab "..." is bound to a different browser (...). Close it first.`
+- `open` with an implicit headless kind fails with `webBridgeRoutingMessage(port)` when a loom WebBridge daemon reports a connected extension — see "WebBridge (real browser)".
 - `runInTabWithSnapshot()` fails when the tab is absent/dead (`Tab "..." is not alive. Reopen it.`) or already running (`Tab "..." is busy`).
 - Worker init failures and run failures are serialized through `RunErrorPayload`; `ToolError` and abort state are reconstructed on the host side by `errorFromPayload()`.
 - Attached-target mismatches surface as:

@@ -20,10 +20,10 @@ export interface ProfileAliasCommand {
 }
 
 const DEFAULT_ALIAS_COMMAND: ProfileAliasCommand = {
-	display: "omp",
-	posix: "omp",
-	fish: "omp",
-	powerShell: "omp",
+	display: "loom",
+	posix: "loom",
+	fish: "loom",
+	powerShell: "loom",
 };
 
 export interface ProfileAliasInstallOptions {
@@ -122,6 +122,14 @@ const POWERSHELL_RESERVED_ALIAS_NAMES: ReadonlySet<string> = new Set([
 	"while",
 	"workflow",
 ]);
+// Names that would shadow the harness entry point itself. The pre-rename
+// spelling stays reserved so an alias cannot capture a still-installed `omp`
+// shim.
+const RESERVED_COMMAND_ALIAS_NAMES: ReadonlySet<string> = new Set(["loom", "omp"]);
+// Managed-block marker brands, canonical first. Later entries are pre-rename
+// spellings: still recognized so their blocks are rewritten or dropped in
+// place, never surfaced to the user.
+const ALIAS_BLOCK_MARKER_BRANDS: readonly string[] = ["loom", "omp"];
 
 // Keep local: importing the pi-utils root here would eagerly load env before
 // cli.ts has applied --profile, regressing profile-specific .env loading.
@@ -147,8 +155,8 @@ function validateAliasName(aliasName: string, shell: ProfileAliasShell): string 
 	if (!ALIAS_NAME_RE.test(normalized)) {
 		throw new Error(`Invalid alias "${aliasName}". Alias names must match ${ALIAS_NAME_RE.source}.`);
 	}
-	if (normalized.toLowerCase() === "omp") {
-		throw new Error('Invalid alias "omp". Refusing to shadow the base omp command.');
+	if (RESERVED_COMMAND_ALIAS_NAMES.has(normalized.toLowerCase())) {
+		throw new Error(`Invalid alias "${aliasName}". Refusing to shadow the base loom command.`);
 	}
 	if (getReservedAliasNames(shell).has(normalized.toLowerCase())) {
 		throw new Error(`Invalid alias "${aliasName}". Refusing to create a ${shell} reserved word.`);
@@ -254,7 +262,7 @@ function resolveShellConfigPath(
 			// a hard-coded ~/.config would be silently ignored when the user relocates
 			// their XDG config root, leaving the alias unsourced after a restart.
 			const configHome = env.XDG_CONFIG_HOME ? toPosix(env.XDG_CONFIG_HOME) : posixJoinUnc(posixHome, ".config");
-			return posixJoinUnc(configHome, "fish", "conf.d", "omp-profiles.fish");
+			return posixJoinUnc(configHome, "fish", "conf.d", "loom-profiles.fish");
 		}
 		case "pwsh":
 			return platform === "win32"
@@ -272,13 +280,13 @@ function renderAliasBlock(
 	command: ProfileAliasCommand,
 ): { block: string; command: string } {
 	const profiledCommand = `${command.display} --profile=${profile}`;
-	const start = `# >>> omp profile alias: ${aliasName} >>>`;
-	const end = `# <<< omp profile alias: ${aliasName} <<<`;
+	const start = `# >>> loom profile alias: ${aliasName} >>>`;
+	const end = `# <<< loom profile alias: ${aliasName} <<<`;
 	let body: string;
 	switch (shell) {
 		case "fish":
 			body = [
-				`function ${aliasName} --wraps omp --description 'OMP profile ${profile}'`,
+				`function ${aliasName} --wraps ${command.fish} --description 'Loom profile ${profile}'`,
 				`    command ${command.fish} --profile=${profile} $argv`,
 				"end",
 			].join("\n");
@@ -295,23 +303,30 @@ function renderAliasBlock(
 }
 
 function upsertBlock(content: string, aliasName: string, block: string): string {
-	const start = `# >>> omp profile alias: ${aliasName} >>>`;
-	const end = `# <<< omp profile alias: ${aliasName} <<<`;
-	const startIndex = content.indexOf(start);
-	if (startIndex !== -1) {
-		const endIndex = content.indexOf(end, startIndex + start.length);
+	let result = content;
+	let replaced = false;
+	for (const brand of ALIAS_BLOCK_MARKER_BRANDS) {
+		const start = `# >>> ${brand} profile alias: ${aliasName} >>>`;
+		const end = `# <<< ${brand} profile alias: ${aliasName} <<<`;
+		const startIndex = result.indexOf(start);
+		if (startIndex === -1) continue;
+		const endIndex = result.indexOf(end, startIndex + start.length);
 		if (endIndex === -1) {
 			throw new Error(
 				`Found "${start}" without a matching "${end}" in the shell config. ` +
 					`The managed alias block is malformed; remove the stale marker line and rerun --alias.`,
 			);
 		}
-		const afterEnd = endIndex + end.length;
-		const prefix = content.slice(0, startIndex).replace(/[\t ]*\n?$/, "");
-		const suffix = content.slice(afterEnd).replace(/^\n?/, "");
-		return [prefix, block, suffix].filter(Boolean).join("\n\n").replace(/\n*$/, "\n");
+		// The first brand that matches owns the slot; any further (pre-rename)
+		// block for the same alias is dropped so the shell sees one definition.
+		const replacement = replaced ? "" : block;
+		replaced = true;
+		const prefix = result.slice(0, startIndex).replace(/[\t ]*\n?$/, "");
+		const suffix = result.slice(endIndex + end.length).replace(/^\n?/, "");
+		result = [prefix, replacement, suffix].filter(Boolean).join("\n\n").replace(/\n*$/, "\n");
 	}
-	const trimmed = content.replace(/\s*$/, "");
+	if (replaced) return result;
+	const trimmed = result.replace(/\s*$/, "");
 	return `${trimmed}${trimmed ? "\n\n" : ""}${block}\n`;
 }
 
@@ -352,6 +367,17 @@ export async function installProfileAlias(options: ProfileAliasInstallOptions): 
 
 	const current = await readFile(configPath);
 	await writeFile(configPath, upsertBlock(current, aliasName, block));
+
+	// fish sources every conf.d file, so a pre-rename `omp-profiles.fish` would
+	// keep redefining this same function name after the file rename and shadow
+	// the block written above. Strip just our managed block out of it, silently.
+	if (shell === "fish") {
+		const legacyPath = configPath.replace(/loom-profiles\.fish$/, "omp-profiles.fish");
+		const legacy = await readFile(legacyPath);
+		if (legacy.includes(`profile alias: ${aliasName} `)) {
+			await writeFile(legacyPath, upsertBlock(legacy, aliasName, ""));
+		}
+	}
 
 	return {
 		shell,

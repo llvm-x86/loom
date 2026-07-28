@@ -22,7 +22,7 @@ import { readDirEntries, readFile } from "../capability/fs";
 import type { LoadContext } from "../capability/types";
 import { getEnabledPlugins } from "../extensibility/plugins/loader";
 import { expandTilde } from "../tools/path-utils";
-import { listClaudePluginRoots } from "./helpers";
+import { listClaudePluginRoots, NATIVE_PROJECT_DIR_NAMES } from "./helpers";
 
 /** A resolved extension package directory wired into the discovery surfaces. */
 export interface OmpExtensionRoot {
@@ -76,13 +76,14 @@ export function getInjectedOmpExtensionCliRoots(): readonly OmpExtensionRoot[] {
 }
 
 interface ScopeDirs {
-	project: string;
+	/** Project config dirs, canonical `.loom` first, legacy `.omp` second. */
+	project: string[];
 	user: string;
 }
 
 function scopeDirs(ctx: LoadContext): ScopeDirs {
 	return {
-		project: path.join(ctx.cwd, ".omp"),
+		project: NATIVE_PROJECT_DIR_NAMES.map(name => path.join(ctx.cwd, name)),
 		user: getAgentDir(),
 	};
 }
@@ -135,15 +136,17 @@ async function isDirectory(p: string): Promise<boolean> {
  */
 export async function listOmpExtensionRoots(ctx: LoadContext): Promise<OmpExtensionRoot[]> {
 	const { project, user } = scopeDirs(ctx);
-	const [projectExtensions, userExtensions, installedPlugins] = await Promise.all([
-		readSettingsExtensions(path.join(project, "settings.json")),
+	const [projectExtensionLists, userExtensions, installedPlugins] = await Promise.all([
+		Promise.all(project.map(dir => readSettingsExtensions(path.join(dir, "settings.json")))),
 		readSettingsExtensions(path.join(user, "settings.json")),
 		listInstalledPluginRoots(ctx),
 	]);
 
 	const candidates: InjectedRoot[] = [
 		...injectedCliRoots,
-		...projectExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "project" })),
+		...projectExtensionLists
+			.flat()
+			.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "project" })),
 		...userExtensions.map((raw): InjectedRoot => ({ path: resolveAgainst(raw, ctx), level: "user" })),
 		...installedPlugins,
 	];

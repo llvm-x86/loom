@@ -24,7 +24,7 @@ function makeSession(): ToolSession {
 }
 describe("browser tool schema", () => {
 	it("rejects run calls without code during execution", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = new BrowserTool(makeSession(), { detectWebBridge: async () => undefined });
 		const args: BrowserParams = { action: "run", name: "x" };
 		const call: ToolCall = {
 			type: "toolCall",
@@ -41,7 +41,7 @@ describe("browser tool schema", () => {
 	});
 
 	it("accepts run calls with code at schema validation", () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = new BrowserTool(makeSession(), { detectWebBridge: async () => undefined });
 		const call: ToolCall = {
 			type: "toolCall",
 			id: "browser-run-with-code",
@@ -61,7 +61,10 @@ describe("browser tool schema", () => {
 	// which collided with each branch's `additionalProperties: false` and made
 	// every input fail validation.
 	it("keeps intent tracing satisfiable across action variants", () => {
-		const normalized = normalizeTools([new BrowserTool(makeSession())], true)?.[0];
+		const normalized = normalizeTools(
+			[new BrowserTool(makeSession(), { detectWebBridge: async () => undefined })],
+			true,
+		)?.[0];
 		const schema = normalized?.parameters as TSchema;
 
 		expect(validateJsonSchemaValue(schema, { action: "run", name: "x" }).success).toBe(false);
@@ -90,7 +93,10 @@ describe("browser tool schema", () => {
 	// post-injection schema would either lose strict (no satisfiable input) or
 	// trip the additionalProperties / properties-coverage strict rules.
 	it("survives OpenAI strict-mode enforcement after intent injection", () => {
-		const normalized = normalizeTools([new BrowserTool(makeSession())], true)?.[0];
+		const normalized = normalizeTools(
+			[new BrowserTool(makeSession(), { detectWebBridge: async () => undefined })],
+			true,
+		)?.[0];
 		const schema = normalized?.parameters as Record<string, unknown>;
 		const strict = adaptSchemaForStrict(schema, true);
 

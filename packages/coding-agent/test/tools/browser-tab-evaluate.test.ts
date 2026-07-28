@@ -37,7 +37,7 @@ const CHROMIUM_AVAILABLE = await chromiumCanLaunch();
 describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	// Launches real headless Chromium; CI cold start easily exceeds bun's 5s default.
 	it("runs tab.evaluate in the page's main JavaScript world", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = new BrowserTool(makeSession(), { detectWebBridge: async () => undefined });
 		const name = `main-world-${process.pid}`;
 
 		try {
@@ -70,7 +70,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				});
 			},
 		});
-		const tool = new BrowserTool(makeSession());
+		const tool = new BrowserTool(makeSession(), { detectWebBridge: async () => undefined });
 		const name = `interception-lifecycle-${process.pid}`;
 
 		try {
@@ -178,7 +178,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 				});
 			},
 		});
-		const tool = new BrowserTool(makeSession());
+		const tool = new BrowserTool(makeSession(), { detectWebBridge: async () => undefined });
 		const name = `once-interception-${process.pid}`;
 
 		try {
@@ -226,7 +226,7 @@ describe.skipIf(!CHROMIUM_AVAILABLE)("browser tab evaluation", () => {
 	}, 30_000);
 
 	it("observes floating raw page promises when the target closes", async () => {
-		const tool = new BrowserTool(makeSession());
+		const tool = new BrowserTool(makeSession(), { detectWebBridge: async () => undefined });
 		const name = `target-close-${process.pid}`;
 		const url = `data:text/html,<h1>ready</h1>#${name}`;
 

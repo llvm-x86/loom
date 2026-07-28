@@ -48,7 +48,23 @@ export interface PolicyResult {
 	location: string;
 	/** Present when not applied: why, and what the user should do instead. */
 	message?: string;
+	/**
+	 * Present when not applied and a manual fallback exists: the verbatim
+	 * command(s) the user can run themselves to write the policy. Presentation
+	 * layers print this block; when absent there is nothing to print.
+	 */
+	manualCommand?: string;
 }
+
+/** Result of one external command invocation. */
+export interface CommandResult {
+	ok: boolean;
+	stdout: string;
+	stderr: string;
+}
+
+/** Injectable command invoker — the seam policy.ts uses to reach `reg`/`defaults`. */
+export type CommandRunner = (command: string, args: string[]) => Promise<CommandResult>;
 
 /** Options common to policy install/remove. */
 export interface PolicyOptions {
@@ -69,4 +85,9 @@ export interface PolicyOptions {
 	 * slash command leaves this off and instructs instead. Linux only.
 	 */
 	interactiveSudo?: boolean;
+	/**
+	 * Override the external-command invoker. Defaults to `execFile`; tests pass
+	 * a stub so registry/`defaults` behaviour can be exercised off-platform.
+	 */
+	exec?: CommandRunner;
 }

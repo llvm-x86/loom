@@ -1,6 +1,7 @@
 /**
  * Show what the read tool will return for a path, URL, or internal URI.
  */
+import { APP_NAME } from "@oh-my-pi/pi-utils";
 import { Args, Command } from "@oh-my-pi/pi-utils/cli";
 import { type ReadCommandArgs, runReadCommand } from "../cli/read-cli";
 import { initTheme } from "../modes/theme/theme";
@@ -17,14 +18,14 @@ export default class Read extends Command {
 	};
 
 	static examples = [
-		"omp read src/foo.ts",
-		"omp read src/foo.ts:50-100",
-		"omp read src/foo.ts:raw",
-		"omp read https://example.com",
-		"omp read omp://",
-		"omp read issue://123",
-		"omp read path/to/archive.zip:dir/file.ts",
-		"omp read path/to/db.sqlite:users:42",
+		`${APP_NAME} read src/foo.ts`,
+		`${APP_NAME} read src/foo.ts:50-100`,
+		`${APP_NAME} read src/foo.ts:raw`,
+		`${APP_NAME} read https://example.com`,
+		`${APP_NAME} read loom://`,
+		`${APP_NAME} read issue://123`,
+		`${APP_NAME} read path/to/archive.zip:dir/file.ts`,
+		`${APP_NAME} read path/to/db.sqlite:users:42`,
 	];
 
 	async run(): Promise<void> {

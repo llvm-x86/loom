@@ -362,7 +362,7 @@ async function startRecordingWithRecorder(recorder: ResolvedRecorder, outputPath
 export async function startRecording(outputPath: string): Promise<RecordingHandle> {
 	const recorders = detectRecorders();
 	if (recorders.length === 0) {
-		throw new Error("No audio recorder available — run `omp setup speech`");
+		throw new Error("No audio recorder available — run `loom setup speech`");
 	}
 
 	const failures: string[] = [];
@@ -379,7 +379,7 @@ export async function startRecording(outputPath: string): Promise<RecordingHandl
 			});
 		}
 	}
-	throw new Error(`No audio recorder could start — run \`omp setup speech\`.\n${failures.join("\n")}`);
+	throw new Error(`No audio recorder could start — run \`loom setup speech\`.\n${failures.join("\n")}`);
 }
 
 /**
@@ -528,7 +528,7 @@ export async function startStreamingRecording(
 ): Promise<StreamingRecordingHandle | null> {
 	const recorders = detectRecorders();
 	if (recorders.length === 0) {
-		throw new Error("No audio recorder available — run `omp setup speech`");
+		throw new Error("No audio recorder available — run `loom setup speech`");
 	}
 	const streamingRecorders = recorders.filter(recorder => recorder.tool !== "powershell");
 	if (streamingRecorders.length === 0) return null;

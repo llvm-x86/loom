@@ -8,6 +8,7 @@ import {
 	getConfigDirName,
 	getPluginsDir,
 	getProjectDir,
+	LEGACY_CONFIG_DIR_NAME,
 	parseFrontmatter,
 	tryParseJson,
 } from "@oh-my-pi/pi-utils";
@@ -82,6 +83,14 @@ export const SOURCE_PATHS = {
 } as const;
 
 export type SourceId = keyof typeof SOURCE_PATHS;
+
+/**
+ * Project-level native config directory names, canonical first. `.omp` is the
+ * pre-rename name, kept as a silent backwards-compatibility fallback so repos
+ * that still carry a project `.omp/` keep resolving. Both may exist; the
+ * canonical `.loom` wins on collisions.
+ */
+export const NATIVE_PROJECT_DIR_NAMES = [CONFIG_DIR_NAME, LEGACY_CONFIG_DIR_NAME] as const;
 
 /**
  * Get user-level path for a source.
@@ -799,28 +808,33 @@ export function parseClaudePluginsRegistry(content: string): ClaudePluginsRegist
  * Resolve the active project registry path by walking up from `cwd`.
  *
  * Walk order:
- * 1. Walk up from `cwd` looking for the nearest directory containing `.omp/`.
- *    The first match returns `<dir>/.omp/plugins/installed_plugins.json`.
- * 2. If no `.omp/` is found, rescan from `cwd` upward looking for `.git`.
- *    The git root is used as an anchor: `<gitRoot>/.omp/plugins/installed_plugins.json`.
+ * 1. Walk up from `cwd` looking for the nearest directory containing a project
+ *    config dir (`.loom/`, or the legacy `.omp/` as a fallback). The first match
+ *    returns `<dir>/<configDir>/plugins/installed_plugins.json`.
+ * 2. If none is found, rescan from `cwd` upward looking for `.git`.
+ *    The git root is used as an anchor: `<gitRoot>/.loom/plugins/installed_plugins.json`.
  * 3. If neither is found, return `null` — no project context is active.
  *
  * This is the single source of truth for "active project root" used by install,
  * uninstall, list, upgrade, discovery, and doctor. Deterministic for a given `cwd`.
  */
 export async function resolveActiveProjectRegistryPath(cwd: string): Promise<string | null> {
-	// Pass 1: walk up looking for an existing .omp/ directory (nearest wins).
-	// Stop before os.homedir() — ~/.omp/ is the user-level config dir, not a project root.
+	// Pass 1: walk up looking for an existing project config directory (nearest
+	// wins; canonical `.loom` beats the legacy `.omp` at the same level).
+	// Stop before os.homedir() — ~/.loom/ is the user-level config dir, not a project root.
 	const homeDir = os.homedir();
+	const projectDirNames = [getConfigDirName(), LEGACY_CONFIG_DIR_NAME];
 	let dir = path.resolve(cwd);
 	while (dir !== homeDir) {
-		try {
-			const stat = await fs.promises.stat(path.join(dir, getConfigDirName()));
-			if (stat.isDirectory()) {
-				return path.join(dir, getConfigDirName(), "plugins", "installed_plugins.json");
+		for (const name of projectDirNames) {
+			try {
+				const stat = await fs.promises.stat(path.join(dir, name));
+				if (stat.isDirectory()) {
+					return path.join(dir, name, "plugins", "installed_plugins.json");
+				}
+			} catch {
+				// not found at this level — try the next name / continue up
 			}
-		} catch {
-			// not found at this level — continue up
 		}
 		const parent = path.dirname(dir);
 		if (parent === dir) break; // filesystem root
@@ -1004,7 +1018,7 @@ export async function listClaudePluginRoots(
 				}
 			}
 		} else {
-			warnings.push(`Failed to parse OMP plugin registry: ${ompRegistryPath}`);
+			warnings.push(`Failed to parse loom plugin registry: ${ompRegistryPath}`);
 		}
 	}
 

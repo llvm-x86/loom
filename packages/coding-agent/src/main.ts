@@ -111,13 +111,17 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 		return;
 	}
 	try {
-		const response = await fetch("https://registry.npmjs.org/@oh-my-pi/pi-coding-agent/latest", {
+		// Check the fork's GitHub releases, not the upstream npm package: this
+		// source build must never offer an upstream update that would clobber
+		// fork patches. No fork releases yet → 404 → no banner.
+		const response = await fetch("https://api.github.com/repos/llvm-x86/loom/releases/latest", {
 			signal: withTimeoutSignal(5_000),
+			headers: { accept: "application/vnd.github+json" },
 		});
 		if (!response.ok) return undefined;
 
-		const data = (await response.json()) as { version?: string };
-		const latestVersion = data.version;
+		const data = (await response.json()) as { tag_name?: string };
+		const latestVersion = data.tag_name?.replace(/^v/, "");
 
 		if (latestVersion && Bun.semver.order(latestVersion, currentVersion) > 0) {
 			return latestVersion;
@@ -683,7 +687,7 @@ export async function createSessionManager(
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${forkSource}" not found.`,
-				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
+				"Run `loom --resume` without an argument to pick from recent sessions, or `loom` to start a new one.",
 			);
 		}
 		return await SessionManager.forkFrom(match.session.path, cwd, parsed.sessionDir);
@@ -703,7 +707,7 @@ export async function createSessionManager(
 		if (!match) {
 			throw new SessionResolutionError(
 				`Session "${sessionArg}" not found.`,
-				"Run `omp --resume` without an argument to pick from recent sessions, or `omp` to start a new one.",
+				"Run `loom --resume` without an argument to pick from recent sessions, or `loom` to start a new one.",
 			);
 		}
 		if (match.scope === "local") {

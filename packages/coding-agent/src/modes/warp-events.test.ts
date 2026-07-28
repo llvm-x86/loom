@@ -782,7 +782,7 @@ describe("Warp CLI-agent events", () => {
 		expect(body).toEqual({
 			event: "permission_request",
 			tool_name: "bash",
-			summary: "omp wants to run bash",
+			summary: "loom wants to run bash",
 			v: 1,
 			agent: "omp",
 			session_id: "session-123",

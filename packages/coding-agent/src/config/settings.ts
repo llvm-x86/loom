@@ -16,11 +16,13 @@ import * as os from "node:os";
 import * as path from "node:path";
 import { configureProviderMaxInFlightRequests } from "@oh-my-pi/pi-ai/stream";
 import {
+	CONFIG_DIR_NAME,
 	getAgentDbPath,
 	getAgentDir,
 	getLastChangelogVersionPath,
 	getProjectDir,
 	isEnoent,
+	LEGACY_CONFIG_DIR_NAME,
 	logger,
 	MAIN_CONFIG_FILENAMES,
 	procmgr,
@@ -1083,8 +1085,11 @@ export class Settings {
 					merged = this.#deepMerge(merged, item.data as RawSettings);
 				}
 			}
-			const nativeProject = await this.#loadYaml(path.join(this.#cwd, ".omp", "config.yml"));
-			const nativeModelRoles = getByPath(nativeProject, ["modelRoles"]);
+			// Canonical .loom first, legacy .omp as fallback so un-migrated
+			// project roles keep resolving.
+			const canonicalNative = await this.#loadYaml(path.join(this.#cwd, CONFIG_DIR_NAME, "config.yml"));
+			const legacyNative = await this.#loadYaml(path.join(this.#cwd, LEGACY_CONFIG_DIR_NAME, "config.yml"));
+			const nativeModelRoles = getByPath(canonicalNative, ["modelRoles"]) ?? getByPath(legacyNative, ["modelRoles"]);
 			if (nativeModelRoles !== undefined) {
 				merged = this.#deepMerge(merged, { modelRoles: nativeModelRoles });
 			}
@@ -1707,7 +1712,7 @@ export class Settings {
 	async #saveProjectNow(): Promise<void> {
 		if (!this.#persist || this.#modifiedProjectModelRoles.size === 0) return;
 
-		const projectConfigPath = path.join(this.#cwd, ".omp", "config.yml");
+		const projectConfigPath = path.join(this.#cwd, CONFIG_DIR_NAME, "config.yml");
 		const modifiedModelRoles = [...this.#modifiedProjectModelRoles];
 		this.#modifiedProjectModelRoles.clear();
 

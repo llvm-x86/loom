@@ -19,6 +19,7 @@ Drives real Chromium tab; full puppeteer access via JS.
   - Raw request interception is run-scoped: run end removes `request` handlers, disables interception, releases held requests.
 
 - `app.path` → NEVER tamper with a real desktop app (no stealth patches).
+- Real browser: when the loom WebBridge daemon is up with its extension connected, an `open` with no `app` refuses headless and steers you to skill://loom-webbridge (the user's real logged-in browser). Pass `app.path`/`app.cdp_url` to force the headless/CDP path.
 - Selectors: CSS + puppeteer `aria/…`, `text/…`, `xpath/…`, `pierce/…`. Playwright-only pseudos (`:has-text()`, `:visible`) are REJECTED.
 </instruction>
 
