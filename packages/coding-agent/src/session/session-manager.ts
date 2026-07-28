@@ -57,7 +57,12 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
-import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
+import {
+	installLazyBlobRefsInEntries,
+	loadEntriesFromFile,
+	readTitleSlotFromFile,
+	resolveBlobRefsInEntries,
+} from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -1025,7 +1030,11 @@ export class SessionManager {
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
-		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
+		// Lazy: a resumed session's images are read from the blob store on first
+		// access, so branches the agent never replays never materialize. `forkFrom`
+		// stays eager — it rewrites every entry immediately, which resolves them all
+		// anyway.
+		installLazyBlobRefsInEntries(fileEntries, this.#blobs);
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 

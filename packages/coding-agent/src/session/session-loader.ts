@@ -1,6 +1,13 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
-import { getBlobsDir, isEnoent, parseJsonlLenient } from "@oh-my-pi/pi-utils";
-import { BlobStore, isBlobRef, resolveImageData, resolveImageDataUrl } from "./blob-store";
+import { getBlobsDir, isEnoent, logger, parseJsonlLenient } from "@oh-my-pi/pi-utils";
+import {
+	BlobStore,
+	isBlobRef,
+	parseBlobRef,
+	resolveImageData,
+	resolveImageDataSync,
+	resolveImageDataUrl,
+} from "./blob-store";
 import { buildSessionContext } from "./session-context";
 import {
 	type CompactionEntry,
@@ -306,8 +313,117 @@ export async function resolveBlobRefsInEntries(entries: FileEntry[], blobStore: 
 }
 
 /**
+ * Synchronous counterpart of `resolveImageDataUrl`, needed because a property
+ * getter cannot await. Mirrors it exactly, including the missing-blob warning
+ * and the "keep the ref string" degradation.
+ */
+function resolveImageDataUrlSync(blobStore: BlobStore, data: string): string {
+	const hash = parseBlobRef(data);
+	if (!hash) return data;
+
+	const buffer = blobStore.getSync(hash);
+	if (!buffer) {
+		logger.warn("Blob not found for persisted image data URL", { hash });
+		return data;
+	}
+	return buffer.toString("utf8");
+}
+
+/**
+ * Replace a `blob:sha256:` ref with an accessor that reads the blob on first
+ * access and then collapses back into a plain data property, so a payload
+ * nothing ever touches costs a 76-character ref instead of its inflated inline
+ * form (base64 is 4/3 of the bytes on disk).
+ *
+ * Enumerable and configurable, so `JSON.stringify`, object spread, and
+ * `structuredClone` behave exactly as they did against an eagerly-resolved
+ * value — they simply materialize it at that point. Assignment is supported
+ * and drops the accessor, matching a plain field.
+ */
+function defineLazyBlobRef(
+	target: object,
+	key: string,
+	ref: string,
+	blobStore: BlobStore,
+	form: "base64" | "dataUrl",
+): void {
+	const settle = (value: string): string => {
+		Object.defineProperty(target, key, { configurable: true, enumerable: true, writable: true, value });
+		return value;
+	};
+	Object.defineProperty(target, key, {
+		configurable: true,
+		enumerable: true,
+		get: (): string =>
+			settle(form === "base64" ? resolveImageDataSync(blobStore, ref) : resolveImageDataUrlSync(blobStore, ref)),
+		set: (value: string): void => {
+			settle(value);
+		},
+	});
+}
+
+/** Install lazy accessors over the same sites {@link resolvePersistedBlobRefs} resolves eagerly. */
+function installLazyBlobRefs(value: unknown, blobStore: BlobStore, key?: string): void {
+	if (shouldResolveImagePayload(value, key)) {
+		defineLazyBlobRef(value, "data", value.data, blobStore, "base64");
+		return;
+	}
+
+	if (Array.isArray(value)) {
+		for (const item of value) installLazyBlobRefs(item, blobStore, key);
+		return;
+	}
+
+	if (typeof value !== "object" || value === null) return;
+	const record = value as Record<string, unknown>;
+
+	let deferredResult = false;
+	if (record.type === "image_generation_call" && typeof record.result === "string" && isBlobRef(record.result)) {
+		defineLazyBlobRef(record, "result", record.result, blobStore, "base64");
+		deferredResult = true;
+	}
+	const imageUrl = record.image_url;
+	let deferredImageUrl = false;
+	if (typeof imageUrl === "string" && isBlobRef(imageUrl)) {
+		defineLazyBlobRef(record, "image_url", imageUrl, blobStore, "dataUrl");
+		deferredImageUrl = true;
+	}
+
+	for (const childKey in record) {
+		// Never read back an accessor this pass just installed: that would
+		// materialize the exact bytes being deferred.
+		if (deferredResult && childKey === "result") continue;
+		if (deferredImageUrl && childKey === "image_url") continue;
+		installLazyBlobRefs(record[childKey], blobStore, childKey);
+	}
+}
+
+/**
+ * Lazy counterpart of {@link resolveBlobRefsInEntries}: same sites, same
+ * resolved values, but each payload is read from the blob store on first access
+ * instead of all of them being materialized at load.
+ *
+ * Blob refs are stable content-addressed paths, so deferring the read changes
+ * nothing an eager pass guaranteed — a blob that disappears between load and
+ * access degrades to the ref string with a warning, which is exactly what the
+ * eager pass does for a blob already missing at load. Entries that are never
+ * turned into provider messages (other branches, pre-compaction history) never
+ * pay for their images at all.
+ *
+ * Synchronous: a property getter cannot await, and blob reads are single
+ * `readFileSync` calls against the same page cache the eager pass warmed.
+ */
+export function installLazyBlobRefsInEntries(entries: FileEntry[], blobStore: BlobStore): void {
+	for (const entry of entries) {
+		if (entry.type === "session") continue;
+		if (!containsBlobRef(entry)) continue;
+		installLazyBlobRefs(entry, blobStore);
+	}
+}
+
+/**
  * Read-only message view of a session file: load entries, migrate to the
- * current version, resolve blob refs, and build the context along the
+ * current version, arm lazy blob rehydration, and build the context along the
  * persisted leaf path (last entry). Does NOT create a writer or take the
  * session lock — safe to call against a file another session is writing.
  */
@@ -315,7 +431,7 @@ export async function loadSessionMessagesReadOnly(filePath: string): Promise<Age
 	const entries = await loadEntriesFromFile(filePath);
 	if (entries.length === 0) return [];
 	migrateToCurrentVersion(entries);
-	await resolveBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));
+	installLazyBlobRefsInEntries(entries, new BlobStore(getBlobsDir()));
 	const sessionEntries = entries.filter((e): e is SessionEntry => e.type !== "session");
 	return buildSessionContext(sessionEntries).messages;
 }

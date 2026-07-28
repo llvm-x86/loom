@@ -100,7 +100,7 @@ This keeps session JSONL compact while preserving recoverability.
 
 ### 2) Session load rehydration path
 
-When opening a session (`setSessionFile`), after migrations, `SessionManager` runs `resolveBlobRefsInEntries()`.
+When opening a session (`setSessionFile`), after migrations, `SessionManager` runs `installLazyBlobRefsInEntries()`. `forkFrom()` and the `resolveBlobRefsInEntries()` export keep the eager pass for callers that immediately rewrite or serialize every entry.
 
 For message/custom-message image blocks with `blob:sha256:<hash>` and for persisted provider `image_url` fields with blob refs:
 
@@ -108,6 +108,8 @@ For message/custom-message image blocks with `blob:sha256:<hash>` and for persis
 - converts image-block bytes back to base64,
 - converts provider `image_url` blobs back to the original string,
 - mutates in-memory entry fields for runtime consumers.
+
+The lazy variant defers each of those reads to first access. It replaces the ref with an enumerable, configurable accessor that reads the blob synchronously the first time the field is read and then collapses back into a plain data property, so `JSON.stringify`, object spread, and `structuredClone` behave exactly as they do against an eagerly-resolved value. Entries never turned into provider messages — other branches, pre-compaction history — never materialize their images, which matters because base64 inflates the payload to 4/3 of the bytes on disk. Because blob refs are content-addressed and immutable, deferring the read guarantees the same bytes the eager pass would have produced.
 
 If a blob is missing:
 
