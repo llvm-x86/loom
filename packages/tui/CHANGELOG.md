@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Reduced the renderer's per-row memory to a bounded working set. The committed-prefix ledger is now a fixed 4096-row ring instead of one entry per transcript row, and the prepared (width-fitted) frame is stored base-offset so rows below the immutable commit seam are shed and re-fitted only for a gesture-driven full replay. `PreparedLine` is gone: the per-row cache object plus its per-row width is replaced by two parallel arrays and one per-frame width. On a 215k-row synthetic transcript the JS heap drops 88.4 MiB → 68.0 MiB and steady RSS 288.5 MiB → 228.5 MiB, with the emitted byte stream unchanged and compose ~2× faster. `findCommittedPrefixResync` now takes a `CommittedPrefixView` (plain arrays still satisfy it) whose optional `base` marks the oldest retained row; shed rows are skipped rather than compared.
+- Added `NativeScrollbackRenderCache`, an opt-in seam letting a component drop its per-width render cache once every row it contributed is immutable native scrollback. `Container` implements it by dropping its memoized concatenation and propagating to its children.
+
 ## [17.0.5] - 2026-07-18
 
 ### Changed
