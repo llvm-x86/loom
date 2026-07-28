@@ -4272,13 +4272,19 @@ export const SETTINGS_SCHEMA = {
 
 	"task.agentIdleTtlMs": {
 		type: "number",
-		default: 420_000,
+		default: 30_000,
 		ui: {
 			tab: "tasks",
 			group: "Subagents",
 			label: "Agent Idle TTL",
 			description:
-				"How long an idle subagent stays live in memory before being parked to disk (ms). Parked agents are revived automatically when messaged or resumed. 0 keeps idle agents live until exit.",
+				"How long an idle subagent stays live in memory before being parked to disk (ms). A live subagent pins its entire conversation, so this window is what a finished fan-out costs at steady state. Parking releases it; the agent is revived automatically with full history (~0.1s) when messaged, resumed, or opened in the Agent Hub. Raise it if you routinely follow up minutes after a subagent finishes; 0 keeps idle agents live until exit.",
+			options: [
+				{ value: "0", label: "Never park" },
+				{ value: "30000", label: "30 seconds", description: "Default" },
+				{ value: "120000", label: "2 minutes" },
+				{ value: "420000", label: "7 minutes" },
+			],
 		},
 	},
 
