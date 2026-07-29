@@ -63,6 +63,12 @@ export interface SessionContextSyncSession {
 	runEphemeralTurn(args: {
 		promptText: string;
 		signal?: AbortSignal;
+		/**
+		 * Opt out of {@link dedupeEphemeralReply}'s 4096-byte display cap. REQUIRED here:
+		 * this reply is written to a file, and the cap silently truncates the ledger and
+		 * appends a `[…truncated]` marker, yielding a 4097-byte file cut mid-word.
+		 */
+		dedupeReply?: boolean;
 	}): Promise<{ replyText: string; assistantMessage?: EphemeralTurnAssistantMessage }>;
 }
 
@@ -325,7 +331,7 @@ async function syncSingleRepo(
 ): Promise<SyncRepoResult> {
 	const ledgerPath = path.join(ledgerDir, `${slug}.md`);
 	const promptText = await buildSingleRepoPrompt(ledgerPath, slug, otherRepos);
-	const { replyText, assistantMessage } = await session.runEphemeralTurn({ promptText });
+	const { replyText, assistantMessage } = await session.runEphemeralTurn({ promptText, dedupeReply: false });
 	const usage: SyncRepoResult = {
 		tokensIn: assistantMessage?.usage?.input ?? 0,
 		tokensOut: assistantMessage?.usage?.output ?? 0,

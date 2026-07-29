@@ -112,6 +112,34 @@ describe("sessionContextSync", () => {
 		expect(calls).toBe(0);
 	});
 
+	it("opts out of the ephemeral display cap so a ledger over 4096 bytes is written whole", async () => {
+		// Regression: this reply is written to a FILE. Without `dedupeReply: false` it goes
+		// through dedupeEphemeralReply(), which caps at EPHEMERAL_REPLY_MAX_BYTES (4096) and
+		// appends "\n[…truncated]" — producing a 4097-byte ledger cut mid-word. Eight project
+		// ledgers were silently truncated that way before the cause was found.
+		const settings = makeSettings({ dir });
+		const big = `# owner/repo — status ledger\n\n## Landmines\n${"- a standing constraint that must survive.\n".repeat(120)}`;
+		expect(big.length).toBeGreaterThan(4096);
+		let seenDedupeReply: boolean | undefined = true;
+		const session: SessionContextSyncSession = {
+			cwd: dir,
+			settings: { getGroup: () => settings },
+			messages: [{ role: "user" }],
+			runEphemeralTurn: async args => {
+				seenDedupeReply = args.dedupeReply;
+				return { replyText: big };
+			},
+		};
+
+		await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+		expect(seenDedupeReply).toBe(false);
+		const content = readFileSync(join(dir, "owner-repo.md"), "utf8");
+		expect(content).not.toContain("[…truncated]");
+		expect(Buffer.byteLength(content, "utf8")).toBeGreaterThan(4096);
+		expect(content.split("\n").filter(l => l.startsWith("- ")).length).toBe(120);
+	});
+
 	it("writes the ledger file atomically, stripping a code fence", async () => {
 		const settings = makeSettings({ dir });
 		const modelOutput = "```markdown\n# owner/repo — status ledger\n\n## Current state\nAll good.\n```";
