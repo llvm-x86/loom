@@ -1,7 +1,7 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    One-shot Windows installer for the Loom / oh-my-pi coding agent.
+    One-shot Windows installer for the Loom coding agent.
 
 .DESCRIPTION
     Automates the flow validated by hand on a fresh Windows 11 box:
@@ -9,11 +9,11 @@
       2. Run `bun install`, retrying up to 3 times to ride out the transient
          "Integrity check failed for tarball: chart.js" CDN flake.
       3. Ensure a Rust toolchain: if `cargo` is missing, bootstrap rustup via
-         rustup-init.exe. The filename matters — the https://win.rustup.rs proxy
+         rustup-init.exe. The filename matters - the https://win.rustup.rs proxy
          rejects the `-y` flag unless the downloaded file is named
          rustup-init.exe. With -SkipRust, the native build instead downloads the
          published prebuilt addon from npm (no Rust required).
-      4. Build the native addon, then the compiled `loom`/`omp` binary.
+      4. Build the native addon, then the compiled `loom` binary.
 
 .PARAMETER SkipRust
     Do not install Rust. The native addon is fetched as a published prebuilt
@@ -28,7 +28,7 @@
     powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
 
 .EXAMPLE
-    # No Rust toolchain — use the published prebuilt native addon
+    # No Rust toolchain - use the published prebuilt native addon
     powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -SkipRust
 #>
 [CmdletBinding()]
@@ -109,7 +109,7 @@ elseif ($SkipRust) {
     Write-Warn "The native addon will be downloaded as a published prebuilt instead of compiled."
 }
 else {
-    Write-Step "cargo not found — bootstrapping Rust via rustup"
+    Write-Step "cargo not found - bootstrapping Rust via rustup"
     $rustupInit = Join-Path $env:TEMP 'rustup-init.exe'
     # CRITICAL: the win.rustup.rs proxy only honors the non-interactive `-y`
     # flag when the downloaded binary is literally named rustup-init.exe.
@@ -122,7 +122,7 @@ else {
     if ($GnuToolchain) {
         # GNU toolchain avoids the MSVC linker / VS Build Tools requirement.
         $rustupArgs += @('--default-host', 'x86_64-pc-windows-gnu', '--default-toolchain', 'stable-x86_64-pc-windows-gnu')
-        Write-Warn "Installing the GNU toolchain (x86_64-pc-windows-gnu) — avoids the MSVC linker,"
+        Write-Warn "Installing the GNU toolchain (x86_64-pc-windows-gnu) - avoids the MSVC linker,"
         Write-Warn "but still needs MinGW-w64 gcc on PATH to compile the pcre2/tree-sitter C sources."
     }
     else {
