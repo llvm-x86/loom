@@ -13,6 +13,7 @@
  * another shutdown spool (it already ran the sync itself, right here).
  */
 import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { existsSync } from "node:fs";
 import { createAgentSession } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { reportContextActivity } from "../utils/context-activity-reporter";
@@ -47,6 +48,11 @@ export default class SyncContext extends Command {
 	async run(): Promise<void> {
 		const { flags } = await this.parse(SyncContext);
 		if (!flags.resume) throw new CliUsageError("sync-context requires --resume <transcript>");
+		if (!existsSync(flags.resume)) {
+			throw new CliUsageError(
+				`sync-context --resume transcript not found: ${flags.resume} (a nonexistent path would silently start a fresh session)`,
+			);
+		}
 		const reason: SessionContextSyncReason = (VALID_REASONS as readonly string[]).includes(flags.reason ?? "")
 			? (flags.reason as SessionContextSyncReason)
 			: "shutdown";

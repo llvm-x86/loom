@@ -701,6 +701,17 @@ export async function createSessionManager(
 	if (typeof parsed.resume === "string") {
 		const sessionArg = parsed.resume;
 		if (sessionArg.includes("/") || sessionArg.includes("\\") || sessionArg.endsWith(".jsonl")) {
+			// Loud-fail on a nonexistent path: SessionManager.open() otherwise CREATES a
+			// fresh journal at the literal path and the operator only discovers the
+			// transcript never loaded when the model reports a fresh session (observed
+			// 2026-07-29: resume paths assembled from `ps` output clipped at 150 chars
+			// silently forked five box sessions onto 680-byte stub journals).
+			if (!fsSync.existsSync(sessionArg)) {
+				throw new SessionResolutionError(
+					`Session file not found: ${sessionArg}`,
+					"A nonexistent --resume path does NOT resume anything — loom would start a fresh session and journal it at that literal path. Check for a typo or a truncated path (e.g. assembled from clipped `ps` output).",
+				);
+			}
 			return await SessionManager.open(sessionArg, parsed.sessionDir);
 		}
 		const match = await resolveResumableSession(sessionArg, cwd, parsed.sessionDir);
