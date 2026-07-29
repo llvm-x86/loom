@@ -286,6 +286,15 @@ function sanitizeLedgerOutput(raw: string, slug: string): string | undefined {
 	return undefined;
 }
 
+/** Literal appended by `dedupeEphemeralReply` when it caps a reply — must match agent-session.ts. */
+const TRUNCATION_MARKER = "[…truncated]";
+/** EPHEMERAL_REPLY_MAX_BYTES (4096) and that cap plus the trailing newline writeLedgerAtomically adds. */
+const CAP_BOUNDARY_BYTES = new Set([4096, 4097]);
+
+function ledgerHeadings(text: string): Set<string> {
+	return new Set([...text.matchAll(/^#{1,2} .+$/gm)].map(m => m[0]));
+}
+
 async function writeLedgerAtomically(ledgerPath: string, content: string): Promise<void> {
 	await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
 	const tmpPath = `${ledgerPath}.tmp-${Bun.randomUUIDv7()}`;
@@ -345,6 +354,62 @@ async function syncSingleRepo(
 		logger.warn("[sessionContextSync] model output missing a heading; skipping ledger write", {
 			ledgerPath,
 			sessionId: session.sessionId,
+		});
+		return usage;
+	}
+	// Defense in depth, not redundancy: the call site opts out of the ephemeral
+	// display cap via `dedupeReply: false`, but this reply is still model output
+	// written to a FILE. Any path that reintroduces a cut (a future call site, a
+	// provider-side cap, a model echoing the marker) would silently replace a
+	// whole ledger with a severed stub — and the next sync would treat the stub
+	// as the file. Refuse the write and keep the previous ledger; the warn is
+	// the signal the cut otherwise never emits. Four predicates, each mapped to
+	// an observed 07-29 failure, ALL MEASURED IN BYTES (the cap is a byte cap;
+	// a 14-bullet ⚠️ section hides ~56 bytes in the markers alone — char counts
+	// fail open exactly where the margin is thinnest):
+	//  1. marker — the dedupeEphemeralReply signature (8 ledgers cut in one night).
+	//  2. cap boundary — a marker-less prefix cut lands at exactly 4096/4097 bytes.
+	//  3. heading shrinkage — a prefix cut or wholesale mangling that drops a
+	//     section the current file has (landing-pages lost Landmines this way).
+	//  4. hazards window — a WHOLESALE REWRITE can reorder sections without
+	//     dropping any heading; if the hazard section ends past the 4096-byte
+	//     window a later cut eats it with every other check green (two instances).
+	//     Boundary: start of the NEXT heading line — the only definition stable
+	//     under zero/one/two blank-line separators (iss-scheduling #1372).
+	const newBytes = Buffer.byteLength(sanitized, "utf8");
+	let refuseReason: string | undefined;
+	if (sanitized.trimEnd().endsWith(TRUNCATION_MARKER)) {
+		refuseReason = "carries the truncation marker";
+	} else if (CAP_BOUNDARY_BYTES.has(newBytes)) {
+		refuseReason = `lands exactly at the display-cap boundary (${newBytes} bytes)`;
+	} else {
+		const previous = await fs.readFile(ledgerPath, "utf8").catch(() => undefined);
+		if (previous !== undefined) {
+			const dropped = [...ledgerHeadings(previous)].filter(h => !ledgerHeadings(sanitized).has(h));
+			if (dropped.length > 0) {
+				refuseReason = `drops ${dropped.length} existing heading(s): ${dropped.slice(0, 3).join(" | ")}`;
+			}
+		}
+		if (!refuseReason) {
+			const hazardMatch = sanitized.match(/^#{1,2} .*(landmine|hazard|⚠).*$/im);
+			if (hazardMatch && hazardMatch.index !== undefined) {
+				const afterHazard = sanitized.slice(hazardMatch.index);
+				const nextHeading = afterHazard.slice(1).search(/^#{1,2} /m);
+				const hazardSection = nextHeading === -1 ? afterHazard : afterHazard.slice(0, nextHeading + 1);
+				const hazardEndBytes =
+					Buffer.byteLength(sanitized.slice(0, hazardMatch.index), "utf8") + Buffer.byteLength(hazardSection, "utf8");
+				if (hazardEndBytes > 4096) {
+					refuseReason = `hazard section ends past the 4096-byte cut window (ends at byte ${hazardEndBytes})`;
+				}
+			}
+		}
+	}
+	if (refuseReason) {
+		logger.warn("[sessionContextSync] refusing to write a ledger that fails a cut-invariant; keeping previous file", {
+			ledgerPath,
+			sessionId: session.sessionId,
+			reason: refuseReason,
+			bytes: newBytes,
 		});
 		return usage;
 	}

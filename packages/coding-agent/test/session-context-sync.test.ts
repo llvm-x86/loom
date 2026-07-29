@@ -155,6 +155,64 @@ describe("sessionContextSync", () => {
 		expect(content).not.toContain("```");
 	});
 
+	describe("cut-invariant write guard", () => {
+		const INTACT =
+			"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing constraint.\n\n## Current state\nIntact.\n";
+		const seed = (): string => {
+			const ledgerPath = join(dir, "owner-repo.md");
+			writeFileSync(ledgerPath, INTACT, "utf8");
+			return ledgerPath;
+		};
+
+		it("refuses a reply carrying the truncation marker and keeps the previous file", async () => {
+			const ledgerPath = seed();
+			const cut = `# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing cons\n[…truncated]`;
+			const { session } = makeSession(dir, makeSettings({ dir }), cut);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+		});
+
+		it("refuses a marker-less reply landing exactly at the cap boundary", async () => {
+			const ledgerPath = seed();
+			// Exactly 4097 bytes, no marker: the silent prefix-cut signature.
+			let reply = `# owner/repo — status ledger\n\n## Landmines\n${"- filler line padding the reply out past the cap.\n".repeat(120)}`;
+			while (Buffer.byteLength(reply, "utf8") > 4097) reply = reply.slice(0, -1);
+			while (Buffer.byteLength(reply, "utf8") < 4097) reply += "x";
+			expect(Buffer.byteLength(reply, "utf8")).toBe(4097);
+			const { session } = makeSession(dir, makeSettings({ dir }), reply);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+		});
+
+		it("refuses a reply that drops a heading the current file has", async () => {
+			const ledgerPath = seed();
+			const noLandmines = "# owner/repo — status ledger\n\n## Current state\nRewritten whole, hazards gone.\n";
+			const { session } = makeSession(dir, makeSettings({ dir }), noLandmines);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+		});
+
+		it("refuses a wholesale rewrite whose hazard section ends past the 4096-byte window", async () => {
+			const ledgerPath = seed();
+			// All headings present (shrinkage check passes), but Landmines was reordered
+			// to the END and pushed past byte 4096 — the reorder-then-cut setup.
+			const narrative = `${"- narrative bullet padding past the window.\n".repeat(160)}`;
+			const reordered = `# owner/repo — status ledger\n\n## Current state\n${narrative}\n## Landmines\n- ⚠️ a standing constraint.\n`;
+			expect(Buffer.byteLength(reordered, "utf8")).toBeGreaterThan(4096);
+			const { session } = makeSession(dir, makeSettings({ dir }), reordered);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+		});
+	});
+
 	it("aborts the write and warns on malformed (headingless) model output", async () => {
 		const settings = makeSettings({ dir });
 		const { session } = makeSession(dir, settings, "just some prose, no heading at all");
