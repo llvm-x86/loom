@@ -391,15 +391,37 @@ async function syncSingleRepo(
 			}
 		}
 		if (!refuseReason) {
-			const hazardMatch = sanitized.match(/^#{1,2} .*(landmine|hazard|⚠).*$/im);
-			if (hazardMatch && hazardMatch.index !== undefined) {
-				const afterHazard = sanitized.slice(hazardMatch.index);
-				const nextHeading = afterHazard.slice(1).search(/^#{1,2} /m);
-				const hazardSection = nextHeading === -1 ? afterHazard : afterHazard.slice(0, nextHeading + 1);
-				const hazardEndBytes =
-					Buffer.byteLength(sanitized.slice(0, hazardMatch.index), "utf8") + Buffer.byteLength(hazardSection, "utf8");
-				if (hazardEndBytes > 4096) {
-					refuseReason = `hazard section ends past the 4096-byte cut window (ends at byte ${hazardEndBytes})`;
+			// Section extent by OFFSET: start = the hazard heading, end = the start of
+			// the NEXT heading line (definition 3 of 3 — the only boundary stable under
+			// zero/one/two blank-line separators). The search MUST begin past the
+			// matched heading line: searching from inside it matches the heading's own
+			// leading "#" and yields a 1-char "section" (masked while the prefix alone
+			// exceeded 4096; live the moment offsets are computed from the section).
+			const hazardExtentOf = (text: string): { start: number; end: number } | undefined => {
+				const m = text.match(/^#{1,2} .*(landmine|hazard|⚠).*$/im);
+				if (!m || m.index === undefined) return undefined;
+				const bodyStart = m.index + m[0].length;
+				const next = text.slice(bodyStart).search(/^#{1,2} /m);
+				return { start: m.index, end: next === -1 ? text.length : bodyStart + next };
+			};
+			const extent = hazardExtentOf(sanitized);
+			const hazardSection = extent === undefined ? undefined : sanitized.slice(extent.start, extent.end);
+			if (extent !== undefined && Buffer.byteLength(sanitized.slice(0, extent.end), "utf8") > 4096) {
+				refuseReason = `hazard section ends past the 4096-byte cut window (ends at byte ${Buffer.byteLength(sanitized.slice(0, extent.end), "utf8")})`;
+			}
+			// 5. hazard shrinkage — hazards are NEVER compactable (operator directive;
+			//    a deliberate condensation is an owner's edit, not the sync writer's).
+			//    A semantic rewrite can drop a load-bearing clause while keeping the
+			//    heading, offset and structure all valid (observed: Husbandry_App lost
+			//    its search_path re-arm trigger with every check green). Smaller = refuse.
+			if (!refuseReason && previous !== undefined && hazardSection !== undefined) {
+				const prevExtent = hazardExtentOf(previous);
+				const prevHazard = prevExtent === undefined ? undefined : previous.slice(prevExtent.start, prevExtent.end);
+				if (
+					prevHazard !== undefined &&
+					Buffer.byteLength(hazardSection, "utf8") < Buffer.byteLength(prevHazard, "utf8")
+				) {
+					refuseReason = `hazard section shrank (${Buffer.byteLength(prevHazard, "utf8")} → ${Buffer.byteLength(hazardSection, "utf8")} bytes); hazards are never compacted by the sync writer`;
 				}
 			}
 		}

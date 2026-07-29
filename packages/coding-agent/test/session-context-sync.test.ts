@@ -118,7 +118,10 @@ describe("sessionContextSync", () => {
 		// appends "\n[…truncated]" — producing a 4097-byte ledger cut mid-word. Eight project
 		// ledgers were silently truncated that way before the cause was found.
 		const settings = makeSettings({ dir });
-		const big = `# owner/repo — status ledger\n\n## Landmines\n${"- a standing constraint that must survive.\n".repeat(120)}`;
+		// Bulk under a NON-hazard heading: the cut-invariant guard (correctly) refuses
+		// to persist a ledger whose hazard section ends past the 4096-byte window, so
+		// hazard bulk would test the guard rather than the dedupe opt-out.
+		const big = `# owner/repo — status ledger\n\n## Recent changes\n${"- a narrative entry that must survive.\n".repeat(120)}`;
 		expect(big.length).toBeGreaterThan(4096);
 		let seenDedupeReply: boolean | undefined = true;
 		const session: SessionContextSyncSession = {
@@ -206,6 +209,19 @@ describe("sessionContextSync", () => {
 			const reordered = `# owner/repo — status ledger\n\n## Current state\n${narrative}\n## Landmines\n- ⚠️ a standing constraint.\n`;
 			expect(Buffer.byteLength(reordered, "utf8")).toBeGreaterThan(4096);
 			const { session } = makeSession(dir, makeSettings({ dir }), reordered);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+		});
+
+		it("refuses a rewrite that shrinks the hazard section (semantic condensation)", async () => {
+			const ledgerPath = seed();
+			// Same heading, same position, VALID structure — but a load-bearing clause
+			// is gone. Observed 07-29: a sync rewrite dropped Husbandry_App's search_path
+			// re-arm trigger with every structural check green.
+			const condensed = "# owner/repo — status ledger\n\n## Landmines\n- ⚠️ constraint.\n\n## Current state\nRewritten, hazard condensed.\n";
+			const { session } = makeSession(dir, makeSettings({ dir }), condensed);
 
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
 
