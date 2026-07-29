@@ -1,19 +1,21 @@
 #Requires -Version 5.1
 <#
 .SYNOPSIS
-    One-shot Windows installer for the Loom / oh-my-pi coding agent.
+    One-shot Windows installer for the Loom coding agent.
 
 .DESCRIPTION
     Automates the flow validated by hand on a fresh Windows 11 box:
-      1. Verify git and bun are installed (with install hints if not).
+      1. Verify git and bun are installed. git must already be present; bun is
+         installed automatically if missing.
       2. Run `bun install`, retrying up to 3 times to ride out the transient
          "Integrity check failed for tarball: chart.js" CDN flake.
       3. Ensure a Rust toolchain: if `cargo` is missing, bootstrap rustup via
-         rustup-init.exe. The filename matters — the https://win.rustup.rs proxy
+         rustup-init.exe. The filename matters - the https://win.rustup.rs proxy
          rejects the `-y` flag unless the downloaded file is named
          rustup-init.exe. With -SkipRust, the native build instead downloads the
          published prebuilt addon from npm (no Rust required).
-      4. Build the native addon, then the compiled `loom`/`omp` binary.
+      4. Build the native addon, then the compiled `loom` binary, and add the
+         binary directory to the user PATH so `loom` works from any shell.
 
 .PARAMETER SkipRust
     Do not install Rust. The native addon is fetched as a published prebuilt
@@ -28,7 +30,7 @@
     powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1
 
 .EXAMPLE
-    # No Rust toolchain — use the published prebuilt native addon
+    # No Rust toolchain - use the published prebuilt native addon
     powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -SkipRust
 #>
 [CmdletBinding()]
@@ -64,11 +66,22 @@ if (-not (Test-Command git)) {
 Write-Ok "git: $((git --version) 2>&1)"
 
 if (-not (Test-Command bun)) {
-    throw @"
-bun was not found on PATH. Install it with:
-    powershell -c "irm bun.sh/install.ps1 | iex"
-then reopen the shell and re-run this script.
-"@
+    Write-Step "bun not found - installing automatically"
+    try {
+        Invoke-Expression (Invoke-RestMethod -Uri 'https://bun.sh/install.ps1' -UseBasicParsing)
+    }
+    catch {
+        throw "Failed to install bun automatically. Install it manually with:`n    powershell -c `"irm bun.sh/install.ps1 | iex`"`nthen reopen the shell and re-run this script."
+    }
+
+    $bunBin = Join-Path $env:USERPROFILE '.bun\bin'
+    if (Test-Path $bunBin) {
+        $env:Path = "$bunBin;$env:Path"
+    }
+
+    if (-not (Test-Command bun)) {
+        throw "bun installation completed but bun is still not on PATH. Reopen the shell and re-run this script."
+    }
 }
 Write-Ok "bun: $((bun --version) 2>&1)"
 
@@ -109,7 +122,7 @@ elseif ($SkipRust) {
     Write-Warn "The native addon will be downloaded as a published prebuilt instead of compiled."
 }
 else {
-    Write-Step "cargo not found — bootstrapping Rust via rustup"
+    Write-Step "cargo not found - bootstrapping Rust via rustup"
     $rustupInit = Join-Path $env:TEMP 'rustup-init.exe'
     # CRITICAL: the win.rustup.rs proxy only honors the non-interactive `-y`
     # flag when the downloaded binary is literally named rustup-init.exe.
@@ -122,7 +135,7 @@ else {
     if ($GnuToolchain) {
         # GNU toolchain avoids the MSVC linker / VS Build Tools requirement.
         $rustupArgs += @('--default-host', 'x86_64-pc-windows-gnu', '--default-toolchain', 'stable-x86_64-pc-windows-gnu')
-        Write-Warn "Installing the GNU toolchain (x86_64-pc-windows-gnu) — avoids the MSVC linker,"
+        Write-Warn "Installing the GNU toolchain (x86_64-pc-windows-gnu) - avoids the MSVC linker,"
         Write-Warn "but still needs MinGW-w64 gcc on PATH to compile the pcre2/tree-sitter C sources."
     }
     else {
@@ -171,9 +184,9 @@ finally {
     Pop-Location
 }
 
-# --- Done -------------------------------------------------------------------
+# --- 6. Add binary directory to PATH ---------------------------------------
 $distDir = Join-Path $RepoRoot 'packages\coding-agent\dist'
-$binary = @('loom.exe', 'omp.exe', 'loom', 'omp') |
+$binary = @('loom.exe', 'loom') |
     ForEach-Object { Join-Path $distDir $_ } |
     Where-Object { Test-Path $_ } |
     Select-Object -First 1
@@ -181,10 +194,28 @@ $binary = @('loom.exe', 'omp.exe', 'loom', 'omp') |
 Write-Step "Done"
 if ($binary) {
     Write-Ok "Built binary: $binary"
+
+    $binaryDir = Split-Path -Parent $binary
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $pathParts = $userPath -split ';' | Where-Object { $_ -ne '' }
+    if ($pathParts -notcontains $binaryDir) {
+        $newPath = ($pathParts + $binaryDir) -join ';'
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+        Write-Ok "Added to user PATH: $binaryDir"
+    }
+    else {
+        Write-Ok "Already on user PATH: $binaryDir"
+    }
+
+    # Make it available in the current session immediately.
+    $currentParts = $env:Path -split ';' | Where-Object { $_ -ne '' }
+    if ($currentParts -notcontains $binaryDir) {
+        $env:Path = "$binaryDir;$env:Path"
+    }
+
     Write-Host ""
     Write-Host "Try it:" -ForegroundColor Cyan
-    Write-Host "    & '$binary' --version"
-    Write-Host "Add its directory to PATH to run 'loom' from any project."
+    Write-Host "    loom --version"
 }
 else {
     Write-Warn "Build finished but no binary was found under $distDir. Inspect the build output above."

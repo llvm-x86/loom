@@ -49,7 +49,9 @@ describe("installWindows", () => {
 		const result = await installWindows({ family: "chrome", extensionId: EXTENSION_ID, exec }, ENTRY);
 		expect(result.applied).toBe(false);
 		expect(result.message).toContain("Access is denied");
-		expect(result.manualCommand).toBe(`reg add "${CHROME_HKCU}" /v "1" /t REG_SZ /d "${ENTRY}" /f`);
+		expect(result.manualCommand).toBe(
+			`reg add "${CHROME_HKCU}" \`\n  /v "1" \`\n  /t REG_SZ \`\n  /d "${ENTRY}" \`\n  /f`,
+		);
 	});
 
 	it("appends after existing forcelist values and is idempotent", async () => {

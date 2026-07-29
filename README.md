@@ -135,7 +135,7 @@ loom --version
 
 Then in any project directory just run `loom`.
 
-(The compiled binary file may be named `dist/omp` or `dist/loom` depending on build config — if `dist/loom` is absent, use `dist/omp`.)
+(The compiled binary is written to `dist/loom`/`dist/loom.exe`.)
 
 ## Windows install
 

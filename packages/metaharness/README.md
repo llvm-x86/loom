@@ -20,7 +20,7 @@ bun run serve --port 4700
    shadows the host's darwin one, and a linux `bun` binary is mounted at
    `/opt/omp/bin` — so trial setup needs zero outbound network. Alternatives:
    `--install local` (pack a tarball per run) or `--binary` (prebuilt
-   `dist/omp-linux-*` self-contained binaries).
+   `dist/loom-linux-*` self-contained binaries).
 2. **Auth never enters containers.** A generated `models.yml` routes provider
    `baseUrl`s at the host pm2 auth-gateway; the gateway resolves credentials
    host-side.

@@ -153,7 +153,7 @@ function dispatch(handle: WorkerHandle, request: SyncWorkerRequest): Promise<Par
 
 /**
  * Smoke test: spawns one sync worker, pings it, asserts the pong response,
- * then terminates. Used by `omp --smoke-test` so the install-method CI jobs
+ * then terminates. Used by `loom --smoke-test` so the install-method CI jobs
  * catch the silent worker-load failure that hit compiled binaries in #1011
  * and #1027 — neither `--version` nor `stats --summary` exercises the worker
  * spawn path on a fresh install (no session files = early return), so a
