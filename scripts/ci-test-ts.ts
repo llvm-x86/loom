@@ -122,7 +122,7 @@ const repoScriptTests = [
 	"scripts/ci-build-native.test.ts",
 	"scripts/ci-release-notes.test.ts",
 	"scripts/fix-dts-extensions.test.ts",
-	"scripts/link-omp.test.ts",
+	"scripts/link-loom.test.ts",
 ];
 
 const codingAgentNativePathPatterns = [

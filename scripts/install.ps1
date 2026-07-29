@@ -20,8 +20,8 @@ $Repo = "can1357/oh-my-pi"
 $Package = "@oh-my-pi/pi-coding-agent"
 # Legacy env var name kept for backward compatibility; default install dir follows the Loom rebrand.
 $InstallDir = if ($env:PI_INSTALL_DIR) { $env:PI_INSTALL_DIR } else { "$env:LOCALAPPDATA\loom" }
-# Release artifacts still use the legacy 'omp-' prefix until CI is renamed.
-$BinaryName = "omp-windows-x64.exe"
+# Release artifact name for the Loom Windows x64 binary.
+$BinaryName = "loom-windows-x64.exe"
 $MinimumBunVersion = "1.3.14"
 
 function Test-BunInstalled {

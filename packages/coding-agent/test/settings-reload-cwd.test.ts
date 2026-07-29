@@ -335,7 +335,10 @@ describe("Settings.reloadForCwd", () => {
 
 		it("reports project roles over global role fallbacks", async () => {
 			await Bun.write(path.join(agentDir, "config.yml"), "modelRoles:\n  default: anthropic/global\n");
-			await Bun.write(path.join(scopedProject, ".loom", "config.yml"), "modelRoles:\n  default: anthropic/project\n");
+			await Bun.write(
+				path.join(scopedProject, ".loom", "config.yml"),
+				"modelRoles:\n  default: anthropic/project\n",
+			);
 
 			const settings = await Settings.init({ cwd: scopedProject, agentDir });
 
@@ -347,7 +350,10 @@ describe("Settings.reloadForCwd", () => {
 
 		it("falls back to the global role after reloading a project without config", async () => {
 			await Bun.write(path.join(agentDir, "config.yml"), "modelRoles:\n  default: anthropic/global\n");
-			await Bun.write(path.join(scopedProject, ".loom", "config.yml"), "modelRoles:\n  default: anthropic/project\n");
+			await Bun.write(
+				path.join(scopedProject, ".loom", "config.yml"),
+				"modelRoles:\n  default: anthropic/project\n",
+			);
 			const settings = await Settings.init({ cwd: scopedProject, agentDir });
 			expect(settings.getModelRole("default")).toBe("anthropic/project");
 

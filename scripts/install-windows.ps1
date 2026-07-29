@@ -173,7 +173,7 @@ finally {
 
 # --- Done -------------------------------------------------------------------
 $distDir = Join-Path $RepoRoot 'packages\coding-agent\dist'
-$binary = @('loom.exe', 'omp.exe', 'loom', 'omp') |
+$binary = @('loom.exe', 'loom') |
     ForEach-Object { Join-Path $distDir $_ } |
     Where-Object { Test-Path $_ } |
     Select-Object -First 1
