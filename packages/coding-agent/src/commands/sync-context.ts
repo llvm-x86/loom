@@ -102,8 +102,20 @@ export default class SyncContext extends Command {
 			summary.error = error instanceof Error ? error.message : String(error);
 		} finally {
 			if (dispose) await dispose().catch(() => undefined);
-			process.stdout.write(`${JSON.stringify(summary)}\n`);
+			// This is a one-shot worker: createAgentSession leaves handles the
+			// dispose path does not release (providers, timers, singletons),
+			// and a single live handle keeps the event loop — and the entire
+			// loaded session — resident after the sync finished. That was the
+			// 5.3GB-per-shutdown leak: every sync-context process lingered
+			// until agent-chat's timeout SIGKILL (or forever behind sudo).
+			// Exit explicitly once stdout has flushed; the timer is a bounded
+			// fallback in case the write callback never fires (EPIPE).
+			const code = summary.ok ? 0 : 1;
+			const bail = setTimeout(() => process.exit(code), 10_000);
+			process.stdout.write(`${JSON.stringify(summary)}\n`, () => {
+				clearTimeout(bail);
+				process.exit(code);
+			});
 		}
-		if (!summary.ok) process.exitCode = 1;
 	}
 }
