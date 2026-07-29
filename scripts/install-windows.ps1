@@ -14,7 +14,8 @@
          rejects the `-y` flag unless the downloaded file is named
          rustup-init.exe. With -SkipRust, the native build instead downloads the
          published prebuilt addon from npm (no Rust required).
-      4. Build the native addon, then the compiled `loom` binary.
+      4. Build the native addon, then the compiled `loom` binary, and add the
+         binary directory to the user PATH so `loom` works from any shell.
 
 .PARAMETER SkipRust
     Do not install Rust. The native addon is fetched as a published prebuilt
@@ -183,7 +184,7 @@ finally {
     Pop-Location
 }
 
-# --- Done -------------------------------------------------------------------
+# --- 6. Add binary directory to PATH ---------------------------------------
 $distDir = Join-Path $RepoRoot 'packages\coding-agent\dist'
 $binary = @('loom.exe', 'loom') |
     ForEach-Object { Join-Path $distDir $_ } |
@@ -193,10 +194,28 @@ $binary = @('loom.exe', 'loom') |
 Write-Step "Done"
 if ($binary) {
     Write-Ok "Built binary: $binary"
+
+    $binaryDir = Split-Path -Parent $binary
+    $userPath = [Environment]::GetEnvironmentVariable('Path', 'User')
+    $pathParts = $userPath -split ';' | Where-Object { $_ -ne '' }
+    if ($pathParts -notcontains $binaryDir) {
+        $newPath = ($pathParts + $binaryDir) -join ';'
+        [Environment]::SetEnvironmentVariable('Path', $newPath, 'User')
+        Write-Ok "Added to user PATH: $binaryDir"
+    }
+    else {
+        Write-Ok "Already on user PATH: $binaryDir"
+    }
+
+    # Make it available in the current session immediately.
+    $currentParts = $env:Path -split ';' | Where-Object { $_ -ne '' }
+    if ($currentParts -notcontains $binaryDir) {
+        $env:Path = "$binaryDir;$env:Path"
+    }
+
     Write-Host ""
     Write-Host "Try it:" -ForegroundColor Cyan
-    Write-Host "    & '$binary' --version"
-    Write-Host "Add its directory to PATH to run 'loom' from any project."
+    Write-Host "    loom --version"
 }
 else {
     Write-Warn "Build finished but no binary was found under $distDir. Inspect the build output above."
