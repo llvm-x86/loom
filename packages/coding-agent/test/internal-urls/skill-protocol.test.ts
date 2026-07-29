@@ -14,7 +14,7 @@ describe("SkillProtocolHandler on-demand fallback", () => {
 		await fs.mkdir(skillDir, { recursive: true });
 		await fs.writeFile(
 			path.join(skillDir, "SKILL.md"),
-			"---\nname: " + skillName + "\ndescription: Test fallback skill\n---\n\nHello from fallback.\n",
+			`---\nname: ${skillName}\ndescription: Test fallback skill\n---\n\nHello from fallback.\n`,
 		);
 
 		resetActiveSkillsForTests();
