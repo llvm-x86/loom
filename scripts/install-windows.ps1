@@ -5,7 +5,8 @@
 
 .DESCRIPTION
     Automates the flow validated by hand on a fresh Windows 11 box:
-      1. Verify git and bun are installed (with install hints if not).
+      1. Verify git and bun are installed. git must already be present; bun is
+         installed automatically if missing.
       2. Run `bun install`, retrying up to 3 times to ride out the transient
          "Integrity check failed for tarball: chart.js" CDN flake.
       3. Ensure a Rust toolchain: if `cargo` is missing, bootstrap rustup via
@@ -64,11 +65,22 @@ if (-not (Test-Command git)) {
 Write-Ok "git: $((git --version) 2>&1)"
 
 if (-not (Test-Command bun)) {
-    throw @"
-bun was not found on PATH. Install it with:
-    powershell -c "irm bun.sh/install.ps1 | iex"
-then reopen the shell and re-run this script.
-"@
+    Write-Step "bun not found - installing automatically"
+    try {
+        Invoke-Expression (Invoke-RestMethod -Uri 'https://bun.sh/install.ps1' -UseBasicParsing)
+    }
+    catch {
+        throw "Failed to install bun automatically. Install it manually with:`n    powershell -c `"irm bun.sh/install.ps1 | iex`"`nthen reopen the shell and re-run this script."
+    }
+
+    $bunBin = Join-Path $env:USERPROFILE '.bun\bin'
+    if (Test-Path $bunBin) {
+        $env:Path = "$bunBin;$env:Path"
+    }
+
+    if (-not (Test-Command bun)) {
+        throw "bun installation completed but bun is still not on PATH. Reopen the shell and re-run this script."
+    }
 }
 Write-Ok "bun: $((bun --version) 2>&1)"
 
