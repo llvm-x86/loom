@@ -321,6 +321,59 @@ function headingKeyCounts(text: string): Map<string, number> {
 	return counts;
 }
 
+// Section extent by OFFSET: start = the hazard heading, end = the start of the
+// NEXT heading line (definition 3 of 3 — the only boundary stable under
+// zero/one/two blank-line separators). The search MUST begin past the matched
+// heading line: searching from inside it matches the heading's own leading "#"
+// and yields a 1-char "section" (masked while the prefix alone exceeded 4096;
+// live the moment offsets are computed from the section).
+function hazardExtentOf(text: string): { start: number; end: number } | undefined {
+	const m = text.match(/^#{1,2} .*(landmine|hazard|⚠).*$/im);
+	if (!m || m.index === undefined) return undefined;
+	const bodyStart = m.index + m[0].length;
+	const next = text.slice(bodyStart).search(/^#{1,2} /m);
+	return { start: m.index, end: next === -1 ? text.length : bodyStart + next };
+}
+
+const hazardBodyOf = (section: string): string => section.replace(/^[^\n]*\n?/, "");
+const bulletsOf = (body: string): string[] => body.match(/^[-*] .*(?:\n(?![-*] |#).*)*/gm) ?? [];
+const bulletKey = (bullet: string): string =>
+	bullet
+		.replace(/\s+/g, " ")
+		.toLowerCase()
+		.replace(/[^a-z0-9 ]/g, "")
+		.trim()
+		.slice(0, 60);
+
+// Hazards are append-only, enforced BY CONSTRUCTION rather than by refusal.
+//
+// "Hazards are never compacted by the sync writer" used to be a veto: if the
+// model's rewrite had a smaller hazard section, the whole write was dropped.
+// On a hazard-heavy ledger that is a deadlock, because a model asked to
+// summarise a repo will condense a 13-bullet landmine list every single time —
+// agent-chat's own ledger refused with "hazard section shrank (5390 → 4143
+// bytes)" on a real 2026-07-30 sync, so the file could never be updated at all
+// and the operator's "automatic context in the background" simply did not
+// happen for exactly the repos that need it most.
+//
+// So do not ask the model to be trustworthy with hazards: keep the previous
+// hazard body VERBATIM (every bullet, original order) and append only those
+// bullets the model genuinely added. Nothing the model omits can be lost, new
+// hazards still land, and the shrinkage predicate below becomes an unreachable
+// safety net instead of a gate.
+function preserveHazards(previous: string, next: string): string {
+	const prevExtent = hazardExtentOf(previous);
+	const nextExtent = hazardExtentOf(next);
+	if (prevExtent === undefined || nextExtent === undefined) return next;
+	const prevBody = hazardBodyOf(previous.slice(prevExtent.start, prevExtent.end));
+	const nextSection = next.slice(nextExtent.start, nextExtent.end);
+	const prevKeys = new Set(bulletsOf(prevBody).map(bulletKey));
+	const added = bulletsOf(hazardBodyOf(nextSection)).filter(b => !prevKeys.has(bulletKey(b)));
+	const heading = nextSection.slice(0, nextSection.indexOf("\n") + 1) || `${nextSection}\n`;
+	const mergedBody = added.length === 0 ? prevBody : `${prevBody.trimEnd()}\n${added.join("\n")}\n\n`;
+	return next.slice(0, nextExtent.start) + heading + mergedBody + next.slice(nextExtent.end);
+}
+
 async function writeLedgerAtomically(ledgerPath: string, content: string): Promise<void> {
 	await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
 	const tmpPath = `${ledgerPath}.tmp-${Bun.randomUUIDv7()}`;
@@ -387,7 +440,11 @@ async function syncSingleRepo(
 		durationMs: assistantMessage?.duration ?? 0,
 		refusals: [],
 	};
-	const sanitized = sanitizeLedgerOutput(replyText, slug);
+	const sanitizedReply = sanitizeLedgerOutput(replyText, slug);
+	const priorLedger = await fs.readFile(ledgerPath, "utf8").catch(() => undefined);
+	// Hazards come from the previous file, not the model (see preserveHazards).
+	const sanitized =
+		sanitizedReply && priorLedger !== undefined ? preserveHazards(priorLedger, sanitizedReply) : sanitizedReply;
 	if (!sanitized) {
 		logger.warn("[sessionContextSync] model output missing a heading; skipping ledger write", {
 			ledgerPath,
@@ -422,7 +479,7 @@ async function syncSingleRepo(
 	} else if (CAP_BOUNDARY_BYTES.has(newBytes)) {
 		refuseReason = `lands exactly at the display-cap boundary (${newBytes} bytes)`;
 	} else {
-		const previous = await fs.readFile(ledgerPath, "utf8").catch(() => undefined);
+		const previous = priorLedger;
 		if (previous !== undefined) {
 			const priorCounts = headingKeyCounts(previous);
 			const nextCounts = headingKeyCounts(sanitized);
@@ -440,13 +497,6 @@ async function syncSingleRepo(
 			// matched heading line: searching from inside it matches the heading's own
 			// leading "#" and yields a 1-char "section" (masked while the prefix alone
 			// exceeded 4096; live the moment offsets are computed from the section).
-			const hazardExtentOf = (text: string): { start: number; end: number } | undefined => {
-				const m = text.match(/^#{1,2} .*(landmine|hazard|⚠).*$/im);
-				if (!m || m.index === undefined) return undefined;
-				const bodyStart = m.index + m[0].length;
-				const next = text.slice(bodyStart).search(/^#{1,2} /m);
-				return { start: m.index, end: next === -1 ? text.length : bodyStart + next };
-			};
 			const extent = hazardExtentOf(sanitized);
 			const hazardSection = extent === undefined ? undefined : sanitized.slice(extent.start, extent.end);
 			// 4. hazards POSITION, not hazards BUDGET (rewritten 2026-07-30).

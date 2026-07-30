@@ -218,7 +218,11 @@ describe("sessionContextSync", () => {
 
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
 
-			expect(readFileSync(ledgerPath, "utf8").trimEnd()).toBe(reworded.trimEnd());
+			const written = readFileSync(ledgerPath, "utf8");
+			expect(written).toContain("## Landmines\n");
+			expect(written).toContain("- ⚠️ a standing constraint.");
+			expect(written).toContain("- ⚠️ a newly learned constraint.");
+			expect(written).toContain("Updated.");
 		});
 
 		it("still refuses when two headings share a key and one of them vanishes", async () => {
@@ -278,9 +282,8 @@ describe("sessionContextSync", () => {
 			// was `done` with a cost attached and no indication the file was untouched.
 			seed();
 			const events: { phase: string; error?: string }[] = [];
-			const condensed =
-				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ constraint.\n\n## Current state\nCondensed.\n";
-			const { session } = makeSession(dir, makeSettings({ dir }), condensed);
+			const cut = "# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing cons\n[…truncated]";
+			const { session } = makeSession(dir, makeSettings({ dir }), cut);
 
 			await maybeSync(session, "compaction", {
 				resolveRepo: async () => "owner/repo",
@@ -290,21 +293,45 @@ describe("sessionContextSync", () => {
 			const terminal = events.at(-1);
 			expect(terminal?.phase).toBe("fail");
 			expect(terminal?.error).toContain("ledger not written");
-			expect(terminal?.error).toContain("hazard section shrank");
+			expect(terminal?.error).toContain("truncation marker");
 		});
 
-		it("refuses a rewrite that shrinks the hazard section (semantic condensation)", async () => {
+		it("REPAIRS a rewrite that condenses hazards instead of vetoing the whole sync", async () => {
 			const ledgerPath = seed();
-			// Same heading, same position, VALID structure — but a load-bearing clause
-			// is gone. Observed 07-29: a sync rewrite dropped Husbandry_App's search_path
+			// Same heading, same position, VALID structure — but a load-bearing clause is
+			// gone. Observed 07-29: a sync rewrite dropped Husbandry_App's search_path
 			// re-arm trigger with every structural check green.
+			// Refusing the WHOLE write was the old answer, and on a hazard-heavy ledger
+			// it deadlocked: a model asked to summarise a repo condenses a long landmine
+			// list every time, so the file could never be updated (agent-chat's own
+			// ledger, live 2026-07-30: "hazard section shrank (5390 → 4143 bytes)").
+			// Hazards now come from the previous file by construction, so the rest of
+			// the ledger still gets its update and the hazard survives verbatim.
 			const condensed =
 				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ constraint.\n\n## Current state\nRewritten, hazard condensed.\n";
 			const { session } = makeSession(dir, makeSettings({ dir }), condensed);
 
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
 
-			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+			const written = readFileSync(ledgerPath, "utf8");
+			expect(written).toContain("- ⚠️ a standing constraint.");
+			expect(written).toContain("Rewritten, hazard condensed.");
+			expect(written).not.toContain("Intact.");
+		});
+
+		it("appends a genuinely new hazard while keeping every previous one", async () => {
+			const ledgerPath = seed();
+			const withNew =
+				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a brand new hazard learned this session.\n\n## Current state\nUpdated.\n";
+			const { session } = makeSession(dir, makeSettings({ dir }), withNew);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			const written = readFileSync(ledgerPath, "utf8");
+			expect(written).toContain("- ⚠️ a standing constraint.");
+			expect(written).toContain("- ⚠️ a brand new hazard learned this session.");
+			// Preserved first, appended after — order is the position invariant.
+			expect(written.indexOf("a standing constraint")).toBeLessThan(written.indexOf("a brand new hazard"));
 		});
 	});
 
