@@ -295,6 +295,32 @@ function ledgerHeadings(text: string): Set<string> {
 	return new Set([...text.matchAll(/^#{1,2} .+$/gm)].map(m => m[0]));
 }
 
+// The invariant this guard defends is "no SECTION disappears", not "no heading
+// is ever reworded". Comparing raw heading strings conflated the two and made
+// annotated headings a trap: this repo's own hazard heading reads
+// "## Landmines (FIRST on purpose — see ovh-cloud #1201: ...)", so a sync whose
+// reply said plain "## Landmines" was scored as DROPPING the section and the
+// ledger became unwritable by the background writer — observed live 2026-07-30,
+// refusing every sync while the section was in fact present and first.
+// Key on the heading's title up to its first annotation delimiter, so a
+// reworded parenthetical still matches the section it names.
+function headingKey(heading: string): string {
+	const title = heading.replace(/^#{1,2} /, "").split(/[(—:]/, 1)[0] ?? "";
+	return title.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Counts, not a set: two headings can legitimately share a key
+// ("## Landmines" + "## Landmines (infra)"), and a plain set would let one of
+// them vanish undetected. A key whose count DROPS is a real lost section.
+function headingKeyCounts(text: string): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const heading of ledgerHeadings(text)) {
+		const key = headingKey(heading);
+		if (key !== "") counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	return counts;
+}
+
 async function writeLedgerAtomically(ledgerPath: string, content: string): Promise<void> {
 	await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
 	const tmpPath = `${ledgerPath}.tmp-${Bun.randomUUIDv7()}`;
@@ -398,7 +424,11 @@ async function syncSingleRepo(
 	} else {
 		const previous = await fs.readFile(ledgerPath, "utf8").catch(() => undefined);
 		if (previous !== undefined) {
-			const dropped = [...ledgerHeadings(previous)].filter(h => !ledgerHeadings(sanitized).has(h));
+			const priorCounts = headingKeyCounts(previous);
+			const nextCounts = headingKeyCounts(sanitized);
+			const dropped = [...ledgerHeadings(previous)].filter(
+				h => (nextCounts.get(headingKey(h)) ?? 0) < (priorCounts.get(headingKey(h)) ?? 0),
+			);
 			if (dropped.length > 0) {
 				refuseReason = `drops ${dropped.length} existing heading(s): ${dropped.slice(0, 3).join(" | ")}`;
 			}
@@ -458,14 +488,21 @@ async function syncSingleRepo(
 			//    A semantic rewrite can drop a load-bearing clause while keeping the
 			//    heading, offset and structure all valid (observed: Husbandry_App lost
 			//    its search_path re-arm trigger with every check green). Smaller = refuse.
+			//    Measured on the section BODY, never including the heading line: the
+			//    heading can carry a long annotation ("## Landmines (FIRST on purpose
+			//    — see ovh-cloud #1201)"), and counting it meant shortening that
+			//    annotation registered as lost hazard content even when the reply ADDED
+			//    bullets — the second half of the 2026-07-30 unwritable-ledger bug.
+			const bodyOf = (section: string): string => section.replace(/^[^\n]*\n?/, "");
 			if (!refuseReason && previous !== undefined && hazardSection !== undefined) {
 				const prevExtent = hazardExtentOf(previous);
 				const prevHazard = prevExtent === undefined ? undefined : previous.slice(prevExtent.start, prevExtent.end);
-				if (
-					prevHazard !== undefined &&
-					Buffer.byteLength(hazardSection, "utf8") < Buffer.byteLength(prevHazard, "utf8")
-				) {
-					refuseReason = `hazard section shrank (${Buffer.byteLength(prevHazard, "utf8")} → ${Buffer.byteLength(hazardSection, "utf8")} bytes); hazards are never compacted by the sync writer`;
+				if (prevHazard !== undefined) {
+					const nextBytes = Buffer.byteLength(bodyOf(hazardSection), "utf8");
+					const prevBytes = Buffer.byteLength(bodyOf(prevHazard), "utf8");
+					if (nextBytes < prevBytes) {
+						refuseReason = `hazard section shrank (${prevBytes} → ${nextBytes} bytes); hazards are never compacted by the sync writer`;
+					}
 				}
 			}
 		}

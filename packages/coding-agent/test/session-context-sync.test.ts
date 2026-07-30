@@ -201,6 +201,43 @@ describe("sessionContextSync", () => {
 			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
 		});
 
+		it("accepts a reply that REWORDS an annotated heading without dropping the section", async () => {
+			// Live 2026-07-30: this repo's hazard heading is
+			// "## Landmines (FIRST on purpose — see ovh-cloud #1201: ...)". Comparing raw
+			// heading strings scored a reply saying plain "## Landmines" as dropping the
+			// section, so the background writer could never write the file again even
+			// though the section was present AND first. Rewording an annotation is not
+			// losing a section.
+			const ledgerPath = join(dir, "owner-repo.md");
+			const annotated =
+				"# owner/repo — status ledger\n\n## Landmines (FIRST on purpose — see ovh-cloud #1201)\n- ⚠️ a standing constraint.\n\n## Current state\nIntact.\n";
+			writeFileSync(ledgerPath, annotated, "utf8");
+			const reworded =
+				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing constraint.\n- ⚠️ a newly learned constraint.\n\n## Current state\nUpdated.\n";
+			const { session } = makeSession(dir, makeSettings({ dir }), reworded);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			expect(readFileSync(ledgerPath, "utf8").trimEnd()).toBe(reworded.trimEnd());
+		});
+
+		it("still refuses when two headings share a key and one of them vanishes", async () => {
+			// Key normalisation must not open a hole: "## Landmines" and
+			// "## Landmines (infra)" collapse to the same key, so presence alone would
+			// let one disappear silently. Counts, not a set.
+			const ledgerPath = join(dir, "owner-repo.md");
+			const twoSections =
+				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing constraint.\n\n## Landmines (infra)\n- ⚠️ an infra constraint.\n\n## Current state\nIntact.\n";
+			writeFileSync(ledgerPath, twoSections, "utf8");
+			const lostOne =
+				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing constraint.\n\n## Current state\nIntact.\n";
+			const { session } = makeSession(dir, makeSettings({ dir }), lostOne);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			expect(readFileSync(ledgerPath, "utf8")).toBe(twoSections);
+		});
+
 		it("refuses a wholesale rewrite that reorders hazards away from the first section", async () => {
 			const ledgerPath = seed();
 			// All headings present (shrinkage check passes), but Landmines was reordered
