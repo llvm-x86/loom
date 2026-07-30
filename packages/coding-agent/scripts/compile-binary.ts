@@ -67,11 +67,15 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY = "1";
 	}
 	try {
-		// Windows: if the previous binary is running, Bun.build can't overwrite it.
-		// Rename it first; the rename itself usually succeeds even on locked files.
-		if (process.platform === "win32") {
-			await rotateLockedOutfile(options.outfile);
+		// Bun.build emits an .exe extension on Windows, but callers pass the
+		// base path. If a previous loom.exe is running, Bun.build can't overwrite
+		// it. Rename it first; the rename itself usually succeeds even on locked
+		// files. Also rotate the base path in case the target differs from host.
+		const isWindowsTarget = options.target?.includes("windows") ?? process.platform === "win32";
+		if (isWindowsTarget) {
+			await rotateLockedOutfile(`${options.outfile}.exe`);
 		}
+		await rotateLockedOutfile(options.outfile);
 
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],

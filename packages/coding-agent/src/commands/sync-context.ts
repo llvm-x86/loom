@@ -12,8 +12,9 @@
  * session's own dispose neither arms an idle context-sync timer nor writes
  * another shutdown spool (it already ran the sync itself, right here).
  */
-import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+
 import { existsSync } from "node:fs";
+import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { createAgentSession } from "../sdk";
 import { SessionManager } from "../session/session-manager";
 import { reportContextActivity } from "../utils/context-activity-reporter";

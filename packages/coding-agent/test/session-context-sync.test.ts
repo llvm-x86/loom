@@ -220,7 +220,8 @@ describe("sessionContextSync", () => {
 			// Same heading, same position, VALID structure — but a load-bearing clause
 			// is gone. Observed 07-29: a sync rewrite dropped Husbandry_App's search_path
 			// re-arm trigger with every structural check green.
-			const condensed = "# owner/repo — status ledger\n\n## Landmines\n- ⚠️ constraint.\n\n## Current state\nRewritten, hazard condensed.\n";
+			const condensed =
+				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ constraint.\n\n## Current state\nRewritten, hazard condensed.\n";
 			const { session } = makeSession(dir, makeSettings({ dir }), condensed);
 
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
