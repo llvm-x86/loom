@@ -315,12 +315,22 @@ interface SyncRepoResult {
 	model?: string;
 	provider?: string;
 	durationMs: number;
+	/**
+	 * Ledgers this attempt deliberately did NOT write, as "<slug>: <reason>".
+	 * A refusal spends tokens and completes without error, so without this it
+	 * is indistinguishable from a successful sync at every layer above —
+	 * agent-chat's Context Activity row said `done` with a cost attached while
+	 * the file never changed (observed live: Family-Fun-Group-Husbandry_App,
+	 * refused on every one of 54 syncs by the since-downgraded hazard-window
+	 * predicate, silently, for days). Surfaced so the caller can report it.
+	 */
+	refusals: string[];
 }
 
-const EMPTY_SYNC_RESULT: SyncRepoResult = { tokensIn: 0, tokensOut: 0, cacheRead: 0, durationMs: 0 };
+const EMPTY_SYNC_RESULT: SyncRepoResult = { tokensIn: 0, tokensOut: 0, cacheRead: 0, durationMs: 0, refusals: [] };
 
 function sumSyncResults(results: readonly SyncRepoResult[]): SyncRepoResult {
-	const totals: SyncRepoResult = { ...EMPTY_SYNC_RESULT };
+	const totals: SyncRepoResult = { ...EMPTY_SYNC_RESULT, refusals: [] };
 	for (const result of results) {
 		totals.tokensIn += result.tokensIn;
 		totals.tokensOut += result.tokensOut;
@@ -328,6 +338,7 @@ function sumSyncResults(results: readonly SyncRepoResult[]): SyncRepoResult {
 		totals.durationMs += result.durationMs;
 		totals.model ??= result.model;
 		totals.provider ??= result.provider;
+		totals.refusals.push(...result.refusals);
 	}
 	return totals;
 }
@@ -348,6 +359,7 @@ async function syncSingleRepo(
 		model: assistantMessage?.model,
 		provider: assistantMessage?.provider,
 		durationMs: assistantMessage?.duration ?? 0,
+		refusals: [],
 	};
 	const sanitized = sanitizeLedgerOutput(replyText, slug);
 	if (!sanitized) {
@@ -355,6 +367,7 @@ async function syncSingleRepo(
 			ledgerPath,
 			sessionId: session.sessionId,
 		});
+		usage.refusals.push(`${slug}: model output missing a heading`);
 		return usage;
 	}
 	// Defense in depth, not redundancy: the call site opts out of the ephemeral
@@ -406,8 +419,39 @@ async function syncSingleRepo(
 			};
 			const extent = hazardExtentOf(sanitized);
 			const hazardSection = extent === undefined ? undefined : sanitized.slice(extent.start, extent.end);
-			if (extent !== undefined && Buffer.byteLength(sanitized.slice(0, extent.end), "utf8") > 4096) {
-				refuseReason = `hazard section ends past the 4096-byte cut window (ends at byte ${Buffer.byteLength(sanitized.slice(0, extent.end), "utf8")})`;
+			// 4. hazards POSITION, not hazards BUDGET (rewritten 2026-07-30).
+			//    Was: refuse if the hazard section ends past byte 4096. That framing
+			//    came from the era when a later 4096-byte cut could eat anything past
+			//    the window. The cut path is fixed (f1f7fd484 — the ephemeral display
+			//    cap no longer reaches ledger file writes) and predicates 1 and 2 still
+			//    catch a cut if one reappears, but as a REFUSAL the byte rule did active
+			//    harm: any ledger whose hazards legitimately grow past 4096 bytes became
+			//    permanently unwritable by the sync writer. Observed live on
+			//    Family-Fun-Group-Husbandry_App.md (hazards end at byte 7301; 54 syncs
+			//    ran, every one refused, each reporting `done` with tokens billed while
+			//    the file never changed), with Family-Fun-Group-landing-pages.md 5 bytes
+			//    from the same cliff. It also contradicted the operator directive of
+			//    record: ledgers are NOT byte-capped, and a ledger must never be
+			//    contorted to fit a margin.
+			//    What the old rule was really protecting against is a rewrite that
+			//    REORDERS hazards away from the top. So check that directly, the same
+			//    way agent-chat's own `ledger-guard check` does: the hazard heading must
+			//    be the FIRST `##` section in the file. Position is the invariant; bytes
+			//    are now only a warning.
+			const firstSectionHeading = sanitized.match(/^## .+$/m);
+			if (
+				extent !== undefined &&
+				firstSectionHeading?.index !== undefined &&
+				extent.start > firstSectionHeading.index
+			) {
+				refuseReason = `hazard section is not the first '##' section (hazards-first is positional; first section is ${JSON.stringify(firstSectionHeading[0])})`;
+			}
+			if (!refuseReason && extent !== undefined && Buffer.byteLength(sanitized.slice(0, extent.end), "utf8") > 4096) {
+				logger.warn("[sessionContextSync] hazard section ends past the legacy 4096-byte window; writing anyway", {
+					ledgerPath,
+					sessionId: session.sessionId,
+					hazardEndsAtByte: Buffer.byteLength(sanitized.slice(0, extent.end), "utf8"),
+				});
 			}
 			// 5. hazard shrinkage — hazards are NEVER compactable (operator directive;
 			//    a deliberate condensation is an owner's edit, not the sync writer's).
@@ -433,6 +477,7 @@ async function syncSingleRepo(
 			reason: refuseReason,
 			bytes: newBytes,
 		});
+		usage.refusals.push(`${slug}: ${refuseReason}`);
 		return usage;
 	}
 	await writeLedgerAtomically(ledgerPath, sanitized);
@@ -465,7 +510,10 @@ async function syncMultiRepo(
 				);
 			} catch (error) {
 				logger.warn("[sessionContextSync] per-repo sync failed", { slug, error: String(error) });
-				return undefined;
+				// Not silently dropped: one repo throwing while its siblings
+				// succeed still means THIS ledger did not get written, and the
+				// aggregate event would otherwise report an unqualified `done`.
+				return { ...EMPTY_SYNC_RESULT, refusals: [`${slug}: sync threw — ${String(error)}`] };
 			}
 		}),
 	);
@@ -662,7 +710,15 @@ export async function maybeSync(
 			emit("start");
 			const result = await runSync(session, settings, deps);
 			state.lastSyncAt = now();
-			emit("done", {
+			// A refusal spends tokens and returns cleanly, so reporting an
+			// unqualified `done` made a no-write indistinguishable from a real
+			// sync — agent-chat's dashboard showed `done` with a cost attached
+			// while the ledger was untouched (Husbandry_App: 54 consecutive
+			// silent no-writes). Terminal phase now reflects what actually
+			// landed: nothing written at all is a failure, a partial write is
+			// `done` carrying the per-ledger reasons.
+			const wroteNothing = result.refusals.length > 0 && result.refusals.length >= result.repos.length;
+			emit(wroteNothing ? "fail" : "done", {
 				repos: result.repos,
 				tokens_in: result.tokensIn,
 				tokens_out: result.tokensOut,
@@ -670,6 +726,9 @@ export async function maybeSync(
 				model: result.model,
 				provider: result.provider,
 				duration_ms: result.durationMs,
+				...(result.refusals.length > 0
+					? { error: `ledger not written — ${result.refusals.join("; ")}` }
+					: {}),
 			});
 		} finally {
 			state.inFlight = false;

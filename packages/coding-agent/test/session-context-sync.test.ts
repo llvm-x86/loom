@@ -201,10 +201,13 @@ describe("sessionContextSync", () => {
 			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
 		});
 
-		it("refuses a wholesale rewrite whose hazard section ends past the 4096-byte window", async () => {
+		it("refuses a wholesale rewrite that reorders hazards away from the first section", async () => {
 			const ledgerPath = seed();
 			// All headings present (shrinkage check passes), but Landmines was reordered
-			// to the END and pushed past byte 4096 — the reorder-then-cut setup.
+			// to the END — the reorder case. Enforced positionally (hazards must be the
+			// first '##' section, same rule as agent-chat's ledger-guard), NOT by a byte
+			// budget: the old byte-window form of this check permanently froze any ledger
+			// whose hazards legitimately grew past 4096 bytes.
 			const narrative = `${"- narrative bullet padding past the window.\n".repeat(160)}`;
 			const reordered = `# owner/repo — status ledger\n\n## Current state\n${narrative}\n## Landmines\n- ⚠️ a standing constraint.\n`;
 			expect(Buffer.byteLength(reordered, "utf8")).toBeGreaterThan(4096);
@@ -213,6 +216,44 @@ describe("sessionContextSync", () => {
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
 
 			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+		});
+
+		it("WRITES a hazards-first ledger whose hazard section runs past 4096 bytes", async () => {
+			// The freeze this replaced: Family-Fun-Group-Husbandry_App.md's hazards end at
+			// byte 7301, so the old byte-window predicate refused all 54 of its syncs while
+			// each reported `done`. Hazards first + grown large is a NORMAL busy-repo state
+			// and must persist ("do not contort a ledger to fit a margin").
+			const ledgerPath = seed();
+			const bigHazards = `# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing constraint.\n${"- ⚠️ another load-bearing hazard that must persist.\n".repeat(120)}\n## Current state\nFine.\n`;
+			expect(Buffer.byteLength(bigHazards, "utf8")).toBeGreaterThan(4096);
+			const { session } = makeSession(dir, makeSettings({ dir }), bigHazards);
+
+			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
+
+			const written = readFileSync(ledgerPath, "utf8");
+			expect(written).not.toBe(INTACT);
+			expect(Buffer.byteLength(written, "utf8")).toBeGreaterThan(4096);
+			expect(written.split("\n").filter(l => l.includes("load-bearing hazard")).length).toBe(120);
+		});
+
+		it("reports a refused write as fail with the reason, not an unqualified done", async () => {
+			// A refusal spends tokens and returns cleanly; before this the terminal event
+			// was `done` with a cost attached and no indication the file was untouched.
+			seed();
+			const events: { phase: string; error?: string }[] = [];
+			const condensed =
+				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ constraint.\n\n## Current state\nCondensed.\n";
+			const { session } = makeSession(dir, makeSettings({ dir }), condensed);
+
+			await maybeSync(session, "compaction", {
+				resolveRepo: async () => "owner/repo",
+				reportEvent: event => events.push({ phase: event.phase, error: event.error }),
+			});
+
+			const terminal = events.at(-1);
+			expect(terminal?.phase).toBe("fail");
+			expect(terminal?.error).toContain("ledger not written");
+			expect(terminal?.error).toContain("hazard section shrank");
 		});
 
 		it("refuses a rewrite that shrinks the hazard section (semantic condensation)", async () => {
