@@ -80,7 +80,12 @@ export class LearnTool implements AgentTool<typeof learnSchema> {
 			}
 		} else if (backend === "local") {
 			const result = await localBackend.save?.(
-				{ agentDir: this.session.settings.getAgentDir(), cwd: this.session.settings.getCwd() },
+				{
+					agentDir: this.session.settings.getAgentDir(),
+					cwd: this.session.settings.getCwd(),
+					// Runtime session id for the provenance trailer — never from params.
+					sessionId: this.session.getSessionId?.() ?? null,
+				},
 				{ content: params.memory, context: params.context, source: "coding-agent-learn", importance: 0.8 },
 			);
 			if (!result || result.stored === 0) {

@@ -18,6 +18,8 @@ export type ContextActivityKind = "sync" | "compaction";
 export type ContextActivityPhase = "start" | "done" | "skip" | "fail";
 /** Matches `SessionContextSyncReason`; compaction events always report "compaction". */
 export type ContextActivityTrigger = "compaction" | "idle" | "shutdown";
+/** Terminal write outcome on `phase: "done"` — every ledger persisted, or a cut-invariant guard refused the write. */
+export type ContextActivityOutcome = "persisted" | "refused";
 
 /** Wire shape POSTed to `/api/context/event` — see the locked contract for field semantics. */
 export interface ContextActivityEvent {
@@ -39,6 +41,15 @@ export interface ContextActivityEvent {
 	ts: number;
 	/** Also doubles as the human-readable skip reason on `phase: "skip"` (disabled/empty/inflight/debounce/paused). */
 	error?: string;
+	/**
+	 * Set on `phase: "done"`: `"persisted"` when at least one ledger was written,
+	 * `"refused"` when a cut-invariant guard refused every write. A refusal spends
+	 * tokens and completes without error, so without this a no-write is
+	 * indistinguishable from a real sync at the ingest side.
+	 */
+	outcome?: ContextActivityOutcome;
+	/** Exact guard refusal reason(s) (`<slug>: <reason>`, `; `-joined) when any ledger write was refused. */
+	refuse_reason?: string;
 }
 
 const EVENT_PATH = "/api/context/event";

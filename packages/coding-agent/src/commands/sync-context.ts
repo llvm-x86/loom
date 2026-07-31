@@ -17,7 +17,7 @@ import { existsSync } from "node:fs";
 import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
 import { createAgentSession } from "../sdk";
 import { SessionManager } from "../session/session-manager";
-import { reportContextActivity } from "../utils/context-activity-reporter";
+import { reportContextActivity, type ContextActivityOutcome } from "../utils/context-activity-reporter";
 import {
 	maybeSync,
 	type SessionContextSyncReason,
@@ -29,6 +29,8 @@ interface SyncContextSummary {
 	repos: string[];
 	tokens_in: number;
 	tokens_out: number;
+	outcome?: ContextActivityOutcome;
+	refuse_reason?: string;
 	error?: string;
 }
 
@@ -90,6 +92,14 @@ export default class SyncContext extends Command {
 						summary.repos = event.repos ?? [];
 						summary.tokens_in = event.tokens_in ?? 0;
 						summary.tokens_out = event.tokens_out ?? 0;
+						summary.outcome = event.outcome;
+						// A refused write is a completed sync that persisted nothing:
+						// the activity event stays `done` (with `outcome: "refused"`),
+						// but the worker's exit code must still say failure.
+						if (event.outcome === "refused") {
+							summary.refuse_reason = event.refuse_reason;
+							failure = event.refuse_reason ?? event.error;
+						}
 					} else if (event.phase === "fail" || event.phase === "skip") {
 						failure = event.error;
 						summary.repos = event.repos ?? summary.repos;

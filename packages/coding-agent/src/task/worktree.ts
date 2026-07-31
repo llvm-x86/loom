@@ -7,8 +7,11 @@ import { getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import * as jj from "../utils/jj";
 import { mapWithConcurrencyLimit } from "./parallel";
+import { sweepOrphanedTaskIsolations, TASK_ISOLATION_OWNER_FILE } from "./worktree-gc";
 
 const { IsoBackendKind } = natives;
+
+let isolationSweepDone = false;
 
 const TASK_ISOLATION_DIR_PREFIX = "t";
 const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
@@ -434,6 +437,24 @@ export async function ensureIsolation(
 			// parallel task branches. Detaching gives each isolation a private,
 			// frozen repo that still borrows the source object DB via alternates.
 			await git.detachGitDir(mergedDir, sourceCommonDir);
+			// Mark ownership so the GC can distinguish a live task's
+			// isolation from a crashed process's leftover. Best-effort: a
+			// failed write must never break task spawn.
+			try {
+				await fs.writeFile(
+					path.join(baseDir, TASK_ISOLATION_OWNER_FILE),
+					JSON.stringify({ pid: process.pid, startedAt: new Date().toISOString(), repoRoot, taskId: id }),
+				);
+			} catch (err) {
+				logger.warn("task-isolation owner marker write failed", {
+					baseDir,
+					error: errorMessage(err),
+				});
+			}
+			if (!isolationSweepDone) {
+				isolationSweepDone = true;
+				void sweepOrphanedTaskIsolations().catch(() => {});
+			}
 			return {
 				mergedDir,
 				backend: candidate,
