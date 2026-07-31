@@ -27,6 +27,10 @@ export default class Worktree extends Command {
 			description: "Clear every entry, including live PR-checkout worktrees (clear)",
 			default: false,
 		}),
+		"task-branches": Flags.boolean({
+			description: "Also prune stale omp/task/* branches (last commit older than 7 days) (clear)",
+			default: false,
+		}),
 		"dry-run": Flags.boolean({
 			char: "n",
 			description: "Print what would be removed without touching the filesystem (clear)",
@@ -53,6 +57,7 @@ export default class Worktree extends Command {
 			await clearWorktrees({
 				all: flags.all ?? false,
 				dryRun: flags["dry-run"] ?? false,
+				taskBranches: flags["task-branches"] ?? false,
 				json: flags.json ?? false,
 			});
 			return;
