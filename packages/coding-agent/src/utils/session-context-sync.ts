@@ -526,7 +526,11 @@ async function syncSingleRepo(
 			) {
 				refuseReason = `hazard section is not the first '##' section (hazards-first is positional; first section is ${JSON.stringify(firstSectionHeading[0])})`;
 			}
-			if (!refuseReason && extent !== undefined && Buffer.byteLength(sanitized.slice(0, extent.end), "utf8") > 4096) {
+			if (
+				!refuseReason &&
+				extent !== undefined &&
+				Buffer.byteLength(sanitized.slice(0, extent.end), "utf8") > 4096
+			) {
 				logger.warn("[sessionContextSync] hazard section ends past the legacy 4096-byte window; writing anyway", {
 					ledgerPath,
 					sessionId: session.sessionId,
@@ -817,11 +821,11 @@ export async function maybeSync(
 				duration_ms: result.durationMs,
 				outcome: wroteNothing ? "refused" : "persisted",
 				...(result.refusals.length > 0
-				? {
-						error: `ledger not written — ${result.refusals.join("; ")}`,
-						refuse_reason: result.refusals.join("; "),
-					}
-				: {}),
+					? {
+							error: `ledger not written — ${result.refusals.join("; ")}`,
+							refuse_reason: result.refusals.join("; "),
+						}
+					: {}),
 			});
 		} finally {
 			state.inFlight = false;
