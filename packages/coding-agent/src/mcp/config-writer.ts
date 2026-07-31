@@ -323,9 +323,7 @@ export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): 
 	const { userPath, projectPath, sourcePath, name, enabled } = options;
 	const candidatePaths = [
 		...new Set(
-			[sourcePath, ...projectConfigCandidates(projectPath), userPath].filter(
-				candidate => candidate !== undefined,
-			),
+			[sourcePath, ...projectConfigCandidates(projectPath), userPath].filter(candidate => candidate !== undefined),
 		),
 	];
 	let updatedInConfig = false;
