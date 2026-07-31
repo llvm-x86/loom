@@ -18,6 +18,7 @@ import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { resolveLocalUrlToPath } from "@oh-my-pi/pi-coding-agent/internal-urls";
 import { IrcBus, type IrcMessage } from "@oh-my-pi/pi-coding-agent/irc/bus";
+import { AgentLifecycleManager } from "@oh-my-pi/pi-coding-agent/registry/agent-lifecycle";
 import { AgentRegistry } from "@oh-my-pi/pi-coding-agent/registry/agent-registry";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
@@ -80,6 +81,17 @@ describe("AgentSession plan-mode convergence", () => {
 	const authStorages: AuthStorage[] = [];
 
 	beforeEach(() => {
+		// T2b drives the process-global IRC singletons: it registers a peer in the
+		// global registry and awaits the auto-reply on the global bus. The bus pins
+		// whichever registry existed when it was first constructed, so a predecessor
+		// suite that built the bus and then called `AgentRegistry.resetGlobalForTests`
+		// leaves it addressing a dead registry — the auto-reply's `send` fails with
+		// "Unknown agent", `#runIrcAutoReply` swallows it into a log line, and the
+		// unbounded `bus.wait` hangs until the test budget expires. Reset both ends
+		// here and after, so this suite neither inherits nor leaks that pin.
+		AgentRegistry.resetGlobalForTests();
+		AgentLifecycleManager.resetGlobalForTests();
+		IrcBus.resetGlobalForTests();
 		tempDir = TempDir.createSync("@pi-plan-converge-");
 	});
 
@@ -90,6 +102,9 @@ describe("AgentSession plan-mode convergence", () => {
 			session = undefined;
 			for (const authStorage of authStorages.splice(0)) authStorage.close();
 			await tempDir?.remove();
+			IrcBus.resetGlobalForTests();
+			AgentLifecycleManager.resetGlobalForTests();
+			AgentRegistry.resetGlobalForTests();
 		}
 	});
 

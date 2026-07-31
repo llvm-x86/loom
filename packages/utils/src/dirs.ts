@@ -30,6 +30,14 @@ export const CONFIG_DIR_NAME: string = ".loom";
  */
 export const LEGACY_CONFIG_DIR_NAME: string = ".omp";
 
+/**
+ * Pre-rename app name, used as the filename prefix of dated process logs
+ * (`omp.YYYY-MM-DD.PID.log`). The startup migration relocates those files into
+ * the current state root without renaming them, so readers that scan the logs
+ * directory must still recognise the prefix. Never used for new writes.
+ */
+export const LEGACY_APP_NAME: string = "omp";
+
 /** Ordered main settings filenames: canonical write target first, legacy-compatible YAML fallback second. */
 export const MAIN_CONFIG_FILENAMES = ["config.yml", "config.yaml"] as const;
 

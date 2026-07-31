@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- Fixed shell snapshots being written into a group/world-accessible directory when the well-known `omp-shell-snapshots` path under the system temp dir is already owned by another user: `mkdir`'s `mode` is ignored for an existing directory and the defensive `chmod` fails with `EPERM`, so the UUID filenames (and the env-var values inlined into them) were listable by any local user. The directory is now verified to be a non-symlinked directory owned by the current user at mode `0700`, falling back to a uid-qualified and then a `mkdtemp` path when it is not.
+- Fixed debug report bundles and the log viewer skipping dated process logs written before the `omp` → `loom` rename, which the startup migration relocates into the current state root without renaming.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added
