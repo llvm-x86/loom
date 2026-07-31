@@ -801,11 +801,13 @@ export async function maybeSync(
 			// unqualified `done` made a no-write indistinguishable from a real
 			// sync — agent-chat's dashboard showed `done` with a cost attached
 			// while the ledger was untouched (Husbandry_App: 54 consecutive
-			// silent no-writes). Terminal phase now reflects what actually
-			// landed: nothing written at all is a failure, a partial write is
-			// `done` carrying the per-ledger reasons.
+			// silent no-writes). The terminal event therefore stays `done` (the
+			// sync ran to completion) but carries the write outcome explicitly:
+			// `persisted` when at least one ledger landed, `refused` when every
+			// write was refused, with the exact per-ledger guard reasons in
+			// `refuse_reason` (`error` kept for older ingests).
 			const wroteNothing = result.refusals.length > 0 && result.refusals.length >= result.repos.length;
-			emit(wroteNothing ? "fail" : "done", {
+			emit("done", {
 				repos: result.repos,
 				tokens_in: result.tokensIn,
 				tokens_out: result.tokensOut,
@@ -813,9 +815,13 @@ export async function maybeSync(
 				model: result.model,
 				provider: result.provider,
 				duration_ms: result.durationMs,
+				outcome: wroteNothing ? "refused" : "persisted",
 				...(result.refusals.length > 0
-					? { error: `ledger not written — ${result.refusals.join("; ")}` }
-					: {}),
+				? {
+						error: `ledger not written — ${result.refusals.join("; ")}`,
+						refuse_reason: result.refusals.join("; "),
+					}
+				: {}),
 			});
 		} finally {
 			state.inFlight = false;

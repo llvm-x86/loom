@@ -32,7 +32,13 @@ export const localBackend: MemoryBackend = {
 		enqueueMemoryConsolidation(agentDir, cwd);
 	},
 	async save(context, input) {
-		return saveLearnedLesson(context.agentDir, context.cwd, input);
+		// Forward the runtime session id for the provenance trailer when the
+		// caller threaded a session through the operation context (the
+		// createSessionMemoryRuntimeContext path does; the learn tool's direct
+		// call does not — its ToolSession exposes no AgentSession).
+		return saveLearnedLesson(context.agentDir, context.cwd, input, {
+			sessionId: context.sessionId ?? context.session?.sessionId ?? null,
+		});
 	},
 	async status() {
 		return {

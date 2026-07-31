@@ -277,21 +277,29 @@ describe("sessionContextSync", () => {
 			expect(written.split("\n").filter(l => l.includes("load-bearing hazard")).length).toBe(120);
 		});
 
-		it("reports a refused write as fail with the reason, not an unqualified done", async () => {
+		it("reports a refused write as done with outcome 'refused' and the exact reason", async () => {
 			// A refusal spends tokens and returns cleanly; before this the terminal event
 			// was `done` with a cost attached and no indication the file was untouched.
 			seed();
-			const events: { phase: string; error?: string }[] = [];
+			const events: { phase: string; error?: string; outcome?: string; refuse_reason?: string }[] = [];
 			const cut = "# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing cons\n[…truncated]";
 			const { session } = makeSession(dir, makeSettings({ dir }), cut);
 
 			await maybeSync(session, "compaction", {
 				resolveRepo: async () => "owner/repo",
-				reportEvent: event => events.push({ phase: event.phase, error: event.error }),
+				reportEvent: event =>
+					events.push({
+						phase: event.phase,
+						error: event.error,
+						outcome: event.outcome,
+						refuse_reason: event.refuse_reason,
+					}),
 			});
 
 			const terminal = events.at(-1);
-			expect(terminal?.phase).toBe("fail");
+			expect(terminal?.phase).toBe("done");
+			expect(terminal?.outcome).toBe("refused");
+			expect(terminal?.refuse_reason).toContain("truncation marker");
 			expect(terminal?.error).toContain("ledger not written");
 			expect(terminal?.error).toContain("truncation marker");
 		});
