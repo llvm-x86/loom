@@ -11,13 +11,22 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getWorktreesDir, logger } from "@oh-my-pi/pi-utils";
+import { getScratchDir, getWorktreesDir, logger } from "@oh-my-pi/pi-utils";
 
 /** Marker file recording which loom process owns a task-isolation workspace. */
 export const TASK_ISOLATION_OWNER_FILE = "owner.json";
 
 /** Grace window for legacy task-isolation dirs that carry no owner marker. */
 export const TASK_ISOLATION_STALE_GRACE_MS = 86_400_000; // 24h
+
+/**
+ * Grace window before a scratch dir whose owner process is gone is swept.
+ * Unlike worktrees (merged/captured at task end, so dead-owner ⇒ immediate
+ * removal), scratch content exists nowhere else — the grace is the post-mortem
+ * forensics window after a hard kill. Nothing writes to the dir once the owner
+ * dies, so mtime ≈ death time.
+ */
+export const SCRATCH_DEAD_OWNER_GRACE_MS = 86_400_000; // 24h
 
 /** Mount subdirs that mark a top-level dir as a task-isolation workspace. */
 const TASK_ISOLATION_MOUNT_DIRS = ["m", "merged"] as const;
@@ -92,15 +101,28 @@ export function isPidAlive(pid: number): boolean {
 }
 
 /**
- * Classify one task-isolation base dir. Dirs with a live owner are never
- * orphaned; dirs with a dead owner are. Dirs without a marker fall back to a
- * mtime-based grace window covering legacy layouts and in-flight creation.
+ * Classify one managed workspace dir. Dirs with a live owner are never
+ * orphaned; dirs with a dead owner are, once `deadGraceMs` has elapsed since
+ * the dir was last modified (0 = immediately, the worktree policy). Dirs
+ * without a marker fall back to a mtime-based grace window covering legacy
+ * layouts and in-flight creation.
  */
-export async function classifyTaskIsolation(baseDir: string): Promise<TaskIsolationClass> {
+export async function classifyTaskIsolation(baseDir: string, deadGraceMs = 0): Promise<TaskIsolationClass> {
 	const owner = await readTaskIsolationOwner(baseDir);
 	if (owner !== null) {
 		if (isPidAlive(owner.pid)) {
 			return { orphaned: false, owner };
+		}
+		if (deadGraceMs > 0) {
+			try {
+				const stat = await fs.stat(baseDir);
+				if (Date.now() - stat.mtimeMs <= deadGraceMs) {
+					return { orphaned: false, owner };
+				}
+			} catch {
+				// Unstattable dirs are not swept.
+				return { orphaned: false, owner };
+			}
 		}
 		return { orphaned: true, orphanReason: `owner process ${owner.pid} is gone`, owner };
 	}
@@ -130,14 +152,20 @@ async function hasMountSubdir(dir: string): Promise<boolean> {
 	return false;
 }
 
+interface SweepRootOptions {
+	/** Only consider dirs carrying an `m`/`merged` mount subdir (worktree root). */
+	requireMountSubdir: boolean;
+	/** Grace before a dead owner's dir is removed; 0 removes on sight. */
+	deadGraceMs: number;
+}
+
 /**
- * Best-effort sweep of orphaned task-isolation workspaces under
- * `getWorktreesDir()`. Never throws: a missing root yields empty results and
- * per-dir failures are collected into `failed`.
+ * Best-effort sweep of orphaned workspaces under `root`. Never throws: a
+ * missing root yields empty results and per-dir failures are collected into
+ * `failed`.
  */
-export async function sweepOrphanedTaskIsolations(): Promise<TaskIsolationSweepResult> {
+async function sweepRoot(root: string, options: SweepRootOptions): Promise<TaskIsolationSweepResult> {
 	const result: TaskIsolationSweepResult = { removed: [], failed: [] };
-	const root = getWorktreesDir();
 	let entries: Dirent[];
 	try {
 		entries = await fs.readdir(root, { withFileTypes: true });
@@ -149,20 +177,52 @@ export async function sweepOrphanedTaskIsolations(): Promise<TaskIsolationSweepR
 		if (!entry.isDirectory()) continue;
 		const baseDir = path.join(root, entry.name);
 		try {
-			if (!(await hasMountSubdir(baseDir))) continue;
-			const classification = await classifyTaskIsolation(baseDir);
+			if (options.requireMountSubdir && !(await hasMountSubdir(baseDir))) continue;
+			const classification = await classifyTaskIsolation(baseDir, options.deadGraceMs);
 			if (!classification.orphaned) continue;
 			await fs.rm(baseDir, { recursive: true, force: true });
 			result.removed.push(baseDir);
-			logger.debug("swept orphaned task-isolation workspace", {
+			logger.debug("swept orphaned workspace", {
 				baseDir,
 				reason: classification.orphanReason,
 			});
 		} catch (error) {
 			const message = error instanceof Error ? error.message : String(error);
 			result.failed.push({ path: baseDir, error: message });
-			logger.warn("failed to sweep orphaned task-isolation workspace", { baseDir, error: message });
+			logger.warn("failed to sweep orphaned workspace", { baseDir, error: message });
 		}
 	}
 	return result;
+}
+
+/**
+ * Best-effort sweep of orphaned task-isolation workspaces under
+ * `getWorktreesDir()`. Never throws: a missing root yields empty results and
+ * per-dir failures are collected into `failed`.
+ */
+export async function sweepOrphanedTaskIsolations(): Promise<TaskIsolationSweepResult> {
+	return sweepRoot(getWorktreesDir(), { requireMountSubdir: true, deadGraceMs: 0 });
+}
+
+/**
+ * Best-effort sweep of orphaned scratch dirs under `getScratchDir()`. A dir
+ * whose owner process is gone is kept for {@link SCRATCH_DEAD_OWNER_GRACE_MS}
+ * (forensics window) before removal; live-owner dirs are never removed.
+ */
+export async function sweepOrphanedScratchDirs(): Promise<TaskIsolationSweepResult> {
+	return sweepRoot(getScratchDir(), { requireMountSubdir: false, deadGraceMs: SCRATCH_DEAD_OWNER_GRACE_MS });
+}
+
+let workspaceSweepDone = false;
+
+/**
+ * Fire both workspace sweeps (worktree root + scratch root) once per process,
+ * fire-and-forget. Called from workspace creation sites so every loom process
+ * that spawns work also reaps what crashed processes left behind.
+ */
+export function sweepOrphanedWorkspacesOnce(): void {
+	if (workspaceSweepDone) return;
+	workspaceSweepDone = true;
+	void sweepOrphanedTaskIsolations().catch(() => {});
+	void sweepOrphanedScratchDirs().catch(() => {});
 }

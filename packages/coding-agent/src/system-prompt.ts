@@ -511,6 +511,8 @@ export interface BuildSystemPromptOptions {
 	xdevDocs?: string;
 	/** Whether Auto-QA grievance reporting is enabled; renders the `xd://report_issue` note. */
 	autoQaEnabled?: boolean;
+	/** Absolute per-session scratch dir; renders the scratch block when non-empty. */
+	scratch?: string;
 }
 
 /** Result of building provider-facing system prompt messages. */
@@ -558,6 +560,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevDocs = "",
 		autoQaEnabled = false,
 		activeRepoContext: providedActiveRepoContext,
+		scratch = "",
 	} = options;
 	const inlineToolDescriptors = providedInlineToolDescriptors ?? false;
 	const resolvedCwd = cwd ?? getProjectDir();
@@ -813,6 +816,7 @@ export async function buildSystemPrompt(options: BuildSystemPromptOptions = {}):
 		xdevTools,
 		xdevDocs,
 		autoQaEnabled,
+		scratch,
 	};
 	const rendered = prompt.render(resolvedCustomPrompt ? customSystemPromptTemplate : systemPromptTemplate, data);
 	const systemPrompt = [rendered];

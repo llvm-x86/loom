@@ -4171,6 +4171,30 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"scratch.base": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Scratch Base Directory",
+			description:
+				"Base directory for per-run scratch dirs — every task subagent and interactive session gets an owned, garbage-collected scratch dir here, and `loom scratch` cleanup reads the same base. Unset uses ~/.loom/scratch. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_SCRATCH_DIR env var overrides this.",
+		},
+	},
+
+	"scratch.tmpdirRedirect": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Redirect Subagent TMPDIR",
+			description:
+				"Point TMPDIR for subagent-spawned processes at the task's scratch dir (mktemp, tempfile, and library temp defaults land in owned, garbage-collected space). Disable if a tool expects shared /tmp state.",
+		},
+	},
+
 	"task.eager": {
 		type: "enum",
 		values: ["default", "preferred", "always"] as const,

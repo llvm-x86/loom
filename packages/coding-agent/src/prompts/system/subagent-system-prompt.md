@@ -32,6 +32,12 @@ You are working in an isolated working tree at `{{worktree}}` for this sub-task.
 You NEVER modify files outside this tree or in the original repository.
 {{/if}}
 
+{{#if scratch}}
+# Scratch Space
+Disposable files (repro scripts, fixtures, cookie jars, temp JSON, downloaded archives) go in `{{scratch}}` — it is owned by this task and garbage-collected.
+NEVER write scratch to /tmp, the repo, or the working tree. Anything worth keeping MUST be copied into the repo or returned via yield; scratch is deleted after the run.
+{{/if}}
+
 {{#if ircPeers}}
 # Peers
 You can reach other live agents via the `hub` tool. Your id is `{{ircSelfId}}`. Currently visible peers:

@@ -26,6 +26,7 @@ import {
 	logger,
 	MAIN_CONFIG_FILENAMES,
 	procmgr,
+	setScratchDir,
 	setWorktreesDir,
 } from "@oh-my-pi/pi-utils";
 import { JSONC, YAML } from "bun";
@@ -1891,6 +1892,16 @@ const SETTING_HOOKS: Partial<Record<SettingPath, SettingHook<any>>> = {
 			logger.warn("Settings: worktree.base must be an absolute or ~-relative path; ignoring", { value: dir });
 		} else if (!dir) {
 			setWorktreesDir(undefined);
+		}
+	},
+	"scratch.base": value => {
+		const dir = typeof value === "string" && value.trim() ? value : undefined;
+		// Same contract as worktree.base: always call so an unset/empty value
+		// clears a previously-applied override.
+		if (dir && !setScratchDir(dir)) {
+			logger.warn("Settings: scratch.base must be an absolute or ~-relative path; ignoring", { value: dir });
+		} else if (!dir) {
+			setScratchDir(undefined);
 		}
 	},
 };

@@ -41,6 +41,12 @@ Working directory layout (sorted by mtime, recent first; depth ≤ 3):
 {{/if}}
 {{/if}}
 
+{{#if scratch}}
+# Scratch Space
+Disposable files (repro scripts, fixtures, cookie jars, temp JSON, downloaded archives) go in `{{scratch}}` — it is owned by this session and garbage-collected.
+NEVER write scratch to /tmp, the repo, or the working tree. Anything worth keeping MUST be copied into the repo or another durable location; scratch is deleted after the session ends.
+{{/if}}
+
 Today is {{date}}, and the current working directory is '{{cwd}}'.
 
 <critical>

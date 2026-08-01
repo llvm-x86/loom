@@ -7,11 +7,9 @@ import { getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import * as jj from "../utils/jj";
 import { mapWithConcurrencyLimit } from "./parallel";
-import { sweepOrphanedTaskIsolations, TASK_ISOLATION_OWNER_FILE } from "./worktree-gc";
+import { sweepOrphanedWorkspacesOnce, TASK_ISOLATION_OWNER_FILE } from "./worktree-gc";
 
 const { IsoBackendKind } = natives;
-
-let isolationSweepDone = false;
 
 const TASK_ISOLATION_DIR_PREFIX = "t";
 const TASK_ISOLATION_DIR_DIGEST_CHARS = 9;
@@ -405,10 +403,15 @@ function errorMessage(err: unknown): string {
 	return err instanceof Error ? err.message : String(err);
 }
 
-function getTaskIsolationSegment(repoRoot: string, id: string): string {
+/**
+ * fs-safe segment naming a per-task workspace dir: prefix + 9 hex chars of
+ * `Bun.hash(repoRoot\0id)`. Scratch dirs reuse this with a different prefix
+ * so a task's scratch dir name correlates 1:1 with its worktree dir name.
+ */
+export function getTaskIsolationSegment(repoRoot: string, id: string, prefix = TASK_ISOLATION_DIR_PREFIX): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
+	return `${prefix}${digest}`;
 }
 
 export async function ensureIsolation(
@@ -451,10 +454,7 @@ export async function ensureIsolation(
 					error: errorMessage(err),
 				});
 			}
-			if (!isolationSweepDone) {
-				isolationSweepDone = true;
-				void sweepOrphanedTaskIsolations().catch(() => {});
-			}
+			sweepOrphanedWorkspacesOnce();
 			return {
 				mergedDir,
 				backend: candidate,
