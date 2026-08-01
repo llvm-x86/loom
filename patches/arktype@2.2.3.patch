@@ -1,0 +1,863 @@
+diff --git a/out/keywords/Array.js b/out/keywords/Array.js
+index f79278fbe6f3782dc518a23bdc44cbcebe29b840..4dea62bb97483a98f90448261636b9551c30f678 100644
+--- a/out/keywords/Array.js
++++ b/out/keywords/Array.js
+@@ -1,20 +1,20 @@
+ import { genericNode, intrinsic, rootSchema } from "@ark/schema";
+ import { Hkt, liftArray } from "@ark/util";
+-import { Scope } from "../scope.js";
++import { lazyModule, once } from "../scope.js";
+ class liftFromHkt extends Hkt {
+ }
+-const liftFrom = genericNode("element")(args => {
++const liftFrom = once(() => genericNode("element")(args => {
+     const nonArrayElement = args.element.exclude(intrinsic.Array);
+     const lifted = nonArrayElement.array();
+     return nonArrayElement
+         .rawOr(lifted)
+         .pipe(liftArray)
+         .distribute(branch => branch.assertHasKind("morph").declareOut(lifted), rootSchema);
+-}, liftFromHkt);
+-export const arkArray = Scope.module({
+-    root: intrinsic.Array,
+-    readonly: "root",
+-    index: intrinsic.nonNegativeIntegerString,
++}, liftFromHkt));
++export const arkArray = lazyModule({
++    root: () => intrinsic.Array,
++    readonly: () => "root",
++    index: () => intrinsic.nonNegativeIntegerString,
+     liftFrom
+ }, {
+     name: "Array"
+diff --git a/out/keywords/FormData.js b/out/keywords/FormData.js
+index 1d32a7704a106ee33820d9711ab0a180ea766f2d..16dfb4b595c165a57911ef967e9f4d9a77c540c1 100644
+--- a/out/keywords/FormData.js
++++ b/out/keywords/FormData.js
+@@ -1,21 +1,20 @@
+ import { rootSchema } from "@ark/schema";
+ import { registry } from "@ark/util";
+-import { Scope } from "../scope.js";
+-const value = rootSchema(["string", registry.FileConstructor]);
+-const parsedFormDataValue = value.rawOr(value.array());
+-const parsed = rootSchema({
++import { lazyModule, once } from "../scope.js";
++const value = once(() => rootSchema(["string", registry.FileConstructor]));
++const parsed = once(() => rootSchema({
+     meta: "an object representing parsed form data",
+     domain: "object",
+     index: {
+         signature: "string",
+-        value: parsedFormDataValue
++        value: value().rawOr(value().array())
+     }
+-});
+-export const arkFormData = Scope.module({
+-    root: ["instanceof", FormData],
++}));
++export const arkFormData = lazyModule({
++    root: () => ["instanceof", FormData],
+     value,
+     parsed,
+-    parse: rootSchema({
++    parse: () => rootSchema({
+         in: FormData,
+         morphs: (data) => {
+             const result = {};
+@@ -33,7 +32,7 @@ export const arkFormData = Scope.module({
+             }
+             return result;
+         },
+-        declaredOut: parsed
++        declaredOut: parsed()
+     })
+ }, {
+     name: "FormData"
+diff --git a/out/keywords/TypedArray.js b/out/keywords/TypedArray.js
+index f9f9bfd81309d20fd565f4ec8e0e9bf9f97866fd..1955ccdf5dfc1818f2409b5021f4125671ae32c4 100644
+--- a/out/keywords/TypedArray.js
++++ b/out/keywords/TypedArray.js
+@@ -1,16 +1,16 @@
+-import { Scope } from "../scope.js";
+-export const TypedArray = Scope.module({
+-    Int8: ["instanceof", Int8Array],
+-    Uint8: ["instanceof", Uint8Array],
+-    Uint8Clamped: ["instanceof", Uint8ClampedArray],
+-    Int16: ["instanceof", Int16Array],
+-    Uint16: ["instanceof", Uint16Array],
+-    Int32: ["instanceof", Int32Array],
+-    Uint32: ["instanceof", Uint32Array],
+-    Float32: ["instanceof", Float32Array],
+-    Float64: ["instanceof", Float64Array],
+-    BigInt64: ["instanceof", BigInt64Array],
+-    BigUint64: ["instanceof", BigUint64Array]
++import { lazyModule } from "../scope.js";
++export const TypedArray = lazyModule({
++    Int8: () => ["instanceof", Int8Array],
++    Uint8: () => ["instanceof", Uint8Array],
++    Uint8Clamped: () => ["instanceof", Uint8ClampedArray],
++    Int16: () => ["instanceof", Int16Array],
++    Uint16: () => ["instanceof", Uint16Array],
++    Int32: () => ["instanceof", Int32Array],
++    Uint32: () => ["instanceof", Uint32Array],
++    Float32: () => ["instanceof", Float32Array],
++    Float64: () => ["instanceof", Float64Array],
++    BigInt64: () => ["instanceof", BigInt64Array],
++    BigUint64: () => ["instanceof", BigUint64Array]
+ }, {
+     name: "TypedArray"
+ });
+diff --git a/out/keywords/builtins.js b/out/keywords/builtins.js
+index 76862412287dc6baf11905a151942012885f0af8..0777d3bc0936c48c3017aac06b9ba9a671ac1944 100644
+--- a/out/keywords/builtins.js
++++ b/out/keywords/builtins.js
+@@ -1,11 +1,13 @@
+ import { genericNode, intrinsic } from "@ark/schema";
+ import { Hkt } from "@ark/util";
+-import { Scope } from "../scope.js";
++import { lazyModule, once } from "../scope.js";
+ class MergeHkt extends Hkt {
+     description = 'merge an object\'s properties onto another like `Merge(User, { isAdmin: "true" })`';
+ }
+-const Merge = genericNode(["base", intrinsic.object], ["props", intrinsic.object])(args => args.base.merge(args.props), MergeHkt);
+-export const arkBuiltins = Scope.module({
++const Merge = once(() => genericNode(["base", intrinsic.object], ["props", intrinsic.object])(args => args.base.merge(args.props), MergeHkt));
++/** Raw alias definitions; see `arkTsKeywordDefs` in ./ts.js. */
++export const arkBuiltinDefs = {
+     Key: intrinsic.key,
+     Merge
+-});
++};
++export const arkBuiltins = lazyModule(arkBuiltinDefs);
+diff --git a/out/keywords/constructors.js b/out/keywords/constructors.js
+index d46769c375c6068dd1384e382c3a4e26698edab2..b4d078185d0bd062f9f1ad3b29ab0085691a7758 100644
+--- a/out/keywords/constructors.js
++++ b/out/keywords/constructors.js
+@@ -1,16 +1,18 @@
+ import { ecmascriptConstructors, flatMorph, platformConstructors } from "@ark/util";
+-import { Scope } from "../scope.js";
+ import { arkArray } from "./Array.js";
+ import { arkFormData } from "./FormData.js";
++import { lazyModule } from "../scope.js";
+ import { TypedArray } from "./TypedArray.js";
+ const omittedPrototypes = {
+     Boolean: 1,
+     Number: 1,
+     String: 1
+ };
+-export const arkPrototypes = Scope.module({
++/** Raw alias definitions; see `arkTsKeywordDefs` in ./ts.js. */
++export const arkPrototypeDefs = {
+     ...flatMorph({ ...ecmascriptConstructors, ...platformConstructors }, (k, v) => (k in omittedPrototypes ? [] : [k, ["instanceof", v]])),
+     Array: arkArray,
+     TypedArray,
+     FormData: arkFormData
+-});
++};
++export const arkPrototypes = lazyModule(arkPrototypeDefs);
+diff --git a/out/keywords/keywords.js b/out/keywords/keywords.js
+index f1a71799e6d085fc37f35b6b7a75c4f42600b34f..097c3a2344971acbd3d08091bcf0fc086d6c9d56 100644
+--- a/out/keywords/keywords.js
++++ b/out/keywords/keywords.js
+@@ -1,21 +1,33 @@
+-import { $arkTypeRegistry, scope } from "../scope.js";
+-import { arkBuiltins } from "./builtins.js";
+-import { arkPrototypes } from "./constructors.js";
++import { $arkTypeRegistry, lazyExports, scope } from "../scope.js";
++import { arkBuiltinDefs } from "./builtins.js";
++import { arkPrototypeDefs } from "./constructors.js";
+ import { number } from "./number.js";
+ import { string } from "./string.js";
+-import { arkTsGenerics, arkTsKeywords, object, unknown } from "./ts.js";
++import { arkTsGenericDefs, arkTsKeywordDefs, object, unknown } from "./ts.js";
++// The `ark` scope is built from raw alias *definitions* rather than from
++// already-exported keyword modules. `BaseScope` only preparses each entry into
++// a deferred parse context, so constructing the scope allocates no Nodes; every
++// keyword is parsed the first time it is referenced. Submodules stay real
++// (lazy) `RootModule`s so `a.b` subalias resolution keeps working.
+ export const ark = scope({
+-    ...arkTsKeywords,
+-    ...arkTsGenerics,
+-    ...arkPrototypes,
+-    ...arkBuiltins,
++    ...arkTsKeywordDefs,
++    ...arkTsGenericDefs,
++    ...arkPrototypeDefs,
++    ...arkBuiltinDefs,
+     string,
+     number,
+     object,
+     unknown
+ }, { prereducedAliases: true, name: "ark" });
+-export const keywords = ark.export();
+-Object.assign($arkTypeRegistry.ambient, keywords);
++// `ark.export()` would resolve, bind and JIT-compile every keyword in the scope
++// (~45MiB). Resolve them one at a time instead.
++export const keywords = lazyExports(ark);
++for (const name of ark.exportedNames)
++    Object.defineProperty($arkTypeRegistry.ambient, name, {
++        enumerable: true,
++        configurable: true,
++        get: () => keywords[name]
++    });
+ $arkTypeRegistry.typeAttachments = {
+     string: keywords.string.root,
+     number: keywords.number.root,
+diff --git a/out/keywords/number.js b/out/keywords/number.js
+index d6f1c272280a16051ef37c658537b7de72ccd8c2..b063d401c3bb618d0ec8010213292b9018619b3d 100644
+--- a/out/keywords/number.js
++++ b/out/keywords/number.js
+@@ -1,5 +1,5 @@
+ import { intrinsic, rootSchema } from "@ark/schema";
+-import { Scope } from "../scope.js";
++import { lazyModule, once } from "../scope.js";
+ /**
+  * As per the ECMA-262 specification:
+  * A time value supports a slightly smaller range of -8,640,000,000,000,000 to 8,640,000,000,000,000 milliseconds.
+@@ -29,21 +29,22 @@ export const integer = rootSchema({
+     domain: "number",
+     divisor: 1
+ });
+-export const number = Scope.module({
+-    root: intrinsic.number,
+-    integer,
+-    epoch,
+-    safe: rootSchema({
+-        domain: {
+-            domain: "number",
+-            numberAllowsNaN: false
+-        },
+-        min: Number.MIN_SAFE_INTEGER,
+-        max: Number.MAX_SAFE_INTEGER
+-    }),
+-    NaN: ["===", Number.NaN],
+-    Infinity: ["===", Number.POSITIVE_INFINITY],
+-    NegativeInfinity: ["===", Number.NEGATIVE_INFINITY]
++const safe = once(() => rootSchema({
++    domain: {
++        domain: "number",
++        numberAllowsNaN: false
++    },
++    min: Number.MIN_SAFE_INTEGER,
++    max: Number.MAX_SAFE_INTEGER
++}));
++export const number = lazyModule({
++    root: () => intrinsic.number,
++    integer: () => integer,
++    epoch: () => epoch,
++    safe,
++    NaN: () => ["===", Number.NaN],
++    Infinity: () => ["===", Number.POSITIVE_INFINITY],
++    NegativeInfinity: () => ["===", Number.NEGATIVE_INFINITY]
+ }, {
+     name: "number"
+ });
+diff --git a/out/keywords/string.js b/out/keywords/string.js
+index d640dcdc45b184fe2655da2a5165b6bf3d682b41..5b5ef4befa77f1b7940e847ada64814001413bd9 100644
+--- a/out/keywords/string.js
++++ b/out/keywords/string.js
+@@ -1,6 +1,6 @@
+ import { ArkErrors, intrinsic, node, rootSchema } from "@ark/schema";
+ import { flatMorph, numericStringMatcher, wellFormedIntegerMatcher } from "@ark/util";
+-import { Scope } from "../scope.js";
++import { lazyModule, once } from "../scope.js";
+ import { number } from "./number.js";
+ // non-trivial expressions should have an explanation or attribution
+ export const regexStringNode = (regex, description, jsonSchemaFormat) => {
+@@ -16,11 +16,11 @@ export const regexStringNode = (regex, description, jsonSchemaFormat) => {
+         schema.meta = { format: jsonSchemaFormat };
+     return node("intersection", schema);
+ };
+-const stringIntegerRoot = regexStringNode(wellFormedIntegerMatcher, "a well-formed integer string");
+-export const stringInteger = Scope.module({
++const stringIntegerRoot = once(() => regexStringNode(wellFormedIntegerMatcher, "a well-formed integer string"));
++export const stringInteger = lazyModule({
+     root: stringIntegerRoot,
+-    parse: rootSchema({
+-        in: stringIntegerRoot,
++    parse: () => rootSchema({
++        in: stringIntegerRoot(),
+         morphs: (s, ctx) => {
+             const parsed = Number.parseInt(s);
+             return Number.isSafeInteger(parsed) ? parsed : (ctx.error("an integer in the range Number.MIN_SAFE_INTEGER to Number.MAX_SAFE_INTEGER"));
+@@ -30,19 +30,19 @@ export const stringInteger = Scope.module({
+ }, {
+     name: "string.integer"
+ });
+-const hex = regexStringNode(/^[\dA-Fa-f]+$/, "hex characters only");
+-const base64 = Scope.module({
+-    root: regexStringNode(/^(?:[\d+/A-Za-z]{4})*(?:[\d+/A-Za-z]{2}==|[\d+/A-Za-z]{3}=)?$/, "base64-encoded"),
+-    url: regexStringNode(/^(?:[\w-]{4})*(?:[\w-]{2}(?:==|%3D%3D)?|[\w-]{3}(?:=|%3D)?)?$/, "base64url-encoded")
++const hex = () => regexStringNode(/^[\dA-Fa-f]+$/, "hex characters only");
++const base64 = lazyModule({
++    root: () => regexStringNode(/^(?:[\d+/A-Za-z]{4})*(?:[\d+/A-Za-z]{2}==|[\d+/A-Za-z]{3}=)?$/, "base64-encoded"),
++    url: () => regexStringNode(/^(?:[\w-]{4})*(?:[\w-]{2}(?:==|%3D%3D)?|[\w-]{3}(?:=|%3D)?)?$/, "base64url-encoded")
+ }, {
+     name: "string.base64"
+ });
+-const preformattedCapitalize = regexStringNode(/^[A-Z].*$/, "capitalized");
+-export const capitalize = Scope.module({
+-    root: rootSchema({
++const preformattedCapitalize = once(() => regexStringNode(/^[A-Z].*$/, "capitalized"));
++export const capitalize = lazyModule({
++    root: () => rootSchema({
+         in: "string",
+         morphs: (s) => s.charAt(0).toUpperCase() + s.slice(1),
+-        declaredOut: preformattedCapitalize
++        declaredOut: preformattedCapitalize()
+     }),
+     preformatted: preformattedCapitalize
+ }, {
+@@ -118,14 +118,14 @@ export const tryParseDatePattern = (data, opts) => {
+     return writeFormattedExpected(opts.format);
+ };
+ const isParsableDate = (s) => !Number.isNaN(new Date(s).valueOf());
+-const parsableDate = rootSchema({
++const parsableDate = once(() => rootSchema({
+     domain: "string",
+     predicate: {
+         meta: "a parsable date",
+         predicate: isParsableDate
+     }
+-}).assertHasKind("intersection");
+-const epochRoot = stringInteger.root.internal
++}).assertHasKind("intersection"));
++const epochRoot = once(() => stringInteger.root.internal
+     .narrow((s, ctx) => {
+     // this is safe since it has already
+     // been validated as an integer string
+@@ -140,32 +140,32 @@ const epochRoot = stringInteger.root.internal
+     .configure({
+     description: "an integer string representing a safe Unix timestamp"
+ }, "self")
+-    .assertHasKind("intersection");
+-const epoch = Scope.module({
++    .assertHasKind("intersection"));
++const epoch = lazyModule({
+     root: epochRoot,
+-    parse: rootSchema({
+-        in: epochRoot,
++    parse: () => rootSchema({
++        in: epochRoot(),
+         morphs: (s) => new Date(s),
+         declaredOut: intrinsic.Date
+     })
+ }, {
+     name: "string.date.epoch"
+ });
+-const isoRoot = regexStringNode(iso8601Matcher, "an ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ) date").internal.assertHasKind("intersection");
+-const iso = Scope.module({
++const isoRoot = once(() => regexStringNode(iso8601Matcher, "an ISO 8601 (YYYY-MM-DDTHH:mm:ss.sssZ) date").internal.assertHasKind("intersection"));
++const iso = lazyModule({
+     root: isoRoot,
+-    parse: rootSchema({
+-        in: isoRoot,
++    parse: () => rootSchema({
++        in: isoRoot(),
+         morphs: (s) => new Date(s),
+         declaredOut: intrinsic.Date
+     })
+ }, {
+     name: "string.date.iso"
+ });
+-export const stringDate = Scope.module({
++export const stringDate = lazyModule({
+     root: parsableDate,
+-    parse: rootSchema({
+-        declaredIn: parsableDate,
++    parse: () => rootSchema({
++        declaredIn: parsableDate(),
+         in: "string",
+         morphs: (s, ctx) => {
+             const date = new Date(s);
+@@ -180,7 +180,7 @@ export const stringDate = Scope.module({
+ }, {
+     name: "string.date"
+ });
+-const email = regexStringNode(
++const email = () => regexStringNode(
+ // considered https://colinhacks.com/essays/reasonable-email-regex but it includes a lookahead
+ // which breaks some integrations e.g. fast-check
+ // regex based on:
+@@ -201,10 +201,10 @@ const ipv6Matcher = new RegExp("^(" +
+     `(?:${ipv6Segment}:){1}(?:(:${ipv6Segment}){0,4}:${ipv4Address}|(:${ipv6Segment}){1,6}|:)|` +
+     `(?::((?::${ipv6Segment}){0,5}:${ipv4Address}|(?::${ipv6Segment}){1,7}|:))` +
+     ")(%[0-9a-zA-Z.]{1,})?$");
+-export const ip = Scope.module({
+-    root: ["v4 | v6", "@", "an IP address"],
+-    v4: regexStringNode(ipv4Matcher, "an IPv4 address", "ipv4"),
+-    v6: regexStringNode(ipv6Matcher, "an IPv6 address", "ipv6")
++export const ip = lazyModule({
++    root: () => ["v4 | v6", "@", "an IP address"],
++    v4: () => regexStringNode(ipv4Matcher, "an IPv4 address", "ipv4"),
++    v6: () => regexStringNode(ipv6Matcher, "an IPv6 address", "ipv6")
+ }, {
+     name: "string.ip"
+ });
+@@ -214,7 +214,7 @@ export const writeJsonSyntaxErrorProblem = (error) => {
+         throw error;
+     return `must be ${jsonStringDescription} (${error})`;
+ };
+-const jsonRoot = rootSchema({
++const jsonRoot = () => rootSchema({
+     meta: jsonStringDescription,
+     domain: "string",
+     predicate: {
+@@ -253,9 +253,9 @@ const parseJson = (s, ctx) => {
+         });
+     }
+ };
+-export const json = Scope.module({
++export const json = lazyModule({
+     root: jsonRoot,
+-    parse: rootSchema({
++    parse: () => rootSchema({
+         meta: "safe JSON string parser",
+         in: "string",
+         morphs: parseJson,
+@@ -264,60 +264,46 @@ export const json = Scope.module({
+ }, {
+     name: "string.json"
+ });
+-const preformattedLower = regexStringNode(/^[a-z]*$/, "only lowercase letters");
+-const lower = Scope.module({
+-    root: rootSchema({
++const preformattedLower = once(() => regexStringNode(/^[a-z]*$/, "only lowercase letters"));
++const lower = lazyModule({
++    root: () => rootSchema({
+         in: "string",
+         morphs: (s) => s.toLowerCase(),
+-        declaredOut: preformattedLower
++        declaredOut: preformattedLower()
+     }),
+     preformatted: preformattedLower
+ }, {
+     name: "string.lower"
+ });
+ export const normalizedForms = ["NFC", "NFD", "NFKC", "NFKD"];
+-const preformattedNodes = flatMorph(normalizedForms, (i, form) => [
++const preformattedNodes = once(() => flatMorph(normalizedForms, (i, form) => [
+     form,
+     rootSchema({
+         domain: "string",
+         predicate: (s) => s.normalize(form) === s,
+         meta: `${form}-normalized unicode`
+     })
+-]);
+-const normalizeNodes = flatMorph(normalizedForms, (i, form) => [
++]));
++const normalizeNodes = once(() => flatMorph(normalizedForms, (i, form) => [
+     form,
+     rootSchema({
+         in: "string",
+         morphs: (s) => s.normalize(form),
+-        declaredOut: preformattedNodes[form]
++        declaredOut: preformattedNodes()[form]
+     })
+-]);
+-export const NFC = Scope.module({
+-    root: normalizeNodes.NFC,
+-    preformatted: preformattedNodes.NFC
++]));
++const normalizeModule = (form) => lazyModule({
++    root: () => normalizeNodes()[form],
++    preformatted: () => preformattedNodes()[form]
+ }, {
+-    name: "string.normalize.NFC"
++    name: `string.normalize.${form}`
+ });
+-export const NFD = Scope.module({
+-    root: normalizeNodes.NFD,
+-    preformatted: preformattedNodes.NFD
+-}, {
+-    name: "string.normalize.NFD"
+-});
+-export const NFKC = Scope.module({
+-    root: normalizeNodes.NFKC,
+-    preformatted: preformattedNodes.NFKC
+-}, {
+-    name: "string.normalize.NFKC"
+-});
+-export const NFKD = Scope.module({
+-    root: normalizeNodes.NFKD,
+-    preformatted: preformattedNodes.NFKD
+-}, {
+-    name: "string.normalize.NFKD"
+-});
+-export const normalize = Scope.module({
+-    root: "NFC",
++export const NFC = normalizeModule("NFC");
++export const NFD = normalizeModule("NFD");
++export const NFKC = normalizeModule("NFKC");
++export const NFKD = normalizeModule("NFKD");
++export const normalize = lazyModule({
++    root: () => "NFC",
+     NFC,
+     NFD,
+     NFKC,
+@@ -325,11 +311,11 @@ export const normalize = Scope.module({
+ }, {
+     name: "string.normalize"
+ });
+-const numericRoot = regexStringNode(numericStringMatcher, "a well-formed numeric string");
+-export const stringNumeric = Scope.module({
++const numericRoot = once(() => regexStringNode(numericStringMatcher, "a well-formed numeric string"));
++export const stringNumeric = lazyModule({
+     root: numericRoot,
+-    parse: rootSchema({
+-        in: numericRoot,
++    parse: () => rootSchema({
++        in: numericRoot(),
+         morphs: (s) => Number.parseFloat(s),
+         declaredOut: intrinsic.number
+     })
+@@ -337,7 +323,7 @@ export const stringNumeric = Scope.module({
+     name: "string.numeric"
+ });
+ const regexPatternDescription = "a regex pattern";
+-const regex = rootSchema({
++const regex = () => rootSchema({
+     domain: "string",
+     predicate: {
+         meta: regexPatternDescription,
+@@ -358,33 +344,33 @@ const regex = rootSchema({
+     meta: { format: "regex" }
+ });
+ const semverMatcher = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-((?:0|[1-9]\d*|\d*[A-Za-z-][\dA-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][\dA-Za-z-]*))*))?(?:\+([\dA-Za-z-]+(?:\.[\dA-Za-z-]+)*))?$/;
+-const semver = regexStringNode(semverMatcher, "a semantic version (see https://semver.org/)");
+-const preformattedTrim = regexStringNode(
++const semver = () => regexStringNode(semverMatcher, "a semantic version (see https://semver.org/)");
++const preformattedTrim = once(() => regexStringNode(
+ // no leading or trailing whitespace
+-/^\S.*\S$|^\S?$/, "trimmed");
+-const trim = Scope.module({
+-    root: rootSchema({
++/^\S.*\S$|^\S?$/, "trimmed"));
++const trim = lazyModule({
++    root: () => rootSchema({
+         in: "string",
+         morphs: (s) => s.trim(),
+-        declaredOut: preformattedTrim
++        declaredOut: preformattedTrim()
+     }),
+     preformatted: preformattedTrim
+ }, {
+     name: "string.trim"
+ });
+-const preformattedUpper = regexStringNode(/^[A-Z]*$/, "only uppercase letters");
+-const upper = Scope.module({
+-    root: rootSchema({
++const preformattedUpper = once(() => regexStringNode(/^[A-Z]*$/, "only uppercase letters"));
++const upper = lazyModule({
++    root: () => rootSchema({
+         in: "string",
+         morphs: (s) => s.toUpperCase(),
+-        declaredOut: preformattedUpper
++        declaredOut: preformattedUpper()
+     }),
+     preformatted: preformattedUpper
+ }, {
+     name: "string.upper"
+ });
+ const isParsableUrl = (s) => URL.canParse(s);
+-const urlRoot = rootSchema({
++const urlRoot = once(() => rootSchema({
+     domain: "string",
+     predicate: {
+         meta: "a URL string",
+@@ -393,11 +379,11 @@ const urlRoot = rootSchema({
+     // URL.canParse allows a subset of the RFC-3986 URI spec
+     // since there is no other serializable validation, best include a format
+     meta: { format: "uri" }
+-});
+-export const url = Scope.module({
++}));
++export const url = lazyModule({
+     root: urlRoot,
+-    parse: rootSchema({
+-        declaredIn: urlRoot,
++    parse: () => rootSchema({
++        declaredIn: urlRoot(),
+         in: "string",
+         morphs: (s, ctx) => {
+             try {
+@@ -413,38 +399,38 @@ export const url = Scope.module({
+     name: "string.url"
+ });
+ // based on https://github.com/validatorjs/validator.js/blob/master/src/lib/isUUID.js
+-export const uuid = Scope.module({
++export const uuid = lazyModule({
+     // the meta tuple expression ensures the error message does not delegate
+     // to the individual branches, which are too detailed
+-    root: [
++    root: () => [
+         "versioned | nil | max",
+         "@",
+         { description: "a UUID", format: "uuid" }
+     ],
+-    "#nil": "'00000000-0000-0000-0000-000000000000'",
+-    "#max": "'ffffffff-ffff-ffff-ffff-ffffffffffff'",
+-    "#versioned": /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i,
+-    v1: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-1[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv1"),
+-    v2: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-2[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv2"),
+-    v3: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-3[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv3"),
+-    v4: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv4"),
+-    v5: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-5[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv5"),
+-    v6: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-6[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv6"),
+-    v7: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv7"),
+-    v8: regexStringNode(/^[\da-f]{8}-[\da-f]{4}-8[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv8")
++    "#nil": () => "'00000000-0000-0000-0000-000000000000'",
++    "#max": () => "'ffffffff-ffff-ffff-ffff-ffffffffffff'",
++    "#versioned": () => /^[\da-f]{8}-[\da-f]{4}-[1-8][\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i,
++    v1: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-1[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv1"),
++    v2: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-2[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv2"),
++    v3: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-3[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv3"),
++    v4: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-4[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv4"),
++    v5: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-5[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv5"),
++    v6: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-6[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv6"),
++    v7: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-7[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv7"),
++    v8: () => regexStringNode(/^[\da-f]{8}-[\da-f]{4}-8[\da-f]{3}-[89ab][\da-f]{3}-[\da-f]{12}$/i, "a UUIDv8")
+ }, {
+     name: "string.uuid"
+ });
+-export const string = Scope.module({
+-    root: intrinsic.string,
+-    alpha: regexStringNode(/^[A-Za-z]*$/, "only letters"),
+-    alphanumeric: regexStringNode(/^[\dA-Za-z]*$/, "only letters and digits 0-9"),
++export const string = lazyModule({
++    root: () => intrinsic.string,
++    alpha: () => regexStringNode(/^[A-Za-z]*$/, "only letters"),
++    alphanumeric: () => regexStringNode(/^[\dA-Za-z]*$/, "only letters and digits 0-9"),
+     hex,
+     base64,
+     capitalize,
+-    creditCard,
++    creditCard: () => creditCard,
+     date: stringDate,
+-    digits: regexStringNode(/^\d*$/, "only digits 0-9"),
++    digits: () => regexStringNode(/^\d*$/, "only digits 0-9"),
+     email,
+     integer: stringInteger,
+     ip,
+diff --git a/out/keywords/ts.js b/out/keywords/ts.js
+index 3d984b18d3d339f988664c204419e13ce8b828fa..e61aa6f4a2377e5555fcd47808b84d4484b1e145 100644
+--- a/out/keywords/ts.js
++++ b/out/keywords/ts.js
+@@ -1,7 +1,13 @@
+ import { genericNode, intrinsic, node } from "@ark/schema";
+ import { Hkt } from "@ark/util";
+-import { Scope } from "../scope.js";
+-export const arkTsKeywords = Scope.module({
++import { lazyModule, once } from "../scope.js";
++/**
++ * Raw alias definitions for the TS keywords. `keywords.js` spreads these
++ * straight into the `ark` scope, which preparses each entry into a deferred
++ * parse context rather than a Node — so nothing is materialised until the
++ * keyword is actually referenced.
++ */
++export const arkTsKeywordDefs = {
+     bigint: intrinsic.bigint,
+     boolean: intrinsic.boolean,
+     false: intrinsic.false,
+@@ -14,16 +20,17 @@ export const arkTsKeywords = Scope.module({
+     true: intrinsic.true,
+     unknown: intrinsic.unknown,
+     undefined: intrinsic.undefined
+-});
+-export const unknown = Scope.module({
+-    root: intrinsic.unknown,
+-    any: intrinsic.unknown
++};
++export const arkTsKeywords = lazyModule(arkTsKeywordDefs);
++export const unknown = lazyModule({
++    root: () => intrinsic.unknown,
++    any: () => intrinsic.unknown
+ }, {
+     name: "unknown"
+ });
+-export const json = Scope.module({
+-    root: intrinsic.jsonObject,
+-    stringify: node("morph", {
++export const json = lazyModule({
++    root: () => intrinsic.jsonObject,
++    stringify: () => node("morph", {
+         in: intrinsic.jsonObject,
+         morphs: (data) => JSON.stringify(data),
+         declaredOut: intrinsic.string
+@@ -31,8 +38,8 @@ export const json = Scope.module({
+ }, {
+     name: "object.json"
+ });
+-export const object = Scope.module({
+-    root: intrinsic.object,
++export const object = lazyModule({
++    root: () => intrinsic.object,
+     json
+ }, {
+     name: "object"
+@@ -40,38 +47,38 @@ export const object = Scope.module({
+ class RecordHkt extends Hkt {
+     description = 'instantiate an object from an index signature and corresponding value type like `Record("string", "number")`';
+ }
+-const Record = genericNode(["K", intrinsic.key], "V")(args => ({
++const Record = once(() => genericNode(["K", intrinsic.key], "V")(args => ({
+     domain: "object",
+     index: {
+         signature: args.K,
+         value: args.V
+     }
+-}), RecordHkt);
++}), RecordHkt));
+ class PickHkt extends Hkt {
+     description = 'pick a set of properties from an object like `Pick(User, "name | age")`';
+ }
+-const Pick = genericNode(["T", intrinsic.object], ["K", intrinsic.key])(args => args.T.pick(args.K), PickHkt);
++const Pick = once(() => genericNode(["T", intrinsic.object], ["K", intrinsic.key])(args => args.T.pick(args.K), PickHkt));
+ class OmitHkt extends Hkt {
+     description = 'omit a set of properties from an object like `Omit(User, "age")`';
+ }
+-const Omit = genericNode(["T", intrinsic.object], ["K", intrinsic.key])(args => args.T.omit(args.K), OmitHkt);
++const Omit = once(() => genericNode(["T", intrinsic.object], ["K", intrinsic.key])(args => args.T.omit(args.K), OmitHkt));
+ class PartialHkt extends Hkt {
+     description = "make all named properties of an object optional like `Partial(User)`";
+ }
+-const Partial = genericNode(["T", intrinsic.object])(args => args.T.partial(), PartialHkt);
++const Partial = once(() => genericNode(["T", intrinsic.object])(args => args.T.partial(), PartialHkt));
+ class RequiredHkt extends Hkt {
+     description = "make all named properties of an object required like `Required(User)`";
+ }
+-const Required = genericNode(["T", intrinsic.object])(args => args.T.required(), RequiredHkt);
++const Required = once(() => genericNode(["T", intrinsic.object])(args => args.T.required(), RequiredHkt));
+ class ExcludeHkt extends Hkt {
+     description = 'exclude branches of a union like `Exclude("boolean", "true")`';
+ }
+-const Exclude = genericNode("T", "U")(args => args.T.exclude(args.U), ExcludeHkt);
++const Exclude = once(() => genericNode("T", "U")(args => args.T.exclude(args.U), ExcludeHkt));
+ class ExtractHkt extends Hkt {
+     description = 'extract branches of a union like `Extract("0 | false | 1", "number")`';
+ }
+-const Extract = genericNode("T", "U")(args => args.T.extract(args.U), ExtractHkt);
+-export const arkTsGenerics = Scope.module({
++const Extract = once(() => genericNode("T", "U")(args => args.T.extract(args.U), ExtractHkt));
++export const arkTsGenericDefs = {
+     Exclude,
+     Extract,
+     Omit,
+@@ -79,4 +86,5 @@ export const arkTsGenerics = Scope.module({
+     Pick,
+     Record,
+     Required
+-});
++};
++export const arkTsGenerics = lazyModule(arkTsGenericDefs);
+diff --git a/out/scope.js b/out/scope.js
+index 75785c401a57d42af9f06570f5c8c13f627ea011..a3b101d316f4da25b233ef7bbb7f7a4866ee58df 100644
+--- a/out/scope.js
++++ b/out/scope.js
+@@ -1,4 +1,4 @@
+-import { $ark, BaseScope, hasArkKind, parseGeneric } from "@ark/schema";
++import { $ark, BaseScope, hasArkKind, parseGeneric, RootModule } from "@ark/schema";
+ import { Scanner, enumValues, flatMorph, isArray, isThunk, throwParseError } from "@ark/util";
+ import { InternalFnParser } from "./fn.js";
+ import { parseGenericParamName } from "./generic.js";
+@@ -25,8 +25,13 @@ export class InternalScope extends BaseScope {
+                 : alias === "root" ? this.name
+                     : `${this.name}.${alias}`;
+             const config = this.resolvedConfig.keywords?.[qualifiedName];
+-            if (config)
+-                def = [def, "@", config];
++            if (config) {
++                // keyword definitions may be thunks so that lazy keyword scopes
++                // never materialise a Node until the alias is resolved; compose
++                // rather than nesting the thunk inside a meta tuple
++                const inner = def;
++                def = isThunk(inner) ? () => [inner(), "@", config] : [inner, "@", config];
++            }
+             return [alias, def];
+         }
+         if (alias[alias.length - 1] !== ">") {
+@@ -104,3 +109,84 @@ export const scope = Object.assign(InternalScope.scope, {
+     define: (def) => def
+ });
+ export const Scope = InternalScope;
++
++// Keyword scopes are the single largest fixed allocation in an arktype import:
++// every `Scope.module(...)` below eagerly parses each keyword definition into a
++// Node, materialises its RegExp/validator and JIT-compiles the whole reference
++// graph. Doing that for `string`, `number`, `Array`, `TypedArray`, `FormData`,
++// the ~90 prototype keywords and the ts keywords costs ~45MiB of resident heap
++// before a single `type(...)` call.
++//
++// `lazyModule` keeps the public shape byte-identical (a `RootModule` whose own
++// enumerable keys are exactly the exported aliases) while deferring:
++//   1. creation of the sub-Scope itself, and
++//   2. resolution of each alias
++// until the corresponding property is first read. Definitions are supplied as
++// thunks so that constructing the definition object allocates nothing either.
++const define = (target, key, get) => Object.defineProperty(target, key, { enumerable: true, configurable: true, get });
++const settle = (target, key, value) => {
++    Object.defineProperty(target, key, { enumerable: true, configurable: true, writable: false, value });
++    return value;
++};
++/** Memoize a nullary factory so shared keyword nodes are still built at most once. */
++export const once = (build) => {
++    let cached;
++    let built = false;
++    return () => {
++        if (!built) {
++            cached = build();
++            built = true;
++        }
++        return cached;
++    };
++};
++// Inlined from @ark/schema's non-exported `bootstrapAliasReferences`, which
++// `BaseScope.export()` applies to every alias it resolves.
++const bootstrapAliasReferences = (resolution) => {
++    for (const aliasNode of resolution.references.filter(node => node.hasKind("alias"))) {
++        Object.assign(aliasNode.referencesById, aliasNode.resolution.referencesById);
++        for (const ref of resolution.references)
++            if (aliasNode.id in ref.referencesById)
++                Object.assign(ref.referencesById, aliasNode.referencesById);
++    }
++    return resolution;
++};
++/** Lazy counterpart of @ark/schema's `bindModule`, which eagerly rebinds every alias. */
++export const bindLazyModule = (module, $) => {
++    const bound = new RootModule({});
++    for (const key of Object.keys(module))
++        define(bound, key, () => {
++            const value = module[key];
++            return settle(bound, key, hasArkKind(value, "module") ? bindLazyModule(value, $) : $.bindReference(value));
++        });
++    return bound;
++};
++/** Resolve and export a single alias the way `BaseScope.export()` would. */
++export const exportAlias = ($, name) => {
++    const def = $.aliases[name];
++    return hasArkKind(def, "module") ?
++        bindLazyModule(def, $)
++        : bootstrapAliasReferences($.maybeResolve(name));
++};
++/** `RootModule` over an already-constructed scope, resolving one alias per access. */
++export const lazyExports = ($) => {
++    const module = new RootModule({});
++    for (const name of $.exportedNames)
++        define(module, name, () => settle(module, name, exportAlias($, name)));
++    return module;
++};
++/**
++ * Drop-in replacement for `Scope.module(def, config)` whose scope and aliases
++ * are only built on demand. `def` values may be thunks; @ark/schema already
++ * treats a thunk alias as a deferred definition (`normalizeRootScopeValue`).
++ */
++export const lazyModule = (def, config = {}) => {
++    let $;
++    const module = new RootModule({});
++    for (const name of Object.keys(def)) {
++        if (name[0] === "#")
++            continue;
++        define(module, name, () => settle(module, name, exportAlias(($ ??= InternalScope.scope(def, config)), name)));
++    }
++    return module;
++};
