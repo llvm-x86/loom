@@ -129,3 +129,44 @@ is a candidate to **stay on Zod** (external-boundary exception) — note it in y
 - Do NOT run build/test/lint/format — the orchestrator runs gates once at the end.
 - Report: files changed, any `.strict`→`"+"`, `.refine`→`.narrow`, `.catch`→morph, and any file you
   intentionally left on Zod (with the reason).
+
+## Vendored patch: lazy keyword scopes (`patches/arktype@2.2.3.patch`)
+
+Upstream arktype builds its **entire** keyword namespace at module-evaluation time. Importing
+`arktype` — before any `type(...)` call — used to cost **~71 MiB RSS**, of which ~45 MiB was keyword
+construction: every `Scope.module(...)` in `out/keywords/*.js` parses each keyword definition into a
+Node, materialises its `RegExp`/predicate and JIT-compiles the resulting reference graph. A Node
+costs ~60 KiB, `string` alone has ~500 of them, and the `ark` scope's closing `ark.export()` forced
+all of them. Every loom process paid it.
+
+The patch makes that work demand-driven. It changes only `out/scope.js` and `out/keywords/*.js`:
+- `lazyModule(def, config)` (in `out/scope.js`) replaces `Scope.module(def, config)`. It returns a
+  real `RootModule` whose own enumerable keys are exactly the exported aliases, but each key is a
+  self-replacing getter: the sub-`Scope` and that one alias are built on first read. Definitions are
+  passed as thunks, so building the definition object allocates nothing either.
+- `keywords.js` builds the `ark` scope from raw alias **definitions** (`arkTsKeywordDefs`,
+  `arkPrototypeDefs`, …) rather than from already-exported modules, and replaces `ark.export()` with
+  `lazyExports(ark)`. `BaseScope` only preparses a non-module alias into a deferred parse context, so
+  constructing `ark` allocates no Nodes.
+- Submodules (`string`, `number`, `Array`, `TypedArray`, `FormData`, `object`, `unknown`) stay real
+  `RootModule`s so `@ark/schema`'s `maybeResolveSubalias` keeps resolving `"string.url"`,
+  `"Array.liftFrom"`, `"TypedArray.Int8"`, … unchanged.
+- `InternalScope.preparseOwnAliasEntry` composes rather than nests a thunk when a
+  `configure({ keywords: … })` override applies to that alias.
+
+Result: `import "arktype"` drops from ~103 MiB to ~64 MiB RSS; a loom process saves ~10–14 MiB.
+
+### If you bump arktype
+The patch is keyed `arktype@2.2.3` and will refuse to apply to a different version. Regenerate it
+rather than hand-editing: check out the pristine `out/` tree, re-apply the same transformation, and
+diff. Two constraints learned the hard way:
+- **Nothing about the public surface may change.** The keyword modules must keep the same exported
+  names, the same own enumerable keys, and `hasArkKind(mod, "module")` must answer without forcing
+  construction. Validate by diffing `expression` / `description` / `.json` / accept-reject behaviour
+  for a broad keyword sweep against the unpatched package; the only tolerable difference is the
+  numeric suffix of internal `$ark.<kind><n>` registry ids (they are assigned in first-use order and
+  never reach the wire — `wire.ts` passes `fallback: ctx => ctx.base`, which drops unrepresentable
+  morph/predicate nodes).
+- **Bun 1.3.14 cannot apply a patch that creates a file** (`failed applying patch file: EACCES:
+  Permission denied (mkdir())`). That is why the lazy helpers live in the existing `out/scope.js`
+  instead of a new `out/keywords/lazy.js`.
