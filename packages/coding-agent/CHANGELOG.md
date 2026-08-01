@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Bounded the discovery filesystem caches in `capability/fs`: `readFile` text and `readDirEntries` listings now live in LRUs capped by `CONTENT_CACHE_MAX_ENTRIES` / `CONTENT_CACHE_MAX_CHARS` and `DIR_CACHE_MAX_ENTRIES` / `DIR_CACHE_MAX_DIRENTS` instead of unbounded `Map`s that retained every file and every cwd ancestor for the life of the process. A miss costs one re-read
+- Bounded `DiagnosticsLedger` by `DIAGNOSTICS_LEDGER_MAX_FILES` / `DIAGNOSTICS_LEDGER_MAX_IDENTITIES`; evicting a cold file re-reports its diagnostics once
+- Bounded the LSP `configCache` (`LSP_CONFIG_CACHE_MAX`) and the Biome failure-dedupe set (`BIOME_FAILURE_DEDUPE_MAX`), both previously unbounded module globals keyed by cwd
+- Gave LSP writethrough batches a `WRITETHROUGH_BATCH_MAX` ceiling and a `WRITETHROUGH_BATCH_TTL_MS` idle lifetime so a batch abandoned by a throwing edit call no longer retains its pending file texts forever. The age resets on every touch, so a live batch is never expired
+- Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
 
 - Fixed shell snapshots being written into a group/world-accessible directory when the well-known `omp-shell-snapshots` path under the system temp dir is already owned by another user: `mkdir`'s `mode` is ignored for an existing directory and the defensive `chmod` fails with `EPERM`, so the UUID filenames (and the env-var values inlined into them) were listable by any local user. The directory is now verified to be a non-symlinked directory owned by the current user at mode `0700`, falling back to a uid-qualified and then a `mkdtemp` path when it is not.
