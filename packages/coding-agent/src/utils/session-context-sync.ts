@@ -293,8 +293,61 @@ const TRUNCATION_MARKER = "[…truncated]";
 /** EPHEMERAL_REPLY_MAX_BYTES (4096) and that cap plus the trailing newline writeLedgerAtomically adds. */
 const CAP_BOUNDARY_BYTES = new Set([4096, 4097]);
 
+interface LedgerHeading {
+	heading: string;
+	index: number;
+}
+
+// The ONE heading scan every guard and surgery shares. Regex-only scans
+// (`/^#{1,2} /m`) are fence-blind: a fenced ```md sample inside a section
+// body whose code contains a `## example` line splits the section at that
+// line — hazard extents truncate mid-fence and the heading guard counts a
+// spurious section (verified live 2026-07-31: every guard passed on the
+// corrupted result). Track ```/~~~ fence state line-by-line and ignore
+// heading-looking lines inside a fence. CommonMark closing rules: same
+// fence char, run length >= the opening run, nothing else on the line.
+function scanLedgerHeadings(text: string): LedgerHeading[] {
+	const headings: LedgerHeading[] = [];
+	let fenceChar = "";
+	let fenceLen = 0;
+	let index = 0;
+	while (index <= text.length) {
+		const newline = text.indexOf("\n", index);
+		const end = newline === -1 ? text.length : newline;
+		let line = text.slice(index, end);
+		// `.` excludes \r, so the old regex scans never saw a CR; strip it to
+		// keep heading strings and offsets byte-identical under CRLF.
+		if (line.endsWith("\r")) line = line.slice(0, -1);
+		const fence = line.match(/^(`{3,}|~{3,})/);
+		if (fenceChar === "") {
+			if (fence !== null) {
+				fenceChar = fence[1][0];
+				fenceLen = fence[1].length;
+			} else if (/^#{1,2} ./.test(line)) {
+				headings.push({ heading: line, index });
+			}
+		} else if (
+			fence !== null &&
+			fence[1][0] === fenceChar &&
+			fence[1].length >= fenceLen &&
+			/^(`+|~+)\s*$/.test(line)
+		) {
+			fenceChar = "";
+			fenceLen = 0;
+		}
+		if (newline === -1) break;
+		index = newline + 1;
+	}
+	return headings;
+}
+
+/** First `## ` section heading (exactly two '#'), fence-aware; the hazards-first slot anchor. */
+function firstSectionHeading(text: string): LedgerHeading | undefined {
+	return scanLedgerHeadings(text).find(h => h.heading.startsWith("## "));
+}
+
 function ledgerHeadings(text: string): Set<string> {
-	return new Set([...text.matchAll(/^#{1,2} .+$/gm)].map(m => m[0]));
+	return new Set(scanLedgerHeadings(text).map(h => h.heading));
 }
 
 // The invariant this guard defends is "no SECTION disappears", not "no heading
@@ -330,11 +383,12 @@ function headingKeyCounts(text: string): Map<string, number> {
 // and yields a 1-char "section" (masked while the prefix alone exceeded 4096;
 // live the moment offsets are computed from the section).
 function hazardExtentOf(text: string): { start: number; end: number } | undefined {
-	const m = text.match(/^#{1,2} .*(landmine|hazard|⚠).*$/im);
-	if (!m || m.index === undefined) return undefined;
-	const bodyStart = m.index + m[0].length;
-	const next = text.slice(bodyStart).search(/^#{1,2} /m);
-	return { start: m.index, end: next === -1 ? text.length : bodyStart + next };
+	const headings = scanLedgerHeadings(text);
+	const hazardIndex = headings.findIndex(h => /^#{1,2} .*(landmine|hazard|⚠).*$/i.test(h.heading));
+	if (hazardIndex === -1) return undefined;
+	const hazard = headings[hazardIndex];
+	const next = headings[hazardIndex + 1];
+	return { start: hazard.index, end: next === undefined ? text.length : next.index };
 }
 
 const hazardBodyOf = (section: string): string => section.replace(/^[^\n]*\n?/, "");
@@ -447,9 +501,9 @@ export function validateLedgerCandidate(previous: string, candidate: string): st
 	//    be the FIRST `##` section in the file. Position is the invariant; bytes
 	//    are now only a warning (emitted by the caller, who has the logger).
 	const extent = hazardExtentOf(candidate);
-	const firstSectionHeading = candidate.match(/^## .+$/m);
-	if (extent !== undefined && firstSectionHeading?.index !== undefined && extent.start > firstSectionHeading.index) {
-		return `hazard section is not the first '##' section (hazards-first is positional; first section is ${JSON.stringify(firstSectionHeading[0])})`;
+	const firstSection = firstSectionHeading(candidate);
+	if (extent !== undefined && firstSection !== undefined && extent.start > firstSection.index) {
+		return `hazard section is not the first '##' section (hazards-first is positional; first section is ${JSON.stringify(firstSection.heading)})`;
 	}
 	// 5. hazard shrinkage — hazards are NEVER compactable (operator directive;
 	//    a deliberate condensation is an owner's edit, not the sync writer's).
@@ -478,8 +532,8 @@ export function validateLedgerCandidate(previous: string, candidate: string): st
 function sectionExtentAt(text: string, headingIndex: number): { start: number; end: number } {
 	const headingEnd = text.indexOf("\n", headingIndex);
 	const bodyStart = headingEnd === -1 ? text.length : headingEnd + 1;
-	const next = text.slice(bodyStart).search(/^#{1,2} /m);
-	return { start: headingIndex, end: next === -1 ? text.length : bodyStart + next };
+	const next = scanLedgerHeadings(text).find(h => h.index >= bodyStart);
+	return { start: headingIndex, end: next === undefined ? text.length : next.index };
 }
 
 /** Insert `section` (pre-trimmed) immediately before the first `##` heading —
@@ -488,8 +542,8 @@ function sectionExtentAt(text: string, headingIndex: number): { start: number; e
  * extent (live defect: three ledgers refused repair on the byte-identity
  * assert). Title and preamble stay put; hazards become the first `##`. */
 function insertAfterTitleBlock(text: string, section: string): string {
-	const first = text.match(/^## .+$/m);
-	if (first?.index === undefined) {
+	const first = firstSectionHeading(text);
+	if (first === undefined) {
 		const trimmed = text.replace(/\s+$/, "");
 		return trimmed === "" ? `${section}\n` : `${trimmed}\n\n${section}\n`;
 	}
@@ -506,8 +560,8 @@ function insertAfterTitleBlock(text: string, section: string): string {
 function moveHazardsFirst(text: string): string {
 	const extent = hazardExtentOf(text);
 	if (extent === undefined) return text;
-	const firstSection = text.match(/^## .+$/m);
-	if (firstSection?.index === undefined || extent.start <= firstSection.index) return text;
+	const firstSection = firstSectionHeading(text);
+	if (firstSection === undefined || extent.start <= firstSection.index) return text;
 	const section = text.slice(extent.start, extent.end).replace(/\s+$/, "");
 	const rest = text.slice(0, extent.start) + text.slice(extent.end);
 	return insertAfterTitleBlock(rest, section);
@@ -519,10 +573,7 @@ function moveHazardsFirst(text: string): string {
 // the nearest preceding section that survived into the candidate — the slot it
 // came from. Sections are cut and spliced, never rewritten.
 function restoreDroppedSections(previous: string, candidate: string): string {
-	const prevHeadings = [...previous.matchAll(/^#{1,2} .+$/gm)].map(m => ({
-		heading: m[0],
-		index: m.index ?? 0,
-	}));
+	const prevHeadings = scanLedgerHeadings(previous);
 	const nextCounts = headingKeyCounts(candidate);
 	const seen = new Map<string, number>();
 	const droppedIndexes: number[] = [];
@@ -548,9 +599,9 @@ function restoreDroppedSections(previous: string, candidate: string): string {
 		}
 		let insertAt: number | undefined;
 		if (anchorKey !== "") {
-			for (const m of result.matchAll(/^#{1,2} .+$/gm)) {
-				if (m.index !== undefined && headingKey(m[0]) === anchorKey) {
-					insertAt = sectionExtentAt(result, m.index).end;
+			for (const { heading, index: headingIndex } of scanLedgerHeadings(result)) {
+				if (headingKey(heading) === anchorKey) {
+					insertAt = sectionExtentAt(result, headingIndex).end;
 				}
 			}
 		}
@@ -598,6 +649,23 @@ export interface LedgerRepairResult {
 	reason?: string;
 }
 
+/** Non-blank lines, sorted — identity under pure reordering, intolerance to
+ * any added/dropped/edited content line. */
+function nonBlankLineMultiset(text: string): string[] {
+	return text
+		.split("\n")
+		.filter(line => line.trim() !== "")
+		.sort();
+}
+
+/** True when `after` is `before` up to reordering and blank-line count
+ * changes only (the separator re-normalization a section move performs). */
+function sameContentLines(before: string, after: string): boolean {
+	const a = nonBlankLineMultiset(before);
+	const b = nonBlankLineMultiset(after);
+	return a.length === b.length && a.every((line, i) => line === b[i]);
+}
+
 /**
  * LLM-free on-disk self-repair (`loom sync-context --repair`). Reads the
  * ledger, runs the same remediation the sync writer runs in-memory
@@ -605,13 +673,23 @@ export interface LedgerRepairResult {
  * repairable this way — nothing can have "dropped" relative to itself), then
  * validates the result. Refuse on ambiguity: a ledger with NO hazard section
  * at all is an owner's decision, not the repairer's, and the hazard bytes
- * must survive the move exactly (cut-and-paste, never a rewrite).
+ * must survive the move exactly (cut-and-paste, never a rewrite). Two
+ * defense-in-depth asserts sit behind validation — the remediated document
+ * must be the original up to reordering and blank separators (sorted
+ * non-blank line multiset), and the file is re-read immediately before the
+ * atomic write so a concurrent sync write is never clobbered (returns
+ * "ledger changed during repair; rerun"). `deps.remediate` is a test seam
+ * for doctoring the in-memory remediation; production callers omit it.
  */
-export async function repairLedgerOnDisk(ledgerPath: string, opts: { dryRun: boolean }): Promise<LedgerRepairResult> {
+export async function repairLedgerOnDisk(
+	ledgerPath: string,
+	opts: { dryRun: boolean },
+	deps: { remediate?: (previous: string, candidate: string) => string } = {},
+): Promise<LedgerRepairResult> {
 	const content = await fs.readFile(ledgerPath, "utf8");
 	const extentBefore = hazardExtentOf(content);
 	if (extentBefore === undefined) return { repaired: false, reason: "no hazards section" };
-	const remediated = remediateCandidate(content, content);
+	const remediated = (deps.remediate ?? remediateCandidate)(content, content);
 	const refuseReason = validateLedgerCandidate(content, remediated);
 	if (refuseReason !== undefined) return { repaired: false, reason: refuseReason };
 	// Byte-identity assert: trailing blank separators at the splice joint are
@@ -624,8 +702,22 @@ export async function repairLedgerOnDisk(ledgerPath: string, opts: { dryRun: boo
 	if (hazardsAfter !== hazardsBefore) {
 		return { repaired: false, reason: "hazard content changed during move; refusing" };
 	}
+	// Whole-document line-multiset assert (defense-in-depth behind the
+	// hazard-byte assert): remediation is cut-and-paste, so the result must be
+	// the original up to reordering and blank separators. Anything else — a
+	// fence-split section, an edited line, a duplicated splice — is a bug in
+	// the surgery, not a repair, and must never reach disk.
+	if (!sameContentLines(content, remediated)) {
+		return { repaired: false, reason: "remediation changed ledger content lines; refusing" };
+	}
 	if (remediated === content) return { repaired: false, reason: "valid; nothing to repair" };
 	if (opts.dryRun) return { repaired: false, reason: "dry-run: would repair" };
+	// TOCTOU guard: a syncSingleRepo write landing between our read and the
+	// atomic rename would be silently overwritten with a reorder of stale
+	// bytes. Re-read and bail (the caller reruns on its next pass) rather than
+	// clobber a fresher ledger.
+	const reread = await fs.readFile(ledgerPath, "utf8");
+	if (reread !== content) return { repaired: false, reason: "ledger changed during repair; rerun" };
 	await writeLedgerAtomically(ledgerPath, remediated);
 	return { repaired: true };
 }

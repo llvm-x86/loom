@@ -19,10 +19,19 @@
  * 8. The sync writer retries a transient (marker) refusal exactly ONCE:
  *    succeeds when the retry is clean, refuses after the second bad reply,
  *    and never retries a third time.
+ * 9. Heading scans are fence-aware: a fenced ```md sample containing a `## `
+ *    line inside a section body neither splits the section nor counts as a
+ *    section — the hazard extent moves intact and the guard agrees.
+ * 10. `repairLedgerOnDisk`'s line-multiset assert refuses a remediation that
+ *    adds/drops/edits any non-blank content line (defense-in-depth behind
+ *    the hazard-byte assert).
+ * 11. `repairLedgerOnDisk` re-reads before writing and returns the named
+ *    TOCTOU reason when the file changed under it.
  */
 
-import { afterEach, beforeEach, describe, expect, it } from "bun:test";
+import { afterEach, beforeEach, describe, expect, it, spyOn } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import * as fsPromises from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -134,13 +143,48 @@ describe("ledger self-repair", () => {
 			expect(result).toContain("## Landmines\n- ⚠️ a standing constraint.\n\n## Current state");
 		});
 
-	it("never touches a cut-suspect candidate — surgery would mask the guard's signature", () => {
+		it("never touches a cut-suspect candidate — surgery would mask the guard's signature", () => {
 			// A spliced section landing AFTER a trailing truncation marker would move
 			// the marker off the tail and let a cut ledger pass the guard.
 			const previous = `${TITLE}\n\n## Landmines\n- ⚠️ a standing constraint.\n\n## Current state\nIntact.\n`;
 			const cut = `${TITLE}\n\n## Landmines\n- ⚠️ a standing cons\n[…truncated]`;
 
 			expect(remediateCandidate(previous, cut)).toBe(cut);
+		});
+
+		it("moves a hazard section whose body fences a `## ` sample intact — fence preserved, no spurious section", () => {
+			// Fence-blind heading scans split the hazard extent at the `## ` line
+			// INSIDE the fence: the moved section lost its tail, the fence broke,
+			// and a spurious "## example heading inside a fence" section appeared —
+			// with every guard green (verified live by the reviewer).
+			const fencedSample = "```md\n## example heading inside a fence\n- not a section\n```";
+			const hazardSection = `## ⚠️ Landmines\n- ⚠️ never do X.\n\n${fencedSample}\n- ⚠️ tail stays with the section.`;
+			const misplaced = `${TITLE}\n\n## Current state\nBusy.\n\n${hazardSection}\n`;
+
+			const result = remediateCandidate(misplaced, misplaced);
+
+			// The whole extent — fenced sample and tail bullet included — moved as
+			// one byte-identical block to the first '##' slot.
+			expect(result).toContain(`${hazardSection}\n\n## Current state`);
+			expect(result.match(/^## .+$/m)?.[0]).toBe("## ⚠️ Landmines");
+			expect(result).toContain(fencedSample);
+			// The fenced `## ` line is content, not a section: the guard sees the
+			// same headings before and after, so the move validates clean.
+			expect(validateLedgerCandidate(misplaced, result)).toBeUndefined();
+		});
+
+		it("treats a fence in ANOTHER section as body — a dropped section restores after the full fenced extent", () => {
+			const fenced = "```md\n## fenced sample, not a section\n```";
+			const previous = `${TITLE}\n\n## Landmines\n- ⚠️ a.\n\n## Current state\n${fenced}\n\n## Recent changes\n- entry.\n`;
+			const candidate = `${TITLE}\n\n## Landmines\n- ⚠️ a.\n\n## Current state\n${fenced}\n`;
+
+			const result = remediateCandidate(previous, candidate);
+
+			// Current state's extent runs THROUGH the fence (the fenced `## ` is
+			// not the section boundary), so the restore lands after the whole
+			// fenced block — not wedged between the fence and its closing line.
+			expect(result).toContain(`## Current state\n${fenced}\n\n## Recent changes\n- entry.`);
+			expect(validateLedgerCandidate(previous, result)).toBeUndefined();
 		});
 	});
 
@@ -236,6 +280,67 @@ describe("ledger self-repair", () => {
 
 			expect(result).toEqual({ repaired: false, reason: "carries the truncation marker" });
 			expect(readFileSync(ledgerPath, "utf8")).toBe(content);
+		});
+
+		it("repairs a hazards-not-first ledger whose hazard body fences a `## ` sample, intact", async () => {
+			const fencedSample = "```md\n## example heading inside a fence\n- not a section\n```";
+			const hazardSection = `## ⚠️ Landmines\n- ⚠️ never do X.\n\n${fencedSample}\n- ⚠️ tail stays with the section.`;
+			const content = `${TITLE}\n\n## Current state\nBusy.\n\n${hazardSection}\n`;
+			const ledgerPath = join(dir, "owner-repo.md");
+			writeFileSync(ledgerPath, content, "utf8");
+
+			const result = await repairLedgerOnDisk(ledgerPath, { dryRun: false });
+
+			expect(result).toEqual({ repaired: true });
+			const written = readFileSync(ledgerPath, "utf8");
+			expect(written.match(/^## .+$/m)?.[0]).toBe("## ⚠️ Landmines");
+			expect(written).toContain(`${hazardSection}\n\n## Current state`);
+			// No spurious section materialized: the fenced `## ` occurs exactly
+			// once, still inside its fence, and the repaired ledger is stable.
+			expect(written.split("## example heading inside a fence").length - 1).toBe(1);
+			expect(validateLedgerCandidate(content, written)).toBeUndefined();
+			expect(await repairLedgerOnDisk(ledgerPath, { dryRun: false })).toEqual({
+				repaired: false,
+				reason: "valid; nothing to repair",
+			});
+		});
+
+		it("refuses a remediation that alters content lines (line-multiset assert)", async () => {
+			const ledgerPath = join(dir, "owner-repo.md");
+			writeFileSync(ledgerPath, misplaced, "utf8");
+			// Doctor the in-memory remediation via the test seam: drop a non-hazard
+			// body line. Heading counts, hazards-first and hazard bytes all still
+			// pass — ONLY the whole-document multiset catches it.
+			const doctored = remediateCandidate(misplaced, misplaced).replace("Busy.\n", "");
+
+			const result = await repairLedgerOnDisk(ledgerPath, { dryRun: false }, { remediate: () => doctored });
+
+			expect(result).toEqual({ repaired: false, reason: "remediation changed ledger content lines; refusing" });
+			expect(readFileSync(ledgerPath, "utf8")).toBe(misplaced);
+		});
+
+		it("returns the named TOCTOU reason when the ledger changes between read and write", async () => {
+			const ledgerPath = join(dir, "owner-repo.md");
+			writeFileSync(ledgerPath, misplaced, "utf8");
+			// Simulate a concurrent syncSingleRepo write: the second read (the
+			// pre-write TOCTOU re-read) observes bytes that differ from the first.
+			const realReadFile = fsPromises.readFile;
+			let reads = 0;
+			const spy = spyOn(fsPromises, "readFile").mockImplementation(((path: unknown, options: unknown) => {
+				reads++;
+				const result = realReadFile(path as string, options as never);
+				if (String(path) === ledgerPath && reads === 2) {
+					return result.then(content => `${content}- concurrent sync line.\n`) as never;
+				}
+				return result as never;
+			}) as typeof fsPromises.readFile);
+			try {
+				const result = await repairLedgerOnDisk(ledgerPath, { dryRun: false });
+				expect(result).toEqual({ repaired: false, reason: "ledger changed during repair; rerun" });
+				expect(readFileSync(ledgerPath, "utf8")).toBe(misplaced);
+			} finally {
+				spy.mockRestore();
+			}
 		});
 	});
 
