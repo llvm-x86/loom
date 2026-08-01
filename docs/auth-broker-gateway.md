@@ -2,7 +2,7 @@
 
 The auth broker and auth gateway are two cooperating HTTP services that move OAuth refresh tokens and provider access tokens off developer laptops and into a single broker host.
 
-- **`omp auth-broker serve`** holds the canonical SQLite credential vault, performs OAuth refreshes, and exposes a small REST API (`/v1/snapshot`, `/v1/snapshot/stream`, `/v1/credential/:id/refresh`, `/v1/credential/:id/disable`, `/v1/credential`, `/v1/usage`, `/v1/healthz`).
+- **`loom auth-broker serve`** holds the canonical SQLite credential vault, performs OAuth refreshes, and exposes a small REST API (`/v1/snapshot`, `/v1/snapshot/stream`, `/v1/credential/:id/refresh`, `/v1/credential/:id/disable`, `/v1/credential`, `/v1/usage`, `/v1/healthz`).
 - **`omp auth-gateway serve`** is a forward-proxy. It accepts OpenAI Chat Completions, Anthropic Messages, OpenAI Responses, and pi-native stream requests, resolves the broker-backed credential, and dispatches through `pi-ai` provider logic. Clients (containerised omp, llm-git, the macOS usage widget, …) never see the access token.
 
 Transport security between operator, broker, and gateway is delegated to the operator (Tailscale / Wireguard / reverse proxy + TLS). Every endpoint except `/v1/healthz` (broker) and `/healthz` (gateway) requires a bearer token.
@@ -16,7 +16,7 @@ Source: `packages/ai/src/auth-broker/`, `packages/ai/src/auth-gateway/`, `packag
                 │ broker host                                                │
                 │                                                            │
   developer ──▶ │  ┌──────────────────────────┐    ┌────────────────────┐    │
-  laptop /      │  │  omp auth-broker serve   │◀──▶│  SQLite agent.db    │    │
+  laptop /      │  │  loom auth-broker serve   │◀──▶│  SQLite agent.db    │    │
   CI / robomp   │  │  - holds refresh tokens  │    │  (canonical writer)│    │
                 │  │  - background refresher  │    └────────────────────┘    │
                 │  │  /v1/{snapshot,refresh,…}│                              │
@@ -39,26 +39,26 @@ Source: `packages/ai/src/auth-broker/`, `packages/ai/src/auth-gateway/`, `packag
                   api.anthropic.com / api.openai.com / …
 ```
 
-The broker is the only writer of OAuth refresh tokens. Clients (including the gateway itself) load a redacted snapshot in which every `refresh` field has been replaced with `REMOTE_REFRESH_SENTINEL`; when an access token expires the client calls `POST /v1/credential/:id/refresh` and the broker performs the refresh server-side. `RemoteAuthCredentialStore` rejects local replace/upsert/delete-by-provider mutations, with errors pointing at `omp auth-broker login` / `omp auth-broker logout`.
+The broker is the only writer of OAuth refresh tokens. Clients (including the gateway itself) load a redacted snapshot in which every `refresh` field has been replaced with `REMOTE_REFRESH_SENTINEL`; when an access token expires the client calls `POST /v1/credential/:id/refresh` and the broker performs the refresh server-side. `RemoteAuthCredentialStore` rejects local replace/upsert/delete-by-provider mutations, with errors pointing at `loom auth-broker login` / `loom auth-broker logout`.
 
 ## auth-broker
 
 ### CLI
 
 ```
-omp auth-broker serve     [--bind=host:port]                    # boot the broker
-omp auth-broker token     [--regenerate] [--json]               # print or rotate the bearer token
-omp auth-broker login     [<provider>] [--via=user@host] [--dry-run]
-omp auth-broker logout    [<provider>]
-omp auth-broker list      [--json]
-omp auth-broker import    <file|dir> [--provider=<id>] [--include-disabled] [--dry-run] [--json]
-omp auth-broker migrate   --from-local [--include-oauth] [--include-env] [--dry-run] [--json]
-omp auth-broker status    [--json]
+loom auth-broker serve     [--bind=host:port]                    # boot the broker
+loom auth-broker token     [--regenerate] [--json]               # print or rotate the bearer token
+loom auth-broker login     [<provider>] [--via=user@host] [--dry-run]
+loom auth-broker logout    [<provider>]
+loom auth-broker list      [--json]
+loom auth-broker import    <file|dir> [--provider=<id>] [--include-disabled] [--dry-run] [--json]
+loom auth-broker migrate   --from-local [--include-oauth] [--include-env] [--dry-run] [--json]
+loom auth-broker status    [--json]
 ```
 
 - `serve` opens the local SQLite store at `getAgentDbPath()` and binds an HTTP listener (default `127.0.0.1:8765`). On startup a token is ensured at `<config-dir>/auth-broker.token` (mode `0600`, `0700` parent dir). The background refresher refreshes any OAuth credential whose `expires - Date.now() < refreshSkewMs` (default 5 min) every `refreshIntervalMs` (default 60 s).
 - `token` prints the cached bearer or generates a new one. `--regenerate` rotates it.
-- `login [<provider>]` runs the per-provider OAuth flow locally — when no provider is supplied, it falls back to an interactive numbered picker. With `--via=user@host` it shells out `ssh -L <callback-port>:127.0.0.1:<callback-port> user@host omp auth-broker login <provider>` so the OAuth callback hits the local browser but the credential is written on the broker host (`--via` requires `<provider>`). Built-in callback ports: `anthropic:54545`, `openai-codex:1455`, `google-gemini-cli:8085`, `google-antigravity:51121`, `gitlab-duo:8080`. The OAuth dance is driven in-process via `AuthStorage.login()` — there is no longer a `pi-ai` bin to spawn.
+- `login [<provider>]` runs the per-provider OAuth flow locally — when no provider is supplied, it falls back to an interactive numbered picker. With `--via=user@host` it shells out `ssh -L <callback-port>:127.0.0.1:<callback-port> user@host loom auth-broker login <provider>` so the OAuth callback hits the local browser but the credential is written on the broker host (`--via` requires `<provider>`). Built-in callback ports: `anthropic:54545`, `openai-codex:1455`, `google-gemini-cli:8085`, `google-antigravity:51121`, `gitlab-duo:8080`. The OAuth dance is driven in-process via `AuthStorage.login()` — there is no longer a `pi-ai` bin to spawn.
 - `logout [<provider>]` deletes every credential row for `<provider>`. With no argument it shows an interactive numbered picker of currently-stored providers.
 - `list` enumerates every registered OAuth provider id/name (the union of built-ins + `registerOAuthProvider` custom providers). `--json` emits a machine-readable array.
 - `import <file|dir>` imports CLIProxyAPI-style JSON credentials into the local SQLite store. Maps `type` field → omp provider (`claude → anthropic`, `codex → openai-codex`, `gemini → google-gemini-cli`, `antigravity → google-antigravity`, `gemini-cli → google-gemini-cli`).
@@ -180,7 +180,7 @@ The gateway has no dedicated env vars — it inherits `OMP_AUTH_BROKER_*` becaus
 
 | Path                              | Owner                                                | Mode                          |
 | --------------------------------- | ---------------------------------------------------- | ----------------------------- |
-| `<config-dir>/auth-broker.token`  | `omp auth-broker serve` (created at first start)     | `0600` in a `0700` parent dir |
+| `<config-dir>/auth-broker.token`  | `loom auth-broker serve` (created at first start)     | `0600` in a `0700` parent dir |
 | `<config-dir>/auth-gateway.token` | `omp auth-gateway serve` (skipped under `--no-auth`) | `0600` in a `0700` parent dir |
 
 `<config-dir>` resolves to `~/.omp/` (respecting `PI_CONFIG_DIR`).

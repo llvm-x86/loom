@@ -24,7 +24,7 @@ import {
 	readInstalledPluginsRegistry,
 	writeInstalledPluginsRegistry,
 } from "@oh-my-pi/pi-coding-agent/extensibility/plugins/marketplace";
-import { removeSyncWithRetries } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, getPluginsDir, removeSyncWithRetries } from "@oh-my-pi/pi-utils";
 
 // ── Fixtures ──────────────────────────────────────────────────────────────────
 
@@ -77,17 +77,18 @@ describe("resolveActiveProjectRegistryPath", () => {
 		expect(result).toBe(path.join(tmpDir, "sub", ".omp", "plugins", "installed_plugins.json"));
 	});
 
-	it("falls back to .git root when no .omp/ exists", async () => {
+	it("falls back to .git root when no project config dir exists", async () => {
 		// Layout: tmpDir/.git/   +   tmpDir/sub/  (cwd)
-		// No .omp/ anywhere → second pass finds .git/ at tmpDir.
-		// Returned path is relative to the .git root, not .git itself.
+		// No .loom/ or .omp/ anywhere → second pass finds .git/ at tmpDir.
+		// Nothing exists to read, so the anchor names the canonical write target
+		// (.loom), not the legacy fallback name.
 		fs.mkdirSync(path.join(tmpDir, ".git"), { recursive: true });
 		const cwd = path.join(tmpDir, "sub");
 		fs.mkdirSync(cwd, { recursive: true });
 
 		const result = await resolveActiveProjectRegistryPath(cwd);
 
-		expect(result).toBe(path.join(tmpDir, ".omp", "plugins", "installed_plugins.json"));
+		expect(result).toBe(path.join(tmpDir, CONFIG_DIR_NAME, "plugins", "installed_plugins.json"));
 	});
 
 	it("returns null when neither .omp/ nor .git/ found anywhere in the tree", async () => {
@@ -147,7 +148,7 @@ describe("listClaudePluginRoots — project shadows user", () => {
 		// Create .omp/ in project so resolveActiveProjectRegistryPath finds it.
 		fs.mkdirSync(path.join(tmpProject, ".omp", "plugins"), { recursive: true });
 
-		userRegPath = path.join(tmpHome, ".omp", "plugins", "installed_plugins.json");
+		userRegPath = path.join(getPluginsDir(tmpHome), "installed_plugins.json");
 		fs.mkdirSync(path.dirname(userRegPath), { recursive: true });
 
 		projectRegPath = path.join(tmpProject, ".omp", "plugins", "installed_plugins.json");

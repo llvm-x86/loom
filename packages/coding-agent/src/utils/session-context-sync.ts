@@ -63,6 +63,12 @@ export interface SessionContextSyncSession {
 	runEphemeralTurn(args: {
 		promptText: string;
 		signal?: AbortSignal;
+		/**
+		 * Opt out of {@link dedupeEphemeralReply}'s 4096-byte display cap. REQUIRED here:
+		 * this reply is written to a file, and the cap silently truncates the ledger and
+		 * appends a `[…truncated]` marker, yielding a 4097-byte file cut mid-word.
+		 */
+		dedupeReply?: boolean;
 	}): Promise<{ replyText: string; assistantMessage?: EphemeralTurnAssistantMessage }>;
 }
 
@@ -103,12 +109,14 @@ const STRONG_TOOLS: Record<string, true> = {
 
 const LEDGER_FORMAT_CONTRACT = `Ledger format contract (rewrite the WHOLE file in place, do not append blindly):
 - Top heading: "# <owner/repo> — status ledger"
+- "## Landmines" — known gotchas, footguns, or things a future session must not repeat.
+  REQUIRED as the FIRST "##" section, immediately after the top heading. Hazards survive a
+  truncation by POSITION alone — never place any other "##" section above Landmines.
 - "## Current state" — a short prose/bullet summary of where the repo/work stands.
 - "## Recent changes (newest first, keep ~10)" — bullet list, each line
   "- YYYY-MM-DD <session>: what happened + a ref (file, PR, issue, commit)".
   Keep roughly the 10 most recent entries; drop the oldest when adding a new one.
 - "## In flight" — work that is currently in progress, not yet landed.
-- "## Landmines" — known gotchas, footguns, or things a future session must not repeat.
 Keep the whole file to at most ${LEDGER_MAX_LINES} lines. Prune stale/resolved entries instead of
 letting the file grow. Merge new information into the existing sections — do not just append a
 new block at the end — and keep entries that clearly came from other sessions.`;
@@ -280,6 +288,299 @@ function sanitizeLedgerOutput(raw: string, slug: string): string | undefined {
 	return undefined;
 }
 
+/** Literal appended by `dedupeEphemeralReply` when it caps a reply — must match agent-session.ts. */
+const TRUNCATION_MARKER = "[…truncated]";
+/** EPHEMERAL_REPLY_MAX_BYTES (4096) and that cap plus the trailing newline writeLedgerAtomically adds. */
+const CAP_BOUNDARY_BYTES = new Set([4096, 4097]);
+
+function ledgerHeadings(text: string): Set<string> {
+	return new Set([...text.matchAll(/^#{1,2} .+$/gm)].map(m => m[0]));
+}
+
+// The invariant this guard defends is "no SECTION disappears", not "no heading
+// is ever reworded". Comparing raw heading strings conflated the two and made
+// annotated headings a trap: this repo's own hazard heading reads
+// "## Landmines (FIRST on purpose — see ovh-cloud #1201: ...)", so a sync whose
+// reply said plain "## Landmines" was scored as DROPPING the section and the
+// ledger became unwritable by the background writer — observed live 2026-07-30,
+// refusing every sync while the section was in fact present and first.
+// Key on the heading's title up to its first annotation delimiter, so a
+// reworded parenthetical still matches the section it names.
+function headingKey(heading: string): string {
+	const title = heading.replace(/^#{1,2} /, "").split(/[(—:]/, 1)[0] ?? "";
+	return title.toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+// Counts, not a set: two headings can legitimately share a key
+// ("## Landmines" + "## Landmines (infra)"), and a plain set would let one of
+// them vanish undetected. A key whose count DROPS is a real lost section.
+function headingKeyCounts(text: string): Map<string, number> {
+	const counts = new Map<string, number>();
+	for (const heading of ledgerHeadings(text)) {
+		const key = headingKey(heading);
+		if (key !== "") counts.set(key, (counts.get(key) ?? 0) + 1);
+	}
+	return counts;
+}
+
+// Section extent by OFFSET: start = the hazard heading, end = the start of the
+// NEXT heading line (definition 3 of 3 — the only boundary stable under
+// zero/one/two blank-line separators). The search MUST begin past the matched
+// heading line: searching from inside it matches the heading's own leading "#"
+// and yields a 1-char "section" (masked while the prefix alone exceeded 4096;
+// live the moment offsets are computed from the section).
+function hazardExtentOf(text: string): { start: number; end: number } | undefined {
+	const m = text.match(/^#{1,2} .*(landmine|hazard|⚠).*$/im);
+	if (!m || m.index === undefined) return undefined;
+	const bodyStart = m.index + m[0].length;
+	const next = text.slice(bodyStart).search(/^#{1,2} /m);
+	return { start: m.index, end: next === -1 ? text.length : bodyStart + next };
+}
+
+const hazardBodyOf = (section: string): string => section.replace(/^[^\n]*\n?/, "");
+const bulletsOf = (body: string): string[] => body.match(/^[-*] .*(?:\n(?![-*] |#).*)*/gm) ?? [];
+const bulletKey = (bullet: string): string =>
+	bullet
+		.replace(/\s+/g, " ")
+		.toLowerCase()
+		.replace(/[^a-z0-9 ]/g, "")
+		.trim()
+		.slice(0, 60);
+
+// Hazards are append-only, enforced BY CONSTRUCTION rather than by refusal.
+//
+// "Hazards are never compacted by the sync writer" used to be a veto: if the
+// model's rewrite had a smaller hazard section, the whole write was dropped.
+// On a hazard-heavy ledger that is a deadlock, because a model asked to
+// summarise a repo will condense a 13-bullet landmine list every single time —
+// agent-chat's own ledger refused with "hazard section shrank (5390 → 4143
+// bytes)" on a real 2026-07-30 sync, so the file could never be updated at all
+// and the operator's "automatic context in the background" simply did not
+// happen for exactly the repos that need it most.
+//
+// So do not ask the model to be trustworthy with hazards: keep the previous
+// hazard body VERBATIM (every bullet, original order) and append only those
+// bullets the model genuinely added. Nothing the model omits can be lost, new
+// hazards still land, and the shrinkage predicate below becomes an unreachable
+// safety net instead of a gate.
+function preserveHazards(previous: string, next: string): string {
+	const prevExtent = hazardExtentOf(previous);
+	const nextExtent = hazardExtentOf(next);
+	if (prevExtent === undefined || nextExtent === undefined) return next;
+	const prevBody = hazardBodyOf(previous.slice(prevExtent.start, prevExtent.end));
+	const nextSection = next.slice(nextExtent.start, nextExtent.end);
+	const prevKeys = new Set(bulletsOf(prevBody).map(bulletKey));
+	const added = bulletsOf(hazardBodyOf(nextSection)).filter(b => !prevKeys.has(bulletKey(b)));
+	const heading = nextSection.slice(0, nextSection.indexOf("\n") + 1) || `${nextSection}\n`;
+	const mergedBody = added.length === 0 ? prevBody : `${prevBody.trimEnd()}\n${added.join("\n")}\n\n`;
+	return next.slice(0, nextExtent.start) + heading + mergedBody + next.slice(nextExtent.end);
+}
+
+// The cut signatures, checked on the RAW reply before any surgery:
+// preserveHazards merges bullets (changing byte length) and remediation
+// splices whole sections after the hazard block (moving the tail) — either
+// would mask the marker-at-tail / exact-boundary signatures these predicates
+// exist to catch. Composed into validateLedgerCandidate below so the guard
+// and the surgery gate share ONE predicate set.
+function cutSignatureOf(candidate: string): string | undefined {
+	if (candidate.trimEnd().endsWith(TRUNCATION_MARKER)) {
+		return "carries the truncation marker";
+	}
+	const newBytes = Buffer.byteLength(candidate, "utf8");
+	if (CAP_BOUNDARY_BYTES.has(newBytes)) {
+		return `lands exactly at the display-cap boundary (${newBytes} bytes)`;
+	}
+	return undefined;
+}
+
+// Defense in depth, not redundancy: the call site opts out of the ephemeral
+// display cap via `dedupeReply: false`, but this reply is still model output
+// written to a FILE. Any path that reintroduces a cut (a future call site, a
+// provider-side cap, a model echoing the marker) would silently replace a
+// whole ledger with a severed stub — and the next sync would treat the stub
+// as the file. Refuse the write and keep the previous ledger; the warn is
+// the signal the cut otherwise never emits. Four predicates, each mapped to
+// an observed 07-29 failure, ALL MEASURED IN BYTES (the cap is a byte cap;
+// a 14-bullet ⚠️ section hides ~56 bytes in the markers alone — char counts
+// fail open exactly where the margin is thinnest):
+//  1. marker — the dedupeEphemeralReply signature (8 ledgers cut in one night).
+//  2. cap boundary — a marker-less prefix cut lands at exactly 4096/4097 bytes.
+//  3. heading shrinkage — a prefix cut or wholesale mangling that drops a
+//     section the current file has (landing-pages lost Landmines this way).
+//  4. hazards window — a WHOLESALE REWRITE can reorder sections without
+//     dropping any heading; if the hazard section ends past the 4096-byte
+//     window a later cut eats it with every other check green (two instances).
+//     Boundary: start of the NEXT heading line — the only boundary stable under
+//     zero/one/two blank-line separators (iss-scheduling #1372).
+// `previous` is the on-disk ledger, or "" when the file is being created — the
+// heading-drop and hazard-shrinkage predicates then vacuously pass, exactly
+// matching the old `priorLedger === undefined` fast path.
+// Returns the refusal reason, or undefined when the candidate is writable.
+export function validateLedgerCandidate(previous: string, candidate: string): string | undefined {
+	const cut = cutSignatureOf(candidate);
+	if (cut !== undefined) return cut;
+	const priorCounts = headingKeyCounts(previous);
+	const nextCounts = headingKeyCounts(candidate);
+	const dropped = [...ledgerHeadings(previous)].filter(
+		h => (nextCounts.get(headingKey(h)) ?? 0) < (priorCounts.get(headingKey(h)) ?? 0),
+	);
+	if (dropped.length > 0) {
+		return `drops ${dropped.length} existing heading(s): ${dropped.slice(0, 3).join(" | ")}`;
+	}
+	// 4. hazards POSITION, not hazards BUDGET (rewritten 2026-07-30).
+	//    Was: refuse if the hazard section ends past byte 4096. That framing
+	//    came from the era when a later 4096-byte cut could eat anything past
+	//    the window. The cut path is fixed (f1f7fd484 — the ephemeral display
+	//    cap no longer reaches ledger file writes) and predicates 1 and 2 still
+	//    catch a cut if one reappears, but as a REFUSAL the byte rule did active
+	//    harm: any ledger whose hazards legitimately grow past 4096 bytes became
+	//    permanently unwritable by the sync writer. Observed live on
+	//    Family-Fun-Group-Husbandry_App.md (hazards end at byte 7301; 54 syncs
+	//    ran, every one refused, each reporting `done` with tokens billed while
+	//    the file never changed), with Family-Fun-Group-landing-pages.md 5 bytes
+	//    from the same cliff. It also contradicted the operator directive of
+	//    record: ledgers are NOT byte-capped, and a ledger must never be
+	//    contorted to fit a margin.
+	//    What the old rule was really protecting against is a rewrite that
+	//    REORDERS hazards away from the top. So check that directly, the same
+	//    way agent-chat's own `ledger-guard check` does: the hazard heading must
+	//    be the FIRST `##` section in the file. Position is the invariant; bytes
+	//    are now only a warning (emitted by the caller, who has the logger).
+	const extent = hazardExtentOf(candidate);
+	const firstSectionHeading = candidate.match(/^## .+$/m);
+	if (extent !== undefined && firstSectionHeading?.index !== undefined && extent.start > firstSectionHeading.index) {
+		return `hazard section is not the first '##' section (hazards-first is positional; first section is ${JSON.stringify(firstSectionHeading[0])})`;
+	}
+	// 5. hazard shrinkage — hazards are NEVER compactable (operator directive;
+	//    a deliberate condensation is an owner's edit, not the sync writer's).
+	//    A semantic rewrite can drop a load-bearing clause while keeping the
+	//    heading, offset and structure all valid (observed: Husbandry_App lost
+	//    its search_path re-arm trigger with every check green). Smaller = refuse.
+	//    Measured on the section BODY, never including the heading line: the
+	//    heading can carry a long annotation ("## Landmines (FIRST on purpose
+	//    — see ovh-cloud #1201)"), and counting it meant shortening that
+	//    annotation registered as lost hazard content even when the reply ADDED
+	//    bullets — the second half of the 2026-07-30 unwritable-ledger bug.
+	if (extent !== undefined) {
+		const prevExtent = hazardExtentOf(previous);
+		if (prevExtent !== undefined) {
+			const nextBytes = Buffer.byteLength(hazardBodyOf(candidate.slice(extent.start, extent.end)), "utf8");
+			const prevBytes = Buffer.byteLength(hazardBodyOf(previous.slice(prevExtent.start, prevExtent.end)), "utf8");
+			if (nextBytes < prevBytes) {
+				return `hazard section shrank (${prevBytes} → ${nextBytes} bytes); hazards are never compacted by the sync writer`;
+			}
+		}
+	}
+	return undefined;
+}
+
+/** Extent of the section whose heading line starts at `headingIndex` (end = next heading or EOF). */
+function sectionExtentAt(text: string, headingIndex: number): { start: number; end: number } {
+	const headingEnd = text.indexOf("\n", headingIndex);
+	const bodyStart = headingEnd === -1 ? text.length : headingEnd + 1;
+	const next = text.slice(bodyStart).search(/^#{1,2} /m);
+	return { start: headingIndex, end: next === -1 ? text.length : bodyStart + next };
+}
+
+/** Insert `section` (pre-trimmed) immediately before the first `##` heading —
+ * the hazards-first slot. Inserting directly after the `#` title line would
+ * displace any preamble between title and first section INTO the moved hazard
+ * extent (live defect: three ledgers refused repair on the byte-identity
+ * assert). Title and preamble stay put; hazards become the first `##`. */
+function insertAfterTitleBlock(text: string, section: string): string {
+	const first = text.match(/^## .+$/m);
+	if (first?.index === undefined) {
+		const trimmed = text.replace(/\s+$/, "");
+		return trimmed === "" ? `${section}\n` : `${trimmed}\n\n${section}\n`;
+	}
+	const head = text.slice(0, first.index).replace(/\s+$/, "");
+	const tail = text.slice(first.index);
+	return `${head}\n\n${section}\n\n${tail}`;
+}
+
+// Hazards-first is positional: a wholesale rewrite that REORDERS the hazard
+// section away from the top used to be refuse-only, but the fix is pure
+// cut-and-paste with in-memory data — the section bytes exist, just in the
+// wrong slot. Move the whole extent (heading + body, byte-identical) to
+// immediately after the `#` title block.
+function moveHazardsFirst(text: string): string {
+	const extent = hazardExtentOf(text);
+	if (extent === undefined) return text;
+	const firstSection = text.match(/^## .+$/m);
+	if (firstSection?.index === undefined || extent.start <= firstSection.index) return text;
+	const section = text.slice(extent.start, extent.end).replace(/\s+$/, "");
+	const rest = text.slice(0, extent.start) + text.slice(extent.end);
+	return insertAfterTitleBlock(rest, section);
+}
+
+// A dropped heading is recoverable for the same reason: the section bytes are
+// still in `previous`. Restore each dropped occurrence VERBATIM, in previous
+// document order (so an earlier restore can anchor a later one), spliced after
+// the nearest preceding section that survived into the candidate — the slot it
+// came from. Sections are cut and spliced, never rewritten.
+function restoreDroppedSections(previous: string, candidate: string): string {
+	const prevHeadings = [...previous.matchAll(/^#{1,2} .+$/gm)].map(m => ({
+		heading: m[0],
+		index: m.index ?? 0,
+	}));
+	const nextCounts = headingKeyCounts(candidate);
+	const seen = new Map<string, number>();
+	const droppedIndexes: number[] = [];
+	for (const { heading, index } of prevHeadings) {
+		const key = headingKey(heading);
+		if (key === "") continue;
+		const occurrence = (seen.get(key) ?? 0) + 1;
+		seen.set(key, occurrence);
+		if (occurrence > (nextCounts.get(key) ?? 0)) droppedIndexes.push(index);
+	}
+	let result = candidate;
+	for (const index of droppedIndexes) {
+		const extent = sectionExtentAt(previous, index);
+		const section = previous.slice(extent.start, extent.end).replace(/\s+$/, "");
+		// Anchor: the nearest PRECEDING section in `previous` that is present in
+		// the candidate. Fall back to the title block when none survives.
+		let anchorKey = "";
+		const resultCounts = headingKeyCounts(result);
+		for (const { heading, index: headingIndex } of prevHeadings) {
+			if (headingIndex >= index) break;
+			const key = headingKey(heading);
+			if (key !== "" && (resultCounts.get(key) ?? 0) > 0) anchorKey = key;
+		}
+		let insertAt: number | undefined;
+		if (anchorKey !== "") {
+			for (const m of result.matchAll(/^#{1,2} .+$/gm)) {
+				if (m.index !== undefined && headingKey(m[0]) === anchorKey) {
+					insertAt = sectionExtentAt(result, m.index).end;
+				}
+			}
+		}
+		if (insertAt === undefined) {
+			result = insertAfterTitleBlock(result, section);
+			continue;
+		}
+		const before = result.slice(0, insertAt).replace(/\s+$/, "");
+		const after = result.slice(insertAt).replace(/^\s+/, "");
+		result = after === "" ? `${before}\n\n${section}\n` : `${before}\n\n${section}\n\n${after}`;
+	}
+	return result;
+}
+
+// Deterministic in-memory surgery on the model's candidate, run by the sync
+// writer BETWEEN preserveHazards and the guard: (a) hazards-not-first → move
+// the hazard extent to the first `##` slot; (b) a section whose heading count
+// dropped vs `previous` → splice it back verbatim from `previous`. Both fixes
+// are cut-and-paste from bytes that already exist; anything not representable
+// that way (a truncation-marker stub, a cap-boundary cut, no hazard section
+// anywhere) is left for validateLedgerCandidate to refuse.
+export function remediateCandidate(previous: string, candidate: string): string {
+	// Never operate on a cut-suspect candidate: splicing a restored section
+	// AFTER a truncation marker (or padding a cap-boundary cut off the exact
+	// boundary) would mask the signatures the guard refuses on. Those classes
+	// are retry-only — the lost bytes exist nowhere.
+	if (cutSignatureOf(candidate) !== undefined) return candidate;
+	return restoreDroppedSections(previous, moveHazardsFirst(candidate));
+}
+
 async function writeLedgerAtomically(ledgerPath: string, content: string): Promise<void> {
 	await fs.mkdir(path.dirname(ledgerPath), { recursive: true });
 	const tmpPath = `${ledgerPath}.tmp-${Bun.randomUUIDv7()}`;
@@ -292,6 +593,43 @@ async function writeLedgerAtomically(ledgerPath: string, content: string): Promi
 	}
 }
 
+export interface LedgerRepairResult {
+	repaired: boolean;
+	reason?: string;
+}
+
+/**
+ * LLM-free on-disk self-repair (`loom sync-context --repair`). Reads the
+ * ledger, runs the same remediation the sync writer runs in-memory
+ * (previous === candidate === the file, so only hazards-not-first is
+ * repairable this way — nothing can have "dropped" relative to itself), then
+ * validates the result. Refuse on ambiguity: a ledger with NO hazard section
+ * at all is an owner's decision, not the repairer's, and the hazard bytes
+ * must survive the move exactly (cut-and-paste, never a rewrite).
+ */
+export async function repairLedgerOnDisk(ledgerPath: string, opts: { dryRun: boolean }): Promise<LedgerRepairResult> {
+	const content = await fs.readFile(ledgerPath, "utf8");
+	const extentBefore = hazardExtentOf(content);
+	if (extentBefore === undefined) return { repaired: false, reason: "no hazards section" };
+	const remediated = remediateCandidate(content, content);
+	const refuseReason = validateLedgerCandidate(content, remediated);
+	if (refuseReason !== undefined) return { repaired: false, reason: refuseReason };
+	// Byte-identity assert: trailing blank separators at the splice joint are
+	// re-normalized by the move and are not hazard content; everything else must
+	// be the exact same bytes.
+	const hazardsBefore = content.slice(extentBefore.start, extentBefore.end).replace(/\s+$/, "");
+	const extentAfter = hazardExtentOf(remediated);
+	const hazardsAfter =
+		extentAfter === undefined ? "" : remediated.slice(extentAfter.start, extentAfter.end).replace(/\s+$/, "");
+	if (hazardsAfter !== hazardsBefore) {
+		return { repaired: false, reason: "hazard content changed during move; refusing" };
+	}
+	if (remediated === content) return { repaired: false, reason: "valid; nothing to repair" };
+	if (opts.dryRun) return { repaired: false, reason: "dry-run: would repair" };
+	await writeLedgerAtomically(ledgerPath, remediated);
+	return { repaired: true };
+}
+
 /** Per-repo `runEphemeralTurn` usage, captured for the Context Activity `done` event. */
 interface SyncRepoResult {
 	tokensIn: number;
@@ -300,12 +638,22 @@ interface SyncRepoResult {
 	model?: string;
 	provider?: string;
 	durationMs: number;
+	/**
+	 * Ledgers this attempt deliberately did NOT write, as "<slug>: <reason>".
+	 * A refusal spends tokens and completes without error, so without this it
+	 * is indistinguishable from a successful sync at every layer above —
+	 * agent-chat's Context Activity row said `done` with a cost attached while
+	 * the file never changed (observed live: Family-Fun-Group-Husbandry_App,
+	 * refused on every one of 54 syncs by the since-downgraded hazard-window
+	 * predicate, silently, for days). Surfaced so the caller can report it.
+	 */
+	refusals: string[];
 }
 
-const EMPTY_SYNC_RESULT: SyncRepoResult = { tokensIn: 0, tokensOut: 0, cacheRead: 0, durationMs: 0 };
+const EMPTY_SYNC_RESULT: SyncRepoResult = { tokensIn: 0, tokensOut: 0, cacheRead: 0, durationMs: 0, refusals: [] };
 
 function sumSyncResults(results: readonly SyncRepoResult[]): SyncRepoResult {
-	const totals: SyncRepoResult = { ...EMPTY_SYNC_RESULT };
+	const totals: SyncRepoResult = { ...EMPTY_SYNC_RESULT, refusals: [] };
 	for (const result of results) {
 		totals.tokensIn += result.tokensIn;
 		totals.tokensOut += result.tokensOut;
@@ -313,9 +661,17 @@ function sumSyncResults(results: readonly SyncRepoResult[]): SyncRepoResult {
 		totals.durationMs += result.durationMs;
 		totals.model ??= result.model;
 		totals.provider ??= result.provider;
+		totals.refusals.push(...result.refusals);
 	}
 	return totals;
 }
+
+/** Refusal classes worth ONE retry of the same ephemeral turn — the corrupt bytes exist nowhere, so remediation cannot fix them and only a fresh decode can. */
+const RETRIABLE_REFUSAL_PREFIXES: readonly string[] = [
+	"model output missing a heading",
+	"carries the truncation marker",
+	"lands exactly at the display-cap boundary",
+];
 
 async function syncSingleRepo(
 	session: SessionContextSyncSession,
@@ -325,22 +681,90 @@ async function syncSingleRepo(
 ): Promise<SyncRepoResult> {
 	const ledgerPath = path.join(ledgerDir, `${slug}.md`);
 	const promptText = await buildSingleRepoPrompt(ledgerPath, slug, otherRepos);
-	const { replyText, assistantMessage } = await session.runEphemeralTurn({ promptText });
+	const priorLedger = await fs.readFile(ledgerPath, "utf8").catch(() => undefined);
 	const usage: SyncRepoResult = {
-		tokensIn: assistantMessage?.usage?.input ?? 0,
-		tokensOut: assistantMessage?.usage?.output ?? 0,
-		cacheRead: assistantMessage?.usage?.cacheRead ?? 0,
-		model: assistantMessage?.model,
-		provider: assistantMessage?.provider,
-		durationMs: assistantMessage?.duration ?? 0,
+		tokensIn: 0,
+		tokensOut: 0,
+		cacheRead: 0,
+		durationMs: 0,
+		refusals: [],
 	};
-	const sanitized = sanitizeLedgerOutput(replyText, slug);
-	if (!sanitized) {
-		logger.warn("[sessionContextSync] model output missing a heading; skipping ledger write", {
+	let sanitized: string | undefined;
+	let refuseReason: string | undefined;
+	// Retry-once: the missing-heading, truncation-marker and cap-boundary
+	// classes are transient model-output failures the SAME prompt commonly
+	// succeeds on (nondeterministic decode; the lost bytes exist nowhere, so
+	// surgery cannot fix them). A refusal still standing AFTER remediation is
+	// structural and would just fail again — never retried.
+	for (let attempt = 0; attempt < 2; attempt++) {
+		const { replyText, assistantMessage } = await session.runEphemeralTurn({ promptText, dedupeReply: false });
+		usage.tokensIn += assistantMessage?.usage?.input ?? 0;
+		usage.tokensOut += assistantMessage?.usage?.output ?? 0;
+		usage.cacheRead += assistantMessage?.usage?.cacheRead ?? 0;
+		usage.durationMs += assistantMessage?.duration ?? 0;
+		usage.model = assistantMessage?.model ?? usage.model;
+		usage.provider = assistantMessage?.provider ?? usage.provider;
+		sanitized = sanitizeLedgerOutput(replyText, slug);
+		if (sanitized === undefined) {
+			refuseReason = "model output missing a heading";
+		} else {
+			// Cut signatures are judged on the RAW reply, before any surgery
+			// could mask them (see cutSignatureOf). Only a signature-clean reply
+			// earns remediation: hazards come from the previous file, not the
+			// model (see preserveHazards); then deterministic cut-and-paste
+			// surgery fixes what the model garbled structurally (hazards
+			// reordered away from the top, a dropped section) before the guard
+			// judges — preserveHazards → remediate → validate.
+			refuseReason = cutSignatureOf(sanitized);
+			if (refuseReason === undefined) {
+				if (priorLedger !== undefined) sanitized = preserveHazards(priorLedger, sanitized);
+				sanitized = remediateCandidate(priorLedger ?? "", sanitized);
+				refuseReason = validateLedgerCandidate(priorLedger ?? "", sanitized);
+			}
+		}
+		if (refuseReason === undefined) break;
+		const failedReason = refuseReason;
+		if (attempt === 0 && RETRIABLE_REFUSAL_PREFIXES.some(prefix => failedReason.startsWith(prefix))) {
+			logger.warn("[sessionContextSync] transient ledger output failure; retrying the ephemeral turn once", {
+				ledgerPath,
+				sessionId: session.sessionId,
+				reason: failedReason,
+			});
+			continue;
+		}
+		break;
+	}
+	if (refuseReason !== undefined || sanitized === undefined) {
+		if (sanitized === undefined) {
+			logger.warn("[sessionContextSync] model output missing a heading; skipping ledger write", {
+				ledgerPath,
+				sessionId: session.sessionId,
+			});
+		} else {
+			logger.warn(
+				"[sessionContextSync] refusing to write a ledger that fails a cut-invariant; keeping previous file",
+				{
+					ledgerPath,
+					sessionId: session.sessionId,
+					reason: refuseReason,
+					bytes: Buffer.byteLength(sanitized, "utf8"),
+				},
+			);
+		}
+		usage.refusals.push(`${slug}: ${refuseReason ?? "model output missing a heading"}`);
+		return usage;
+	}
+	// Warn-only legacy window: hazards legitimately ending past byte 4096 are a
+	// NORMAL busy-repo state and must persist ("do not contort a ledger to fit
+	// a margin") — position is the invariant (validateLedgerCandidate), bytes
+	// only merit a warn.
+	const hazardExtent = hazardExtentOf(sanitized);
+	if (hazardExtent !== undefined && Buffer.byteLength(sanitized.slice(0, hazardExtent.end), "utf8") > 4096) {
+		logger.warn("[sessionContextSync] hazard section ends past the legacy 4096-byte window; writing anyway", {
 			ledgerPath,
 			sessionId: session.sessionId,
+			hazardEndsAtByte: Buffer.byteLength(sanitized.slice(0, hazardExtent.end), "utf8"),
 		});
-		return usage;
 	}
 	await writeLedgerAtomically(ledgerPath, sanitized);
 	return usage;
@@ -372,7 +796,10 @@ async function syncMultiRepo(
 				);
 			} catch (error) {
 				logger.warn("[sessionContextSync] per-repo sync failed", { slug, error: String(error) });
-				return undefined;
+				// Not silently dropped: one repo throwing while its siblings
+				// succeed still means THIS ledger did not get written, and the
+				// aggregate event would otherwise report an unqualified `done`.
+				return { ...EMPTY_SYNC_RESULT, refusals: [`${slug}: sync threw — ${String(error)}`] };
 			}
 		}),
 	);
@@ -569,6 +996,16 @@ export async function maybeSync(
 			emit("start");
 			const result = await runSync(session, settings, deps);
 			state.lastSyncAt = now();
+			// A refusal spends tokens and returns cleanly, so reporting an
+			// unqualified `done` made a no-write indistinguishable from a real
+			// sync — agent-chat's dashboard showed `done` with a cost attached
+			// while the ledger was untouched (Husbandry_App: 54 consecutive
+			// silent no-writes). The terminal event therefore stays `done` (the
+			// sync ran to completion) but carries the write outcome explicitly:
+			// `persisted` when at least one ledger landed, `refused` when every
+			// write was refused, with the exact per-ledger guard reasons in
+			// `refuse_reason` (`error` kept for older ingests).
+			const wroteNothing = result.refusals.length > 0 && result.refusals.length >= result.repos.length;
 			emit("done", {
 				repos: result.repos,
 				tokens_in: result.tokensIn,
@@ -577,6 +1014,13 @@ export async function maybeSync(
 				model: result.model,
 				provider: result.provider,
 				duration_ms: result.durationMs,
+				outcome: wroteNothing ? "refused" : "persisted",
+				...(result.refusals.length > 0
+					? {
+							error: `ledger not written — ${result.refusals.join("; ")}`,
+							refuse_reason: result.refusals.join("; "),
+						}
+					: {}),
 			});
 		} finally {
 			state.inFlight = false;

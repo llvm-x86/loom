@@ -206,7 +206,7 @@ my-plugin/
   README.md                ← recommended: description + usage
 ```
 
-> Note: extension modules declared via `package.json` `omp.extensions` are **not** loaded from marketplace installs — that mechanism only applies to npm-installed or `omp plugin link`ed plugins. Ship marketplace plugin behavior through the conventional directories above.
+> Note: extension modules declared via `package.json` `omp.extensions` are **not** loaded from marketplace installs — that mechanism only applies to npm-installed or `loom plugin link`ed plugins. Ship marketplace plugin behavior through the conventional directories above.
 
 ## Install command
 

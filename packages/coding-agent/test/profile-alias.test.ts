@@ -399,6 +399,9 @@ describe("profile alias installer", () => {
 	it("validates profile names before rendering shell code", async () => {
 		const files = new Map<string, string>();
 
+		// `normalizeProfileName` rejects the payload before any shell code is
+		// rendered. Assert on the branded prefix *and* the echoed value so this
+		// still proves this specific injection string was what got refused.
 		await expect(
 			installProfileAlias({
 				profile: "work'; touch /tmp/pwn; #",
@@ -411,7 +414,7 @@ describe("profile alias installer", () => {
 					files.set(filePath, content);
 				},
 			}),
-		).rejects.toThrow("Invalid OMP profile");
+		).rejects.toThrow(`Invalid loom profile "work'; touch /tmp/pwn; #"`);
 		expect(files.size).toBe(0);
 	});
 

@@ -6,7 +6,7 @@
 #   natives-builder — Rust + Bun → pi_natives.linux-<arch>.node
 #   wheel-builder   — omp_rpc Python wheel
 #   pi-base         — python + bun + rustup launcher + natives + omp_rpc
-#                     + /usr/local/bin/omp shim
+#                     + /usr/local/bin/loom shim
 #   pi-runtime      — pi-base + pi source + bun install      (DEFAULT, runnable)
 #
 # Build:
@@ -152,8 +152,8 @@ RUN printf '%s\n' \
     '  exit 127' \
     'fi' \
     'exec bun "$PI_ROOT/packages/coding-agent/src/cli.ts" "$@"' \
-    > /usr/local/bin/omp \
-    && chmod +x /usr/local/bin/omp
+    > /usr/local/bin/loom \
+    && chmod +x /usr/local/bin/loom
 
 ############################
 # 4) pi-runtime — pi-base + pi source + bun install (DEFAULT)
@@ -188,5 +188,5 @@ COPY . /pi/
 # package.json's `prepare` script normally handles these on a vanilla install.
 RUN bun --cwd=packages/coding-agent run gen:tool-views
 
-ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/omp"]
+ENTRYPOINT ["/usr/bin/tini", "--", "/usr/local/bin/loom"]
 CMD ["--help"]

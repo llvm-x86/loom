@@ -49,7 +49,7 @@ describe("hashline file ops", () => {
 		expect(fs.get(PATH)).toBeUndefined();
 		expect(fs.get(DEST)).toBe(CONTENT);
 		expect(snapshots.byHash(DEST, tag)?.text).toBe(CONTENT);
-		expect(snapshots.byHash(DEST, tag)?.seenLines).toEqual(new Set([1, 2]));
+		expect([...(snapshots.byHash(DEST, tag)?.seenLines ?? [])]).toEqual([1, 2]);
 		expect(snapshots.byHash(PATH, tag)).toBeNull();
 	});
 

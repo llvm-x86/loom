@@ -228,6 +228,25 @@ function prepareNativeScrollbackReplay(component: Component): void {
 	(component as Component & Partial<NativeScrollbackReplay>).prepareNativeScrollbackReplay?.();
 }
 
+/**
+ * A component whose rendered rows have ALL entered native scrollback can shed
+ * its private per-width render cache. Those rows are immutable terminal
+ * history and the assembled frame still holds them, so nothing on screen
+ * changes; the component is asked to `render()` again only when the frame is
+ * rebuilt at a new width or replayed (see {@link NativeScrollbackReplay}), at
+ * which point it re-derives from its own source. Implement it on any component
+ * whose cache is large relative to the source it was derived from — a
+ * transcript that never releases holds one rendered copy of every tool result
+ * for the lifetime of the session.
+ */
+export interface NativeScrollbackRenderCache {
+	releaseNativeScrollbackRenderCache(): void;
+}
+
+export function releaseNativeScrollbackRenderCache(component: Component): void {
+	(component as Component & Partial<NativeScrollbackRenderCache>).releaseNativeScrollbackRenderCache?.();
+}
+
 function setNativeScrollbackCommittedRows(component: Component, rows: number): void {
 	(component as Component & Partial<NativeScrollbackCommittedRows>).setNativeScrollbackCommittedRows?.(rows);
 }
@@ -483,7 +502,9 @@ export interface OverlayHandle {
 /**
  * Container - a component that contains other components
  */
-export class Container implements Component, NativeScrollbackCommittedRows, NativeScrollbackReplay {
+export class Container
+	implements Component, NativeScrollbackCommittedRows, NativeScrollbackReplay, NativeScrollbackRenderCache
+{
 	children: Component[] = [];
 
 	// Memoized concatenation of the children's latest renders. Children are
@@ -581,6 +602,18 @@ export class Container implements Component, NativeScrollbackCommittedRows, Nati
 		for (const child of this.children) prepareNativeScrollbackReplay(child);
 	}
 
+	/**
+	 * Drop the memoized concatenation and propagate the release downward. The
+	 * caller has established that every row this subtree contributed is
+	 * immutable native scrollback, so the next `render()` — a width rebuild or
+	 * a replay — recomputes it from the children's own sources.
+	 */
+	releaseNativeScrollbackRenderCache(): void {
+		this.#memoLines = undefined;
+		this.#memoChildLines = [];
+		for (const child of this.children) releaseNativeScrollbackRenderCache(child);
+	}
+
 	render(width: number): readonly string[] {
 		width = Math.max(1, width);
 		const children = this.children;
@@ -668,10 +701,17 @@ function subtreeContains(root: Component, target: Component): boolean {
 	return false;
 }
 
-interface PreparedLine {
-	raw: string;
-	width: number;
-	line: string;
+/**
+ * The composed frame as the emitters see it: width-fitted rows stored
+ * base-offset, so frame row `i` is `rows[i - base]`. Rows below `base` were
+ * shed with the committed prefix and MUST NOT be read; the only emitter that
+ * replays them (`#emitFullPaint`) is handed a view whose base is 0.
+ */
+interface PreparedFrame {
+	rows: readonly string[];
+	base: number;
+	/** Absolute frame length, independent of how many rows are retained. */
+	length: number;
 }
 
 const SGR_SEQUENCE = /\x1b\[[0-9;:]*m/g;
@@ -826,6 +866,23 @@ const RESYNC_TAIL_LOOKBACK = 24;
 const RESYNC_TAIL_SAMPLES = 8;
 
 /**
+ * The engine's record of the rows it committed. Plain arrays satisfy it, so
+ * the shadow ledgers in the stress harness keep passing one; the engine itself
+ * passes a bounded ring ({@link CommittedPrefix}) that retains only the rows
+ * near the seam and reports the oldest it still holds as {@link base}.
+ */
+export interface CommittedPrefixView {
+	readonly length: number;
+	/**
+	 * First row still retained. Rows below it were shed and read as
+	 * `undefined`; a comparison against one is skipped, and a re-anchor can
+	 * never land below it.
+	 */
+	readonly base?: number;
+	at(index: number): string | undefined;
+}
+
+/**
  * Decide whether `frame` still aligns with the committed prefix, and where to
  * re-anchor the commit index when it does not. Returns the resync row index,
  * or -1 when no resync is needed.
@@ -861,10 +918,11 @@ const RESYNC_TAIL_SAMPLES = 8;
  */
 export function findCommittedPrefixResync(
 	frame: readonly string[],
-	prefix: readonly string[],
+	prefix: CommittedPrefixView,
 	verifiedTo: number = prefix.length,
 	finalTo: number = verifiedTo,
 ): number {
+	const base = prefix.base ?? 0;
 	const verified = Math.min(prefix.length, Math.max(0, Math.trunc(verifiedTo)));
 	const hardEnd = Math.min(prefix.length, Math.max(verified, Math.trunc(finalTo)));
 	if (hardEnd === 0) return -1;
@@ -872,8 +930,9 @@ export function findCommittedPrefixResync(
 		// 1. Hard scan: frozen snapshots whose source just became final. Full
 		// scan, no tolerance — a finalized row that changed must re-anchor.
 		let hardMismatch = false;
-		for (let i = verified; i < hardEnd; i++) {
-			if (!rowsEquivalent(frame[i]!, prefix[i]!)) {
+		for (let i = Math.max(base, verified); i < hardEnd; i++) {
+			const old = prefix.at(i);
+			if (old !== undefined && !rowsEquivalent(frame[i]!, old)) {
 				hardMismatch = true;
 				break;
 			}
@@ -881,13 +940,14 @@ export function findCommittedPrefixResync(
 		if (!hardMismatch) {
 			// 2. Tail sample over the verified zone (only when the hard scan is
 			// clean): walk up from its end until LOOKBACK rows or SAMPLES
-			// non-blank comparisons.
+			// non-blank comparisons. The retained window is always far wider
+			// than LOOKBACK, so shedding never weakens this signal.
 			let samples = 0;
 			let mismatches = 0;
-			for (let j = 1; j <= verified && j <= RESYNC_TAIL_LOOKBACK && samples < RESYNC_TAIL_SAMPLES; j++) {
+			for (let j = 1; j <= verified - base && j <= RESYNC_TAIL_LOOKBACK && samples < RESYNC_TAIL_SAMPLES; j++) {
 				const idx = verified - j;
 				const row = frame[idx]!;
-				const old = prefix[idx]!;
+				const old = prefix.at(idx)!;
 				if (row === old) {
 					if (!isBlankRow(row)) samples++;
 					continue;
@@ -902,12 +962,82 @@ export function findCommittedPrefixResync(
 	}
 	// Misaligned (hard mismatch, tail-sample shift, or the frame no longer
 	// covers the checked zones): re-anchor at the first row whose content
-	// changed.
+	// changed. The scan starts at `base` — every zone the checks above can read
+	// is retained by construction (the hard scan starts at `base` and the tail
+	// sample is bounded by it), so a detected divergence is always found at or
+	// above it. A row that changed in the SHED region is invisible here and
+	// stays a stale copy in history, exactly like the single-row in-place edit
+	// the tail sample already tolerates.
 	const limit = Math.min(hardEnd, frame.length);
-	for (let i = 0; i < limit; i++) {
-		if (!rowsEquivalent(frame[i]!, prefix[i]!)) return i;
+	for (let i = base; i < limit; i++) {
+		const old = prefix.at(i);
+		if (old !== undefined && !rowsEquivalent(frame[i]!, old)) return i;
 	}
 	return limit < hardEnd ? limit : -1;
+}
+
+/**
+ * Rows the engine committed, retained as a bounded ring of the newest
+ * {@link CommittedPrefix.CAPACITY}.
+ *
+ * The logical prefix is `[0, length)` — the same coordinates the frame uses —
+ * but only `[base, length)` is stored; older rows are shed. That is sound
+ * because committed rows are immutable by contract and the only reader that
+ * looks back at all is the committed-prefix audit, which samples at most
+ * {@link RESYNC_TAIL_LOOKBACK} rows at the seam and hard-scans the frozen-
+ * snapshot span between the audit mark and the seam. Both live in the newest
+ * rows; the capacity is sized far above them (170× the audit lookback, tens of
+ * screens of frozen snapshots) so shedding never removes a row either one
+ * would have read. What shedding does bound is where a *repair* can re-anchor
+ * — never below `base` — which is the safe direction: duplication, never loss.
+ *
+ * Cost is a fixed 4096 slots instead of one slot per transcript row, which on
+ * a long session is the difference between constant and unbounded.
+ */
+class CommittedPrefix implements CommittedPrefixView {
+	static readonly CAPACITY = 4096;
+	readonly #ring: (string | undefined)[] = new Array(CommittedPrefix.CAPACITY);
+	#length = 0;
+
+	/** Logical end of the prefix: rows `[0, length)` are committed. */
+	get length(): number {
+		return this.#length;
+	}
+
+	/** Oldest row still stored. Rows below it were shed. */
+	get base(): number {
+		return Math.max(0, this.#length - CommittedPrefix.CAPACITY);
+	}
+
+	at(index: number): string | undefined {
+		if (index < this.base || index >= this.#length) return undefined;
+		return this.#ring[index % CommittedPrefix.CAPACITY];
+	}
+
+	/** Append `frame[length, end)`, growing the prefix to `end`. */
+	extend(frame: readonly string[], end: number): void {
+		for (let i = this.#length; i < end; i++) {
+			this.#ring[i % CommittedPrefix.CAPACITY] = frame[i] ?? "";
+		}
+		if (end > this.#length) this.#length = end;
+	}
+
+	/** Re-base the record on `frame[0, end)`, discarding whatever was recorded. */
+	reset(frame: readonly string[], end: number): void {
+		this.#length = 0;
+		this.#ring.fill(undefined);
+		this.extend(frame, Math.max(0, end));
+	}
+
+	/** Drop rows at/after `end` (an audit re-anchor or a frame collapse). */
+	truncate(end: number): void {
+		const next = Math.max(0, Math.min(end, this.#length));
+		// Release the shed strings; the ring is small, so this stays O(CAPACITY).
+		for (let i = next; i < this.#length && i < next + CommittedPrefix.CAPACITY; i++) {
+			this.#ring[i % CommittedPrefix.CAPACITY] = undefined;
+		}
+		this.#length = next;
+	}
 }
 
 /**
@@ -1018,13 +1148,16 @@ export class TUI extends Container {
 	// seam declared them); rows at/after it are frozen visual snapshots that
 	// scrolled off the window top while still live.
 	#committedRows = 0;
-	// Raw rows mirroring [0, #committedRows) — the engine's claim of what it
-	// committed. The audited prefix [0, #committedPrefixAuditRows) is checked
-	// each ordinary frame against the current render to detect components
-	// re-laying-out declared-final content (see #auditCommittedPrefix). Holds
-	// references to component-cached strings, so the audit is a pointer walk
-	// in the common case.
-	#committedPrefix: string[] = [];
+	// Raw rows mirroring the newest slice of [0, #committedRows) — the engine's
+	// claim of what it committed. The audited prefix
+	// [0, #committedPrefixAuditRows) is checked each ordinary frame against the
+	// current render to detect components re-laying-out declared-final content
+	// (see #auditCommittedPrefix). Holds references to component-cached
+	// strings, so the audit is a pointer walk in the common case. Bounded: rows
+	// far above the seam are never re-read, and retaining them pinned one
+	// reference to every rendered row of the session (see {@link
+	// CommittedPrefix}).
+	readonly #committedPrefix = new CommittedPrefix();
 	// Rows of the committed prefix that were HARD-VERIFIED as exact-final
 	// bytes (committed below the exactness boundary, or frozen snapshots that
 	// passed the one-time strict scan when the boundary rose past them). Rows
@@ -1140,17 +1273,31 @@ export class TUI extends Container {
 	#componentRootCache = new WeakMap<Component, Component>();
 	#scopedInputRenderComponents = new WeakSet<Component>();
 
-	// Persistent prepared frame, row-aligned with #composedFrame. Entries store
-	// normalized, width-fitted content rows without the per-line terminal
-	// terminator; terminators are appended only at write time so width checks
-	// stay on content, not reset bytes. #preparedValidRows counts the leading
-	// rows known prepared against the CURRENT composed frame: a compose lowers
-	// it to the stable prefix, a completed prepare raises it to the frame
-	// length, and an abandoned frame (ghostty image defer) leaves it lowered so
-	// the next prepare revalidates the splice.
-	#preparedFrame: string[] = [];
-	#preparedMeta: PreparedLine[] = [];
+	// Persistent prepared frame: normalized, width-fitted content rows without
+	// the per-line terminal terminator (terminators are appended only at write
+	// time so width checks stay on content, not reset bytes).
+	//
+	// Base-offset, NOT row-aligned with #composedFrame: entry `i` holds frame
+	// row `#preparedBaseRow + i`. Everything below the base was shed — those
+	// rows sit under the immutable commit seam, so no ordinary frame reads them
+	// again, and the gesture-driven full replay re-prepares them from the
+	// composed frame first (see #prepareFrame). Retaining them cost a fitted
+	// row plus a cache object for every row of the session.
+	//
+	// #preparedSources[i] is the composed row entry `i` was fitted from, so
+	// revalidation is a pointer compare; the fit width is per-frame
+	// (#preparedWidth), not per-row. #preparedValidRows is the ABSOLUTE end of
+	// the range known prepared against the CURRENT composed frame: a compose
+	// lowers it to the stable prefix, a completed prepare raises it to the
+	// frame length, and an abandoned frame (ghostty image defer) leaves it
+	// lowered so the next prepare revalidates the splice.
+	#preparedRows: string[] = [];
+	#preparedSources: string[] = [];
+	#preparedBaseRow = 0;
+	#preparedWidth = -1;
 	#preparedValidRows = 0;
+	// Reused view handed to the emitters; never escapes a frame.
+	readonly #preparedFrameView: PreparedFrame = { rows: this.#preparedRows, base: 0, length: 0 };
 
 	// Overlay stack for modal components rendered on top of base content
 	overlayStack: {
@@ -1979,7 +2126,12 @@ export class TUI extends Container {
 			this.requestComponentRender(component);
 			return;
 		}
-		if (width !== this.#previousWidth || height !== this.#previousHeight || width !== this.#composeWidth) {
+		if (
+			width !== this.#previousWidth ||
+			height !== this.#previousHeight ||
+			width !== this.#composeWidth ||
+			width !== this.#preparedWidth
+		) {
 			this.requestComponentRender(component);
 			return;
 		}
@@ -2051,15 +2203,20 @@ export class TUI extends Container {
 		let firstChanged = -1;
 		let lastChanged = -1;
 		const previousWindow = this.#previousWindow;
+		const preparedRows = this.#preparedRows;
+		const preparedSources = this.#preparedSources;
 		for (let i = 0; i < nextLines.length; i++) {
 			const frameRow = segment.start + i;
 			const raw = nextLines[i]!;
 			const prepared = this.#prepareLine(raw, width);
 			this.#composedFrame[frameRow] = raw;
-			this.#preparedMeta[frameRow] = prepared;
-			this.#preparedFrame[frameRow] = prepared.line;
-			if (previousWindow[screenStart + i] === prepared.line) continue;
-			previousWindow[screenStart + i] = prepared.line;
+			// The guards above proved this segment sits at/after the commit
+			// seam, so it is inside the retained prepared range.
+			const slot = frameRow - this.#preparedBaseRow;
+			preparedSources[slot] = raw;
+			preparedRows[slot] = prepared;
+			if (previousWindow[screenStart + i] === prepared) continue;
+			previousWindow[screenStart + i] = prepared;
 			if (firstChanged === -1) firstChanged = i;
 			lastChanged = i;
 		}
@@ -2092,7 +2249,7 @@ export class TUI extends Container {
 		buffer += "\r";
 		for (let i = firstChanged; i <= lastChanged; i++) {
 			if (i > firstChanged) buffer += "\r\n";
-			buffer += this.#lineRewriteSequence(this.#preparedFrame[segment.start + i] ?? "", width);
+			buffer += this.#lineRewriteSequence(preparedRows[segment.start + i - this.#preparedBaseRow] ?? "", width);
 		}
 		const cursorControl = this.#cursorControlSequence(
 			cursorPos,
@@ -2103,7 +2260,7 @@ export class TUI extends Container {
 		buffer += this.#paintEndSequence;
 		this.terminal.write(buffer);
 		this.#windowTopRow = windowTop;
-		this.#commit(this.#composedFrame, previousWindow, width, height, cursorControl);
+		this.#commit(this.#composedFrame.length, previousWindow, width, height, cursorControl);
 	}
 
 	/** Ordinary (non-forced) scheduling shared by full and component-scoped requests. */
@@ -2972,12 +3129,15 @@ export class TUI extends Container {
 		// prefix — frozen snapshots included; a collapse is precisely when the
 		// record and the frame part ways — so the surviving exact prefix stays
 		// recognized and is never re-shown or re-committed. Only genuinely new
-		// content repaints below it.
+		// content repaints below it. Shed rows cannot be compared, so the scan
+		// starts at the oldest retained row; a collapse reaching further back
+		// than the retained window keeps the whole surviving prefix.
 		if (!geometryChanged && !this.#clearScrollbackOnNextRender && frameLength < this.#committedRows) {
 			const limit = Math.min(this.#committedRows, frameLength);
 			let diverged = limit;
-			for (let i = 0; i < limit; i++) {
-				if (!rowsEquivalent(rawFrame[i]!, this.#committedPrefix[i]!)) {
+			for (let i = this.#committedPrefix.base; i < limit; i++) {
+				const recorded = this.#committedPrefix.at(i);
+				if (recorded !== undefined && !rowsEquivalent(rawFrame[i]!, recorded)) {
 					diverged = i;
 					break;
 				}
@@ -2985,7 +3145,7 @@ export class TUI extends Container {
 			if (diverged < this.#committedRows) {
 				this.#committedRows = diverged;
 				this.#committedPrefixAuditRows = Math.min(this.#committedPrefixAuditRows, diverged);
-				this.#committedPrefix.length = diverged;
+				this.#committedPrefix.truncate(diverged);
 				committedRowsResynced = true;
 			}
 		}
@@ -3055,7 +3215,7 @@ export class TUI extends Container {
 			windowTop = Math.max(0, frameLength - height);
 			chunkTo = liveRegionPinned ? Math.min(windowTop, finalBoundary) : windowTop;
 			this.#committedRows = chunkTo;
-			this.#committedPrefix = rawFrame.slice(0, chunkTo);
+			this.#committedPrefix.reset(rawFrame, chunkTo);
 		} else if (geometryChanged && Math.max(0, frameLength - height) < this.#committedRows) {
 			// Pane growth/reflow can pull rows back out of mux scrollback and into
 			// the viewport. Rebase the commit seam to that exposed frame tail before
@@ -3065,7 +3225,7 @@ export class TUI extends Container {
 			windowTop = Math.max(0, frameLength - height);
 			chunkTo = windowTop;
 			this.#committedRows = windowTop;
-			this.#committedPrefix = rawFrame.slice(0, windowTop);
+			this.#committedPrefix.reset(rawFrame, windowTop);
 		} else {
 			// Re-anchor to the frame tail, floored at the committed boundary: a
 			// shrink (or overlay close) pulls the window back down, but never
@@ -3090,7 +3250,7 @@ export class TUI extends Container {
 						: windowTop;
 			if (geometryChanged) {
 				committedPrefixResliced = true;
-				this.#committedPrefix = rawFrame.slice(0, this.#committedRows);
+				this.#committedPrefix.reset(rawFrame, this.#committedRows);
 			}
 		}
 
@@ -3104,9 +3264,13 @@ export class TUI extends Container {
 				break;
 			}
 		}
-		const frame = this.#prepareFrame(rawFrame, width);
+		// A full replay rewrites the whole committed prefix, so it needs every
+		// fitted row; an ordinary frame reads nothing below the commit seam.
+		const frame = this.#prepareFrame(rawFrame, width, fullPaint ? 0 : Math.min(this.#committedRows, windowTop));
+		const frameRows = frame.rows;
+		const frameBase = frame.base;
 		let window: string[] = new Array(height);
-		for (let r = 0; r < height; r++) window[r] = frame[windowTop + r] ?? "";
+		for (let r = 0; r < height; r++) window[r] = frameRows[windowTop - frameBase + r] ?? "";
 		if (hasVisibleOverlay) {
 			window = this.#compositeOverlaysIntoWindow(window, width, height);
 			const overlayMarkers = this.#extractCursorMarkers(window);
@@ -3153,7 +3317,9 @@ export class TUI extends Container {
 				leadingSequence: deferredAltExit,
 			});
 			this.#pendingAltExit = "";
-			this.#committedPrefix = rawFrame.slice(0, chunkTo);
+			// The replay is written; the prefix it re-fitted can go again.
+			this.#shedPreparedRows(Math.min(chunkTo, windowTop));
+			this.#committedPrefix.reset(rawFrame, chunkTo);
 			this.#committedPrefixAuditRows = Math.min(chunkTo, finalBoundary);
 			this.#clearScrollbackOnNextRender = false;
 			this.#hasEverRendered = true;
@@ -3173,9 +3339,7 @@ export class TUI extends Container {
 			repaintVirtualScrollInPlace: hasVisibleOverlay,
 			cursorTrackingLineCount,
 		});
-		for (let i = this.#committedPrefix.length; i < chunkTo; i++) {
-			this.#committedPrefix.push(rawFrame[i] ?? "");
-		}
+		this.#committedPrefix.extend(rawFrame, chunkTo);
 		// Audit-mark advance. A re-slice re-bases it outright. Otherwise it may
 		// advance to the exactness boundary only when this frame verified the
 		// newly-final span (auditRan hard-scans it) or no such span existed —
@@ -3203,7 +3367,7 @@ export class TUI extends Container {
 		if (resyncTo < 0) return;
 		this.#committedRows = resyncTo;
 		this.#committedPrefixAuditRows = Math.min(this.#committedPrefixAuditRows, resyncTo);
-		prefix.length = resyncTo;
+		prefix.truncate(resyncTo);
 		if ($flag("PI_DEBUG_REDRAW")) {
 			const msg = `[${new Date().toISOString()}] commit resync: committed prefix diverged at row ${resyncTo}; recommitting\n`;
 			fs.appendFileSync(getDebugLogPath(), msg);
@@ -3230,55 +3394,109 @@ export class TUI extends Container {
 	}
 
 	/**
-	 * Prepare the composed frame for emission, in place. Rows below
-	 * `#preparedValidRows` are already prepared against the current frame (the
-	 * compose lowered that floor to the stable prefix); rows at/after it are
-	 * revalidated positionally — a row whose raw content and width match its
-	 * cached entry reuses the prepared line, anything else re-prepares.
+	 * Prepare the composed frame for emission and return the base-offset view
+	 * the emitters read.
+	 *
+	 * `keepFrom` is the LOWEST frame row this frame's emitter will read: the
+	 * commit seam for an ordinary update, 0 for a full replay. Rows below it
+	 * are shed — they are immutable committed history no ordinary frame reads
+	 * again — and rows the caller needs but that were already shed are
+	 * re-prepared from the composed frame first.
+	 *
+	 * Within the retained range, rows below `#preparedValidRows` are already
+	 * prepared against the current frame (the compose lowered that floor to the
+	 * stable prefix); rows at/after it are revalidated positionally — a row
+	 * whose composed source is the identical string reuses its fitted line,
+	 * anything else re-fits.
 	 */
-	#prepareFrame(frame: readonly string[], width: number): string[] {
-		const prepared = this.#preparedFrame;
-		const meta = this.#preparedMeta;
-		if (prepared.length > frame.length) {
-			prepared.length = frame.length;
-			meta.length = frame.length;
+	#prepareFrame(frame: readonly string[], width: number, keepFrom: number): PreparedFrame {
+		const frameLength = frame.length;
+		const base = Math.max(0, Math.min(Math.trunc(keepFrom), frameLength));
+		if (width !== this.#preparedWidth) {
+			// Every fitted row is stale at a new width; rebuild from the base up.
+			this.#preparedRows = [];
+			this.#preparedSources = [];
+			this.#preparedBaseRow = base;
+			this.#preparedValidRows = base;
+			this.#preparedWidth = width;
+		} else if (base > this.#preparedBaseRow) {
+			this.#shedPreparedRows(base);
+		} else if (base < this.#preparedBaseRow) {
+			this.#rehydratePreparedRows(frame, width, base);
 		}
-		for (let i = Math.min(this.#preparedValidRows, prepared.length); i < frame.length; i++) {
+		const rows = this.#preparedRows;
+		const sources = this.#preparedSources;
+		const retained = Math.max(0, frameLength - this.#preparedBaseRow);
+		if (rows.length > retained) {
+			rows.length = retained;
+			sources.length = retained;
+		}
+		const start = Math.max(this.#preparedBaseRow, Math.min(this.#preparedValidRows, frameLength));
+		for (let i = start; i < frameLength; i++) {
 			const raw = frame[i]!;
-			const cached = meta[i];
-			if (cached !== undefined && cached.raw === raw && cached.width === width) {
-				prepared[i] = cached.line;
-				continue;
-			}
-			const entry = this.#prepareLine(raw, width);
-			meta[i] = entry;
-			prepared[i] = entry.line;
+			const slot = i - this.#preparedBaseRow;
+			if (sources[slot] === raw) continue;
+			sources[slot] = raw;
+			rows[slot] = this.#prepareLine(raw, width);
 		}
-		this.#preparedValidRows = frame.length;
-		return prepared;
+		this.#preparedValidRows = frameLength;
+		const view = this.#preparedFrameView;
+		view.rows = rows;
+		view.base = this.#preparedBaseRow;
+		view.length = frameLength;
+		return view;
+	}
+
+	/** Drop fitted rows below `keepFrom`; they are immutable committed history. */
+	#shedPreparedRows(keepFrom: number): void {
+		const drop = keepFrom - this.#preparedBaseRow;
+		if (drop <= 0) return;
+		const rows = this.#preparedRows;
+		if (drop >= rows.length) {
+			rows.length = 0;
+			this.#preparedSources.length = 0;
+		} else {
+			rows.splice(0, drop);
+			this.#preparedSources.splice(0, drop);
+		}
+		this.#preparedBaseRow = keepFrom;
+	}
+
+	/**
+	 * Re-fit shed rows `[base, #preparedBaseRow)` ahead of a full replay, which
+	 * writes the whole committed prefix back to the terminal. O(history) — the
+	 * replay it serves already is.
+	 */
+	#rehydratePreparedRows(frame: readonly string[], width: number, base: number): void {
+		const missing = this.#preparedBaseRow - base;
+		const rows: string[] = new Array(missing);
+		const sources: string[] = new Array(missing);
+		for (let i = 0; i < missing; i++) {
+			const raw = frame[base + i] ?? "";
+			sources[i] = raw;
+			rows[i] = this.#prepareLine(raw, width);
+		}
+		this.#preparedRows = rows.concat(this.#preparedRows);
+		this.#preparedSources = sources.concat(this.#preparedSources);
+		this.#preparedBaseRow = base;
 	}
 
 	/** Stateless variant for overlay-composited windows and alt-screen frames. */
 	#prepareLinesArray(lines: readonly string[], width: number): string[] {
 		const prepared: string[] = new Array(lines.length);
 		for (let i = 0; i < lines.length; i++) {
-			prepared[i] = this.#prepareLine(lines[i]!, width).line;
+			prepared[i] = this.#prepareLine(lines[i]!, width);
 		}
 		return prepared;
 	}
 
-	#prepareLine(raw: string, width: number): PreparedLine {
-		if (TERMINAL.isImageLine(raw)) {
-			return { raw, width, line: raw };
-		}
+	#prepareLine(raw: string, width: number): string {
+		if (TERMINAL.isImageLine(raw)) return raw;
 		const source = this.#lineFitSource(raw, width);
 		const normalized = normalizeTerminalOutput(source);
 		const asciiWidth = this.#ansiAsciiLineWidth(normalized, width);
-		if ((asciiWidth ?? visibleWidth(normalized)) <= width) {
-			return { raw, width, line: normalized };
-		}
-		const line = truncateToWidth(normalized, width, Ellipsis.Omit);
-		return { raw, width, line };
+		if ((asciiWidth ?? visibleWidth(normalized)) <= width) return normalized;
+		return truncateToWidth(normalized, width, Ellipsis.Omit);
 	}
 
 	#lineFitSource(raw: string, width: number): string {
@@ -3461,13 +3679,13 @@ export class TUI extends Container {
 	 * the end so cursor/window accounting stays consistent.
 	 */
 	#commit(
-		lines: readonly string[],
+		frameLength: number,
 		window: string[],
 		width: number,
 		height: number,
 		hardwareCursor: HardwareCursorUpdate,
 	): void {
-		this.#previousFrameLength = lines.length;
+		this.#previousFrameLength = frameLength;
 		this.#previousWindow = window;
 		this.#forceViewportRepaintOnNextRender = false;
 		this.#previousWidth = width;
@@ -3538,7 +3756,7 @@ export class TUI extends Container {
 	 * `clearScrollback` initial paint).
 	 */
 	#emitFullPaint(
-		frame: readonly string[],
+		frame: PreparedFrame,
 		window: string[],
 		width: number,
 		height: number,
@@ -3577,7 +3795,7 @@ export class TUI extends Container {
 		let paintLineCount = chunkTo + height;
 		if (isConPTYHosted()) {
 			const merged = new Array<string>(chunkTo + height);
-			for (let i = 0; i < chunkTo; i++) merged[i] = frame[i] ?? "";
+			for (let i = 0; i < chunkTo; i++) merged[i] = frame.rows[i - frame.base] ?? "";
 			for (let screenRow = 0; screenRow < height; screenRow++) {
 				merged[chunkTo + screenRow] = window[screenRow] ?? "";
 			}
@@ -3630,9 +3848,8 @@ export class TUI extends Container {
 			// each row must self-clear stale cells left by the previous viewport.
 			for (let i = 0; i < chunkTo; i++) {
 				if (i > 0) buffer += "\r\n";
-				buffer += options.clearScrollback
-					? this.#lineRewriteSequence(frame[i] ?? "", width)
-					: this.#terminalLine(frame[i] ?? "");
+				const line = frame.rows[i - frame.base] ?? "";
+				buffer += options.clearScrollback ? this.#lineRewriteSequence(line, width) : this.#terminalLine(line);
 			}
 			for (let screenRow = 0; screenRow < height; screenRow++) {
 				if (chunkTo + screenRow > 0) buffer += "\r\n";
@@ -3677,7 +3894,7 @@ export class TUI extends Container {
 
 		this.#committedRows = chunkTo;
 		this.#windowTopRow = windowTop;
-		this.#commit(frame, window, width, height, committedCursor);
+		this.#commit(frame.length, window, width, height, committedCursor);
 	}
 
 	/**
@@ -3917,7 +4134,7 @@ export class TUI extends Container {
 	 * bottom on several terminal families.
 	 */
 	#emitUpdate(
-		frame: readonly string[],
+		frame: PreparedFrame,
 		window: string[],
 		width: number,
 		height: number,
@@ -3964,7 +4181,7 @@ export class TUI extends Container {
 		) {
 			let prefixIntact = previousWindow.length === height;
 			for (let i = 0; prefixIntact && i < chunkLength; i++) {
-				if (previousWindow[i] !== frame[chunkFrom + i]) prefixIntact = false;
+				if (previousWindow[i] !== frame.rows[chunkFrom + i - frame.base]) prefixIntact = false;
 			}
 			if (prefixIntact) {
 				let buffer = this.#paintBeginSequence + purgeSequence;
@@ -3998,7 +4215,7 @@ export class TUI extends Container {
 				this.terminal.write(buffer);
 				this.#committedRows = chunkTo;
 				this.#windowTopRow = windowTop;
-				this.#commit(frame, window, width, height, cursorControl);
+				this.#commit(frame.length, window, width, height, cursorControl);
 				return;
 			}
 		}
@@ -4073,7 +4290,7 @@ export class TUI extends Container {
 			buffer += this.#paintEndSequence;
 			this.terminal.write(buffer);
 			this.#windowTopRow = windowTop;
-			this.#commit(frame, window, width, height, cursorControl);
+			this.#commit(frame.length, window, width, height, cursorControl);
 			return;
 		}
 
@@ -4088,7 +4305,7 @@ export class TUI extends Container {
 		let wroteLine = false;
 		for (let i = chunkFrom; i < chunkTo; i++) {
 			if (wroteLine) buffer += "\r\n";
-			buffer += this.#lineRewriteSequence(frame[i] ?? "", width);
+			buffer += this.#lineRewriteSequence(frame.rows[i - frame.base] ?? "", width);
 			wroteLine = true;
 		}
 		for (let screenRow = 0; screenRow < height; screenRow++) {
@@ -4104,7 +4321,7 @@ export class TUI extends Container {
 		this.terminal.write(buffer);
 		this.#committedRows = chunkTo;
 		this.#windowTopRow = windowTop;
-		this.#commit(frame, window, width, height, cursorControl);
+		this.#commit(frame.length, window, width, height, cursorControl);
 	}
 
 	/** Optional intent log under PI_DEBUG_REDRAW. */

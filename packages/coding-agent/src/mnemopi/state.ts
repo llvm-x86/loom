@@ -158,6 +158,117 @@ export interface MnemopiScopedMemoryHit {
 
 type MnemopiRetentionMessage = { role: string; content: string };
 
+/** Batch-only edit ops: text-anchored mutations validated against an
+ * in-memory copy of the row before anything is committed. */
+export type MnemopiMemoryBatchOpKind = MnemopiMemoryEditOperation | "replace" | "remove";
+
+export interface MnemopiMemoryBatchOperationInput {
+	op: MnemopiMemoryBatchOpKind;
+	id: string;
+	content?: string;
+	importance?: number;
+	replacementId?: string;
+	oldText?: string;
+	newText?: string;
+}
+
+/** Read-side view of one batch target, supplied by the caller's resolver. */
+export interface MnemopiMemoryBatchTarget {
+	content: string;
+	store: MnemopiMemoryStore;
+}
+
+/** One validated mutation, ready to commit through editScopedMemory. */
+export interface MnemopiMemoryBatchCommit {
+	op: MnemopiMemoryEditOperation;
+	id: string;
+	content?: string;
+	importance?: number;
+	replacementId?: string;
+}
+
+export type MnemopiMemoryBatchPlan =
+	| { ok: true; commits: MnemopiMemoryBatchCommit[] }
+	| { ok: false; failedIndex: number; reason: string };
+
+function countOccurrences(haystack: string, needle: string): number {
+	if (needle.length === 0) return 0;
+	let count = 0;
+	let from = 0;
+	for (;;) {
+		const at = haystack.indexOf(needle, from);
+		if (at === -1) return count;
+		count++;
+		from = at + needle.length;
+	}
+}
+
+/**
+ * Validate a whole memory_edit batch against in-memory copies and produce
+ * the ordered commit list. ALL-OR-NOTHING: any op that cannot resolve its
+ * id, is not editable, lacks required fields, or whose `oldText` does not
+ * match the target content EXACTLY ONCE rejects the entire batch with the
+ * failing op index — nothing here mutates the store, and callers MUST NOT
+ * commit anything when `ok` is false. Ops against the same id chain on the
+ * pending in-memory content, so later ops see earlier edits.
+ */
+export function planMemoryBatch(
+	ops: readonly MnemopiMemoryBatchOperationInput[],
+	resolve: (id: string) => MnemopiMemoryBatchTarget | null,
+): MnemopiMemoryBatchPlan {
+	const commits: MnemopiMemoryBatchCommit[] = [];
+	const pending = new Map<string, string>();
+	for (let index = 0; index < ops.length; index++) {
+		const item = ops[index];
+		const target = resolve(item.id);
+		if (!target) return { ok: false, failedIndex: index, reason: `memory ${item.id} was not found` };
+		if (target.store === "fact")
+			return { ok: false, failedIndex: index, reason: `memory ${item.id} is a read-only fact` };
+		if ((item.op === "update" || item.op === "forget" || item.op === "replace" || item.op === "remove") &&
+			target.store !== "working")
+			return { ok: false, failedIndex: index, reason: `memory ${item.id} was not found in a working store` };
+		if (!pending.has(item.id)) pending.set(item.id, target.content);
+		const current = pending.get(item.id) ?? target.content;
+		switch (item.op) {
+			case "update": {
+				if (item.content === undefined && item.importance === undefined)
+					return { ok: false, failedIndex: index, reason: "update requires content or importance" };
+				const next = item.content ?? current;
+				pending.set(item.id, next);
+				commits.push({ op: "update", id: item.id, content: next, importance: item.importance });
+				break;
+			}
+			case "replace":
+			case "remove": {
+				if (item.oldText === undefined || item.oldText.length === 0)
+					return { ok: false, failedIndex: index, reason: `${item.op} requires old_text` };
+				if (item.op === "replace" && item.newText === undefined)
+					return { ok: false, failedIndex: index, reason: "replace requires new_text" };
+				const matches = countOccurrences(current, item.oldText);
+				if (matches === 0)
+					return { ok: false, failedIndex: index, reason: "old_text was not found in the memory content" };
+				if (matches > 1)
+					return {
+						ok: false,
+						failedIndex: index,
+						reason: `old_text matches ${matches} times; it must match exactly once`,
+					};
+				const next = current.replace(item.oldText, item.op === "replace" ? (item.newText ?? "") : "");
+				pending.set(item.id, next);
+				commits.push({ op: "update", id: item.id, content: next });
+				break;
+			}
+			case "forget":
+				commits.push({ op: "forget", id: item.id });
+				break;
+			case "invalidate":
+				commits.push({ op: "invalidate", id: item.id, replacementId: item.replacementId });
+				break;
+		}
+	}
+	return { ok: true, commits };
+}
+
 function sliceUnretainedMessages(
 	messages: MnemopiRetentionMessage[],
 	lastRetainedTurn: number,

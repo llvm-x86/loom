@@ -125,6 +125,47 @@ class VersionedFinalizedBlock implements Component {
 	}
 }
 
+// A finalized block with the per-width render cache every transcript renderer
+// keeps, plus the release hook the container calls once its rows are immutable
+// native scrollback. Re-deriving from `#source` is the rehydration path.
+class ReleasableBlock implements Component {
+	renderCount = 0;
+	releaseCount = 0;
+	#source: string[];
+	#cacheWidth: number | undefined;
+	#cache: string[] | undefined;
+
+	constructor(source: string[]) {
+		this.#source = source;
+	}
+
+	get cached(): boolean {
+		return this.#cache !== undefined;
+	}
+
+	isTranscriptBlockFinalized(): boolean {
+		return true;
+	}
+
+	invalidate(): void {
+		this.#cacheWidth = undefined;
+		this.#cache = undefined;
+	}
+
+	releaseNativeScrollbackRenderCache(): void {
+		this.releaseCount++;
+		this.invalidate();
+	}
+
+	render(width: number): string[] {
+		if (this.#cache !== undefined && this.#cacheWidth === width) return this.#cache;
+		this.renderCount++;
+		this.#cacheWidth = width;
+		this.#cache = this.#source.map(line => line.slice(0, width));
+		return this.#cache;
+	}
+}
+
 beforeAll(() => {
 	initTheme();
 });
@@ -434,6 +475,59 @@ describe("TranscriptContainer", () => {
 		// the transcript container's committed-scrollback bypass.
 		component.setErrorPinned(false);
 		expect(component.getTranscriptBlockVersion()).toBeGreaterThan(pinnedVersion);
+	});
+
+	it("releases a fully committed block's render cache and keeps the assembled rows", () => {
+		const container = new TranscriptContainer();
+		const committed = new ReleasableBlock(["alpha", "beta"]);
+		const tail = new ReleasableBlock(["tail"]);
+		container.addChild(committed);
+		container.addChild(tail);
+
+		expect(container.render(40)).toEqual(["alpha", "beta", "", "tail"]);
+		expect(committed.cached).toBe(true);
+
+		// Both of the first block's rows are on the tape; the tail is not.
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["alpha", "beta", "", "tail"]);
+		expect(committed.releaseCount).toBe(1);
+		expect(committed.cached).toBe(false);
+		expect(tail.releaseCount).toBe(0);
+
+		// Released once, replayed from the assembly afterwards: no re-render, no
+		// release churn, and the frame is unchanged.
+		expect(container.render(40)).toEqual(["alpha", "beta", "", "tail"]);
+		expect(committed.renderCount).toBe(1);
+		expect(committed.releaseCount).toBe(1);
+	});
+
+	it("does not release a block whose rows are only partly committed", () => {
+		const container = new TranscriptContainer();
+		const block = new ReleasableBlock(["alpha", "beta", "gamma"]);
+		container.addChild(block);
+
+		expect(container.render(40)).toEqual(["alpha", "beta", "gamma"]);
+		container.setNativeScrollbackCommittedRows(2);
+		expect(container.render(40)).toEqual(["alpha", "beta", "gamma"]);
+		expect(block.releaseCount).toBe(0);
+	});
+
+	it("re-renders a released block at the new width on resize", () => {
+		const container = new TranscriptContainer();
+		const committed = new ReleasableBlock(["alphabet-soup", "beta"]);
+		container.addChild(committed);
+		container.addChild(new ReleasableBlock(["tail"]));
+
+		container.render(40);
+		container.setNativeScrollbackCommittedRows(2);
+		container.render(40);
+		expect(committed.cached).toBe(false);
+
+		// A width change wipes the assembly, so the released block must
+		// rehydrate from its own source rather than replay stale rows.
+		expect(container.render(6)).toEqual(["alphab", "beta", "", "tail"]);
+		expect(committed.renderCount).toBe(2);
+		expect(container.render(40)).toEqual(["alphabet-soup", "beta", "", "tail"]);
 	});
 });
 

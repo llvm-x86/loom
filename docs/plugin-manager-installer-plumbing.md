@@ -25,7 +25,7 @@ omp plugin <npm/link action> ...
   -> getAllPluginToolPaths(cwd) / getAllPluginExtensionPaths(cwd)
   -> custom tool loader imports tool modules; extension loader imports extension modules
 
-omp plugin install name@marketplace / omp install name@marketplace
+omp plugin install name@marketplace / loom install name@marketplace
   -> MarketplaceManager
   -> mutate ~/.omp/marketplaces.json, ~/.omp/plugins/installed_plugins.json, cache dirs
   -> installed marketplace plugin cache is surfaced as plugin roots/capabilities

@@ -1,8 +1,8 @@
 /**
- * Bun `--preload` shim for the omp dev launcher (`scripts/omp`).
+ * Bun `--preload` shim for the loom dev launcher (`scripts/loom`).
  *
  * The launcher starts Bun from an empty, bunfig-free directory so a foreign
- * project's `bunfig.toml` `preload` cannot run inside the omp CLI: Bun reads
+ * project's `bunfig.toml` `preload` cannot run inside the loom CLI: Bun reads
  * `bunfig.toml` from the *current working directory* on startup and evaluates
  * its `preload` entries before the entrypoint, so a bun-shebang bin inherits
  * whatever `preload` the directory you launched from declares (and crashes if

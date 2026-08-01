@@ -15,7 +15,7 @@
  *
  * When both signals were false, the loader skipped the embedded-addon
  * extraction path and only tried `nativeDir` (the dev machine's checkout) and
- * `execDir`. On WSL with `~/.local/bin/omp` and no sibling `.node` file, this
+ * `execDir`. On WSL with `~/.local/bin/loom` and no sibling `.node` file, this
  * failed with the error reported in the issue.
  *
  * The fix is to make the loader's compiled-binary detection authoritative on
@@ -113,7 +113,7 @@ describe("issue 823: standalone-binary native loader path resolution", () => {
 
 		// Versioned cache and user-data dir candidates must exist for compiled binaries —
 		// these are where the embedded-addon extraction lands (~/.omp/natives/<v>) and where
-		// `omp update` writes the standalone binary on linux (~/.local/bin).
+		// `loom update` writes the standalone binary on linux (~/.local/bin).
 		expect(candidates).toContain(versionedModern);
 		expect(candidates).toContain(versionedBaseline);
 		expect(candidates).toContain(userDataModern);
