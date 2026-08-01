@@ -3594,6 +3594,17 @@ export const readToolRenderer = {
 				cachedExpanded = undefined;
 				cachedLines = undefined;
 			},
+			// Every row this block contributed is immutable native scrollback and
+			// the transcript still holds the assembled copy, so the rendered cell
+			// is dead weight — a read result keeps one highlighted, wrapped copy
+			// of its output alive for the whole session otherwise. `contentText`
+			// is the source of truth; a width change or a scrollback replay
+			// re-renders from it through the same path as the first render.
+			releaseNativeScrollbackRenderCache: () => {
+				cachedWidth = undefined;
+				cachedExpanded = undefined;
+				cachedLines = undefined;
+			},
 		});
 	},
 	mergeCallAndResult: true,

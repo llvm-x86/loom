@@ -4,6 +4,7 @@ import {
 	type NativeScrollbackCommittedRows,
 	type NativeScrollbackLiveRegion,
 	type RenderStablePrefix,
+	releaseNativeScrollbackRenderCache,
 	type ViewportTailProvider,
 } from "@oh-my-pi/pi-tui";
 
@@ -109,11 +110,22 @@ function stripPlainBlankEdges(lines: readonly string[]): readonly string[] {
  * Component render contract, an identical raw reference proves the block's
  * rows are byte-identical, so the stripped contribution and the assembled rows
  * can be reused without re-deriving anything.
+ *
+ * Once every row a finalized block contributed has entered native scrollback
+ * the segment is RELEASED: both arrays are dropped (along with the block's own
+ * render cache) and only the geometry survives, because the assembled rows are
+ * already in `#lines` and immutable. A released segment replays from there;
+ * rebuilding the assembly (a width change, a generation bump) re-renders the
+ * block from its own source instead.
  */
 interface BlockSegment {
 	component: Component;
-	rawRef: readonly string[];
-	contribution: readonly string[];
+	rawRef: readonly string[] | undefined;
+	contribution: readonly string[] | undefined;
+	/** Geometry of the dropped arrays, kept so a released segment still maps rows. */
+	rawLength: number;
+	rawLeadingBlanks: number;
+	contributionLength: number;
 	width: number;
 	generation: number;
 	/** Frame row of this block's first emitted row (the separator when present). */
@@ -125,6 +137,8 @@ interface BlockSegment {
 	finalized: boolean;
 	/** Block version observed when this segment was rendered (see {@link FinalizableBlock}). */
 	version: number | undefined;
+	/** Arrays dropped; `#lines` is the only copy of these rows. */
+	released: boolean;
 }
 
 const EMPTY_SEGMENTS: BlockSegment[] = [];
@@ -202,7 +216,7 @@ export class TranscriptContainer
 			const segment = this.#segments[i];
 			if (segment === undefined || segment.component !== child) continue;
 			const committedContribution = Math.min(
-				segment.contribution.length,
+				segment.contributionLength,
 				Math.max(0, this.#committedRows - segment.startRow - segment.sep),
 			);
 			if (committedContribution === 0) {
@@ -212,11 +226,7 @@ export class TranscriptContainer
 			// Transcript assembly strips plain blank edges from each block. Map the
 			// committed contribution back into the child's raw render coordinates so
 			// nested containers can split the prefix against their exact child rows.
-			let leadingTrimmedRows = 0;
-			while (leadingTrimmedRows < segment.rawRef.length && isPlainBlank(segment.rawRef[leadingTrimmedRows]!)) {
-				leadingTrimmedRows++;
-			}
-			setBlockCommittedRows(child, Math.min(segment.rawRef.length, leadingTrimmedRows + committedContribution));
+			setBlockCommittedRows(child, Math.min(segment.rawLength, segment.rawLeadingBlanks + committedContribution));
 		}
 	}
 
@@ -340,6 +350,24 @@ export class TranscriptContainer
 			if (previous.startRow >= this.#committedRows) break;
 			if (previous.rowCount === 0 || previous.component !== this.children[i]) continue;
 			sealCommittedSnapshot(previous.component);
+			// Shed the block's render cache once EVERY row it contributed is
+			// immutable native scrollback. The assembled rows stay in #lines, so
+			// the frame is unchanged and the block is never rendered again while
+			// the assembly holds; a width change or a generation bump rebuilds
+			// the assembly and re-renders the block from its own source. Without
+			// this the transcript pins one rendered copy of every tool result,
+			// markdown block and diff for the lifetime of the session.
+			if (
+				!previous.released &&
+				previous.finalized &&
+				previous.startRow + previous.rowCount <= this.#committedRows &&
+				isBlockFinalized(previous.component)
+			) {
+				releaseNativeScrollbackRenderCache(previous.component);
+				previous.rawRef = undefined;
+				previous.contribution = undefined;
+				previous.released = true;
+			}
 		}
 
 		// The commit boundary stops at the earliest still-mutating block. A
@@ -418,15 +446,31 @@ export class TranscriptContainer
 				// bump the block version; a mismatch forces a real render so the
 				// committed-prefix audit can observe and re-anchor the change.
 				previous.version === version;
-			const raw = committedReusable ? previous.rawRef : child.render(width);
+			// A released segment has no arrays left to replay, but its rows are
+			// still in the assembled array at the exact offset it recorded — as
+			// long as the chain above it is stable, it needs neither a render nor
+			// a re-push. When the chain breaks (a width change wiped the
+			// assembly, or a block above changed shape) the block renders again
+			// and re-derives its cache, which is the rehydration path.
+			if (
+				committedReusable &&
+				previous.released &&
+				chainStable &&
+				previous.sep === (row > 0 && !isPlainBlank(lines[row - 1]!) ? 1 : 0)
+			) {
+				stableRows = row + previous.rowCount;
+				segments[i] = previous;
+				row += previous.rowCount;
+				continue;
+			}
+			const raw = committedReusable && previous.rawRef !== undefined ? previous.rawRef : child.render(width);
 			const reusable =
-				committedReusable ||
-				(previous !== undefined &&
-					previous.component === child &&
-					previous.rawRef === raw &&
-					previous.width === width &&
-					previous.generation === this.#generation);
-			const contribution = reusable ? previous.contribution : stripPlainBlankEdges(raw);
+				previous !== undefined &&
+				previous.component === child &&
+				previous.rawRef === raw &&
+				previous.width === width &&
+				previous.generation === this.#generation;
+			const contribution = reusable ? previous.contribution! : stripPlainBlankEdges(raw);
 
 			// Empty (or stripped-to-nothing) children contribute nothing and never
 			// affect spacing. An empty still-live child still gates the commit
@@ -445,6 +489,9 @@ export class TranscriptContainer
 					component: child,
 					rawRef: raw,
 					contribution,
+					rawLength: raw.length,
+					rawLeadingBlanks: 0,
+					contributionLength: 0,
 					width,
 					generation: this.#generation,
 					startRow: row,
@@ -452,6 +499,7 @@ export class TranscriptContainer
 					sep: 0,
 					finalized,
 					version,
+					released: false,
 				};
 				continue;
 			}
@@ -492,10 +540,15 @@ export class TranscriptContainer
 				for (let j = 0; j < contribution.length; j++) lines.push(contribution[j]!);
 			}
 
+			let rawLeadingBlanks = 0;
+			while (rawLeadingBlanks < raw.length && isPlainBlank(raw[rawLeadingBlanks]!)) rawLeadingBlanks++;
 			segments[i] = {
 				component: child,
 				rawRef: raw,
 				contribution,
+				rawLength: raw.length,
+				rawLeadingBlanks,
+				contributionLength: contribution.length,
 				width,
 				generation: this.#generation,
 				startRow: row,
@@ -503,6 +556,7 @@ export class TranscriptContainer
 				sep,
 				finalized,
 				version,
+				released: false,
 			};
 			row += rowCount;
 		}

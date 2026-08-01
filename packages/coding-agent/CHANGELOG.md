@@ -4,6 +4,7 @@
 
 ### Changed
 
+- `TranscriptContainer` now releases a block's per-width render cache once every row it contributed has entered native scrollback, and drops its own recorded copies of that block's rows. The assembled transcript keeps the rows, so the frame is byte-identical and the block is never re-rendered while the assembly holds; a width change, theme invalidation, or destructive scrollback replay rebuilds the assembly and the block re-derives from its own source. `readToolRenderer.renderResult` is the reference implementation of the new `releaseNativeScrollbackRenderCache` hook.
 - Bounded the discovery filesystem caches in `capability/fs`: `readFile` text and `readDirEntries` listings now live in LRUs capped by `CONTENT_CACHE_MAX_ENTRIES` / `CONTENT_CACHE_MAX_CHARS` and `DIR_CACHE_MAX_ENTRIES` / `DIR_CACHE_MAX_DIRENTS` instead of unbounded `Map`s that retained every file and every cwd ancestor for the life of the process. A miss costs one re-read
 - Bounded `DiagnosticsLedger` by `DIAGNOSTICS_LEDGER_MAX_FILES` / `DIAGNOSTICS_LEDGER_MAX_IDENTITIES`; evicting a cold file re-reports its diagnostics once
 - Bounded the LSP `configCache` (`LSP_CONFIG_CACHE_MAX`) and the Biome failure-dedupe set (`BIOME_FAILURE_DEDUPE_MAX`), both previously unbounded module globals keyed by cwd
