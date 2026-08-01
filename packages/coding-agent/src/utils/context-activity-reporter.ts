@@ -14,10 +14,10 @@
  */
 import { withTimeoutSignal } from "./fetch-timeout";
 
-export type ContextActivityKind = "sync" | "compaction";
+export type ContextActivityKind = "sync" | "compaction" | "repair";
 export type ContextActivityPhase = "start" | "done" | "skip" | "fail";
-/** Matches `SessionContextSyncReason`; compaction events always report "compaction". */
-export type ContextActivityTrigger = "compaction" | "idle" | "shutdown";
+/** Matches `SessionContextSyncReason`; compaction events always report "compaction", ledger-repair events always "repair". */
+export type ContextActivityTrigger = "compaction" | "idle" | "shutdown" | "repair";
 /** Terminal write outcome on `phase: "done"` — every ledger persisted, or a cut-invariant guard refused the write. */
 export type ContextActivityOutcome = "persisted" | "refused";
 

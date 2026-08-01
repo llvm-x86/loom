@@ -191,14 +191,25 @@ describe("sessionContextSync", () => {
 			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
 		});
 
-		it("refuses a reply that drops a heading the current file has", async () => {
+		it("REPAIRS a reply that drops a heading by splicing it back from the previous file", async () => {
+			// Dropped-heading used to be the third refusal class, but the section
+			// bytes are still in the previous file, so the sync writer splices the
+			// lost section back (preserveHazards-style cut-and-paste) instead of
+			// vetoing the whole write.
 			const ledgerPath = seed();
 			const noLandmines = "# owner/repo — status ledger\n\n## Current state\nRewritten whole, hazards gone.\n";
 			const { session } = makeSession(dir, makeSettings({ dir }), noLandmines);
 
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
 
-			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+			const written = readFileSync(ledgerPath, "utf8");
+			// The dropped section is restored VERBATIM and lands in its original
+			// hazards-first slot; the model's rewrite of the surviving section
+			// still lands too.
+			expect(written).toContain("## Landmines\n- ⚠️ a standing constraint.");
+			expect(written).toContain("## Current state\nRewritten whole, hazards gone.");
+			expect(written.match(/^## .+$/m)?.[0]).toBe("## Landmines");
+			expect(written.indexOf("## Landmines")).toBeLessThan(written.indexOf("## Current state"));
 		});
 
 		it("accepts a reply that REWORDS an annotated heading without dropping the section", async () => {
@@ -225,10 +236,12 @@ describe("sessionContextSync", () => {
 			expect(written).toContain("Updated.");
 		});
 
-		it("still refuses when two headings share a key and one of them vanishes", async () => {
+		it("RESTORES one of two same-key sections when a rewrite drops the other", async () => {
 			// Key normalisation must not open a hole: "## Landmines" and
 			// "## Landmines (infra)" collapse to the same key, so presence alone would
-			// let one disappear silently. Counts, not a set.
+			// let one disappear silently. Counts, not a set — and the dropped
+			// occurrence is spliced back VERBATIM from the previous file, in its
+			// original slot, not merely detected.
 			const ledgerPath = join(dir, "owner-repo.md");
 			const twoSections =
 				"# owner/repo — status ledger\n\n## Landmines\n- ⚠️ a standing constraint.\n\n## Landmines (infra)\n- ⚠️ an infra constraint.\n\n## Current state\nIntact.\n";
@@ -239,16 +252,23 @@ describe("sessionContextSync", () => {
 
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
 
-			expect(readFileSync(ledgerPath, "utf8")).toBe(twoSections);
+			const written = readFileSync(ledgerPath, "utf8");
+			expect(written).toContain("## Landmines (infra)\n- ⚠️ an infra constraint.");
+			// The restored section sits between its same-key sibling and Current
+			// state — the slot it was cut from.
+			expect(written.indexOf("## Landmines\n")).toBeLessThan(written.indexOf("## Landmines (infra)"));
+			expect(written.indexOf("## Landmines (infra)")).toBeLessThan(written.indexOf("## Current state"));
 		});
 
-		it("refuses a wholesale rewrite that reorders hazards away from the first section", async () => {
+		it("REPAIRS a wholesale rewrite that reorders hazards away from the first section", async () => {
+			// All headings present, but Landmines reordered to the END. That used to
+			// be refuse-only; the fix is cut-and-paste with in-memory data, so the
+			// writer moves the hazard extent (byte-identical) back to the first '##'
+			// slot — the positional rule agent-chat's ledger-guard enforces — and
+			// still lands the rewrite. Enforced positionally, NOT by a byte budget:
+			// the old byte-window form permanently froze any ledger whose hazards
+			// legitimately grew past 4096 bytes.
 			const ledgerPath = seed();
-			// All headings present (shrinkage check passes), but Landmines was reordered
-			// to the END — the reorder case. Enforced positionally (hazards must be the
-			// first '##' section, same rule as agent-chat's ledger-guard), NOT by a byte
-			// budget: the old byte-window form of this check permanently froze any ledger
-			// whose hazards legitimately grew past 4096 bytes.
 			const narrative = `${"- narrative bullet padding past the window.\n".repeat(160)}`;
 			const reordered = `# owner/repo — status ledger\n\n## Current state\n${narrative}\n## Landmines\n- ⚠️ a standing constraint.\n`;
 			expect(Buffer.byteLength(reordered, "utf8")).toBeGreaterThan(4096);
@@ -256,7 +276,15 @@ describe("sessionContextSync", () => {
 
 			await maybeSync(session, "compaction", { resolveRepo: async () => "owner/repo" });
 
-			expect(readFileSync(ledgerPath, "utf8")).toBe(INTACT);
+			const written = readFileSync(ledgerPath, "utf8");
+			// Hazards are the first '##' section again, the moved body is
+			// byte-identical (cut-and-paste, never a rewrite), and the model's
+			// 160-bullet narrative survived the move.
+			expect(written.match(/^## .+$/m)?.[0]).toBe("## Landmines");
+			expect(written).toContain("## Landmines\n- ⚠️ a standing constraint.\n\n## Current state");
+			expect(written.indexOf("## Landmines")).toBeLessThan(written.indexOf("## Current state"));
+			expect(written.split("\n").filter(l => l.includes("narrative bullet padding")).length).toBe(160);
+			expect(Buffer.byteLength(written, "utf8")).toBeGreaterThan(4096);
 		});
 
 		it("WRITES a hazards-first ledger whose hazard section runs past 4096 bytes", async () => {
