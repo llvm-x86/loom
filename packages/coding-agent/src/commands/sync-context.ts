@@ -11,15 +11,37 @@
  * Sets `syncContextCliMode` on the session — a recursion guard so this
  * session's own dispose neither arms an idle context-sync timer nor writes
  * another shutdown spool (it already ran the sync itself, right here).
+ *
+ * Repair mode: `loom sync-context --repair <slug|all> [--dry-run]` is the
+ * LLM-free ledger self-repair entry point (driven by agent-chat's repair
+ * tick). It never loads a session: the ledger directory is resolved from
+ * settings exactly the way the sync resolves it, each on-disk ledger is
+ * validated/reordered by session-context-sync's `repairLedgerOnDisk`
+ * (hazards-first block move ONLY — marker-class and missing-hazards ledgers
+ * stay refused with their named reason), `repair` Context Activity events
+ * are emitted per the frozen wire shape (session_id "ledger-repair"), one
+ * final JSON summary line is printed, and the exit code is 0 when every
+ * ledger was repaired or needed nothing, 1 on any refusal.
  */
 
 import { existsSync } from "node:fs";
+import * as fs from "node:fs/promises";
+import * as path from "node:path";
 import { CliUsageError, Command, Flags } from "@oh-my-pi/pi-utils/cli";
+import { Settings } from "../config/settings";
 import { createAgentSession } from "../sdk";
 import { SessionManager } from "../session/session-manager";
-import { reportContextActivity, type ContextActivityOutcome } from "../utils/context-activity-reporter";
+import { expandTilde } from "../tools/path-utils";
 import {
+	type ContextActivityEvent,
+	type ContextActivityOutcome,
+	type ContextActivityPhase,
+	reportContextActivity,
+} from "../utils/context-activity-reporter";
+import {
+	type LedgerRepairResult,
 	maybeSync,
+	repairLedgerOnDisk,
 	type SessionContextSyncReason,
 	type SessionContextSyncSession,
 } from "../utils/session-context-sync";
@@ -36,20 +58,186 @@ interface SyncContextSummary {
 
 const VALID_REASONS: readonly SessionContextSyncReason[] = ["compaction", "shutdown", "idle"];
 
+/** Fixed session identity on every ledger-repair event (frozen wire shape). */
+const REPAIR_SESSION_LABEL = "ledger-repair";
+
+/** One skipped/refused ledger in the repair summary (frozen JSON wire shape). */
+export interface LedgerRepairEntry {
+	slug: string;
+	reason: string;
+}
+
+/** Frozen JSON summary line printed by `--repair`; agent-chat's repair tick parses exactly this. */
+export interface LedgerRepairSummary {
+	ok: boolean;
+	repaired: string[];
+	skipped: LedgerRepairEntry[];
+	refused: LedgerRepairEntry[];
+}
+
+export interface LedgerRepairDeps {
+	/** Defaults to session-context-sync's `repairLedgerOnDisk`. */
+	repairLedger?: (ledgerPath: string, opts: { dryRun: boolean }) => Promise<LedgerRepairResult>;
+	/** Defaults to the fire-and-forget HTTP reporter at the configured `reportUrl`. */
+	reportEvent?: (event: ContextActivityEvent) => void;
+	/** Defaults to listing `<ledgerDir>/*.md`, skipping `_`-prefixed files (e.g. `_TEMPLATE.md`). */
+	listSlugs?: (ledgerDir: string) => Promise<string[]>;
+	/** Correlates every event of this run; defaults to a fresh uuid. */
+	activityId?: string;
+	now?: () => number;
+}
+
+async function listLedgerSlugs(ledgerDir: string): Promise<string[]> {
+	let entries: string[];
+	try {
+		entries = await fs.readdir(ledgerDir);
+	} catch {
+		return []; // No ledger directory yet — nothing to repair.
+	}
+	return entries
+		.filter(name => name.endsWith(".md") && !name.startsWith("_"))
+		.map(name => name.slice(0, -".md".length))
+		.sort();
+}
+
+/**
+ * LLM-free on-disk ledger repair behind `--repair`. Validates and reorders
+ * each target ledger via `repairLedgerOnDisk`, emits one `start` plus one
+ * terminal (`done`/`skip`/`fail`) repair event per ledger per the frozen
+ * wire shape, and returns the frozen summary. Classification of a
+ * non-repaired result keys off the owned reason vocabulary: `"valid;"` /
+ * `"dry-run:"` prefixes mean nothing-to-do (skip lane); every other reason
+ * is a refusal (counts toward the exit-1 summary). Dry-run never writes and
+ * reports every terminal event as `skip` with a `"dry-run: <verdict>"`
+ * note, but classifies identically — a surveyed refusal is still a refusal.
+ */
+export async function repairLedgers(
+	ledgerDir: string,
+	target: string,
+	dryRun: boolean,
+	reportUrl: string,
+	deps: LedgerRepairDeps = {},
+): Promise<LedgerRepairSummary> {
+	const repairLedger = deps.repairLedger ?? repairLedgerOnDisk;
+	const reportEvent =
+		deps.reportEvent ??
+		(reportUrl ? (event: ContextActivityEvent) => reportContextActivity(event, reportUrl) : undefined);
+	const listSlugs = deps.listSlugs ?? listLedgerSlugs;
+	const now = deps.now ?? Date.now;
+	const activityId = deps.activityId ?? Bun.randomUUIDv7();
+	const summary: LedgerRepairSummary = { ok: true, repaired: [], skipped: [], refused: [] };
+	const emit = (phase: ContextActivityPhase, slug: string, extra: Partial<ContextActivityEvent> = {}) => {
+		reportEvent?.({
+			id: activityId,
+			kind: "repair",
+			phase,
+			session_id: REPAIR_SESSION_LABEL,
+			session_label: REPAIR_SESSION_LABEL,
+			trigger: "repair",
+			repos: [slug],
+			ts: now(),
+			...extra,
+		});
+	};
+
+	const slugs = target === "all" ? await listSlugs(ledgerDir) : [target];
+	for (const slug of slugs) {
+		const ledgerPath = path.join(ledgerDir, `${slug}.md`);
+		emit("start", slug);
+		if (!existsSync(ledgerPath)) {
+			const reason = `ledger not found: ${ledgerPath}`;
+			emit("skip", slug, { error: reason });
+			summary.skipped.push({ slug, reason });
+			continue;
+		}
+		let result: LedgerRepairResult;
+		try {
+			result = await repairLedger(ledgerPath, { dryRun });
+		} catch (error) {
+			// One ledger throwing must not strand its siblings (same rule as the
+			// multi-repo sync); a throw means THIS ledger is unrepaired, so it
+			// lands in the refused lane and fails the run.
+			const reason = `repair threw — ${error instanceof Error ? error.message : String(error)}`;
+			emit("fail", slug, { error: reason });
+			summary.refused.push({ slug, reason });
+			continue;
+		}
+		if (result.repaired) {
+			emit("done", slug, { outcome: "persisted" });
+			summary.repaired.push(slug);
+			continue;
+		}
+		const reason = result.reason ?? "not repaired";
+		if (dryRun) {
+			// Frozen dry-run emission: always a skip carrying the computed verdict.
+			emit("skip", slug, { error: reason.startsWith("dry-run:") ? reason : `dry-run: ${reason}` });
+		} else if (reason.startsWith("valid;") || reason.startsWith("dry-run:")) {
+			emit("skip", slug, { error: reason });
+		} else {
+			// A refusal completes without writing — mirror the sync path's
+			// terminal `done` + explicit outcome so ingest can tell it apart
+			// from a real repair.
+			emit("done", slug, { outcome: "refused", refuse_reason: reason, error: `ledger not repaired — ${reason}` });
+		}
+		if (reason.startsWith("valid;") || reason.startsWith("dry-run:")) {
+			summary.skipped.push({ slug, reason });
+		} else {
+			summary.refused.push({ slug, reason });
+		}
+	}
+	summary.ok = summary.refused.length === 0;
+	return summary;
+}
+
+/** Print the frozen summary line and exit once stdout has flushed (same idiom as the sync path below). */
+function printRepairSummaryAndExit(summary: LedgerRepairSummary): void {
+	const code = summary.ok ? 0 : 1;
+	const bail = setTimeout(() => process.exit(code), 10_000);
+	process.stdout.write(`${JSON.stringify(summary)}\n`, () => {
+		clearTimeout(bail);
+		process.exit(code);
+	});
+}
+
+/** `--repair` entry: settings-only (no session), then the LLM-free repair pass. */
+async function runRepairMode(target: string, dryRun: boolean, activityId: string | undefined): Promise<void> {
+	const settings = await Settings.loadReadOnly();
+	const syncSettings = settings.getGroup("sessionContextSync");
+	if (!syncSettings.dir) {
+		throw new CliUsageError(
+			"sync-context --repair requires sessionContextSync.dir (the ledger directory) to be configured",
+		);
+	}
+	const summary = await repairLedgers(expandTilde(syncSettings.dir), target, dryRun, syncSettings.reportUrl, {
+		activityId,
+	});
+	printRepairSummaryAndExit(summary);
+}
+
 export default class SyncContext extends Command {
 	static description = "Run a one-shot session-context sync out-of-band (used by agent-chat's shutdown worker)";
 	static hidden = true;
 
 	static flags = {
-		resume: Flags.string({ description: "Transcript path to resume", required: true }),
+		resume: Flags.string({ description: "Transcript path to resume (not used with --repair)" }),
 		reason: Flags.string({ description: "Sync reason recorded on the emitted events", default: "shutdown" }),
 		"activity-id": Flags.string({
 			description: "Activity id to correlate with an existing spool/job record",
+		}),
+		repair: Flags.string({
+			description: "LLM-free on-disk ledger repair: a repo slug, or 'all' for every ledger in the directory",
+		}),
+		"dry-run": Flags.boolean({
+			description: "With --repair: compute and validate only; write nothing",
 		}),
 	};
 
 	async run(): Promise<void> {
 		const { flags } = await this.parse(SyncContext);
+		if (flags.repair !== undefined) {
+			await runRepairMode(flags.repair, flags["dry-run"] === true, flags["activity-id"]);
+			return;
+		}
 		if (!flags.resume) throw new CliUsageError("sync-context requires --resume <transcript>");
 		if (!existsSync(flags.resume)) {
 			throw new CliUsageError(
