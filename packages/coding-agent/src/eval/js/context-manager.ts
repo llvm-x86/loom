@@ -219,7 +219,7 @@ function stopIdleSweep(): void {
  * fallback). Catches silent process-load and init-message regressions
  * that otherwise strand every cell on the init timeout in a distribution build —
  * the failure mode that motivated `installWorkerInbox`. Wired into
- * `omp --smoke-test` so binary / source / tarball installs all exercise it.
+ * `loom --smoke-test` so binary / source / tarball installs all exercise it.
  */
 export async function smokeTestJsEvalWorker(): Promise<void> {
 	const worker = spawnJsWorker();

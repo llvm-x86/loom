@@ -9,6 +9,10 @@
 - Bounded the LSP `configCache` (`LSP_CONFIG_CACHE_MAX`) and the Biome failure-dedupe set (`BIOME_FAILURE_DEDUPE_MAX`), both previously unbounded module globals keyed by cwd
 - Gave LSP writethrough batches a `WRITETHROUGH_BATCH_MAX` ceiling and a `WRITETHROUGH_BATCH_TTL_MS` idle lifetime so a batch abandoned by a throwing edit call no longer retains its pending file texts forever. The age resets on every touch, so a live batch is never expired
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
+### Fixed
+
+- Fixed shell snapshots being written into a group/world-accessible directory when the well-known `omp-shell-snapshots` path under the system temp dir is already owned by another user: `mkdir`'s `mode` is ignored for an existing directory and the defensive `chmod` fails with `EPERM`, so the UUID filenames (and the env-var values inlined into them) were listable by any local user. The directory is now verified to be a non-symlinked directory owned by the current user at mode `0700`, falling back to a uid-qualified and then a `mkdtemp` path when it is not.
+- Fixed debug report bundles and the log viewer skipping dated process logs written before the `omp` → `loom` rename, which the startup migration relocates into the current state root without renaming.
 
 ## [17.0.5] - 2026-07-18
 

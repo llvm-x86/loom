@@ -1,3 +1,6 @@
+import type { Stats } from "node:fs";
+import * as fs from "node:fs/promises";
+import { isEnoent } from "@oh-my-pi/pi-utils";
 import { buildDocsIndexPayload } from "./generate-docs-index";
 import { createLegacyPiVirtualModulePlugin } from "./legacy-pi-virtual-module";
 
@@ -23,6 +26,38 @@ export interface CodingAgentCompileOptions {
 }
 
 /**
+ * On Windows an existing executable may be locked (e.g. a running loom process
+ * or a defender scan). Rename it out of the way so Bun.build can write the new
+ * file, then best-effort delete the old copy. Renaming a running executable is
+ * allowed on Windows; deleting it usually is not.
+ */
+async function rotateLockedOutfile(outfile: string): Promise<void> {
+	let stats: Stats | undefined;
+	try {
+		stats = await fs.stat(outfile);
+	} catch (error) {
+		if (isEnoent(error)) return;
+		throw error;
+	}
+	if (!stats.isFile()) return;
+
+	const rotated = `${outfile}.old.${Date.now()}`;
+	try {
+		await fs.rename(outfile, rotated);
+	} catch {
+		// If we can't rotate, Bun.build will fail with EPERM; let that surface.
+		return;
+	}
+
+	// Best-effort cleanup; ignore EPERM/EBUSY if the old binary is still running.
+	try {
+		await fs.unlink(rotated);
+	} catch {
+		/* ignore */
+	}
+}
+
+/**
  * Compile the coding-agent executable with its legacy Pi compatibility module
  * graph supplied by an in-memory build plugin rather than generated files.
  */
@@ -32,6 +67,16 @@ export async function compileCodingAgent(options: CodingAgentCompileOptions): Pr
 		Bun.env.BUN_NO_CODESIGN_MACHO_BINARY = "1";
 	}
 	try {
+		// Bun.build emits an .exe extension on Windows, but callers pass the
+		// base path. If a previous loom.exe is running, Bun.build can't overwrite
+		// it. Rename it first; the rename itself usually succeeds even on locked
+		// files. Also rotate the base path in case the target differs from host.
+		const isWindowsTarget = options.target?.includes("windows") ?? process.platform === "win32";
+		if (isWindowsTarget) {
+			await rotateLockedOutfile(`${options.outfile}.exe`);
+		}
+		await rotateLockedOutfile(options.outfile);
+
 		const output = await Bun.build({
 			entrypoints: [options.entrypoint],
 			root: options.repoRoot,

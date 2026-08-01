@@ -10,8 +10,8 @@
 import type * as fsTypes from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
-import { getActiveSkills } from "../extensibility/skills";
+import { getAgentDir, getProjectAgentDir, isEnoent, parseFrontmatter } from "@oh-my-pi/pi-utils";
+import { getActiveSkills, type Skill } from "../extensibility/skills";
 import { buildDirectoryResource } from "./filesystem-resource";
 import type { InternalResource, InternalUrl, ProtocolHandler, ResolveContext, UrlCompletion } from "./types";
 
@@ -36,6 +36,46 @@ export function validateRelativePath(relativePath: string): void {
 }
 
 /**
+ * Best-effort load of a single skill that was written to disk after the
+ * session started (e.g. the loom-webbridge skill installed by the daemon).
+ * Returns undefined if the skill file does not exist or is invalid.
+ */
+async function loadSkillFromDisk(skillName: string, cwd?: string): Promise<Skill | undefined> {
+	const candidates = [path.join(getAgentDir(), "skills", skillName, "SKILL.md")];
+	if (cwd) {
+		candidates.push(path.join(getProjectAgentDir(cwd), "skills", skillName, "SKILL.md"));
+	}
+
+	for (const skillPath of candidates) {
+		let content: string;
+		try {
+			content = await Bun.file(skillPath).text();
+		} catch (error) {
+			if (isEnoent(error)) continue;
+			return undefined;
+		}
+
+		try {
+			const { frontmatter } = parseFrontmatter(content, { source: skillPath });
+			if (frontmatter.enabled === false) continue;
+			const baseDir = skillPath.replace(/[\\/]SKILL\.md$/, "");
+			return {
+				name: typeof frontmatter.name === "string" && frontmatter.name.trim() ? frontmatter.name.trim() : skillName,
+				description: typeof frontmatter.description === "string" ? frontmatter.description : "",
+				filePath: skillPath,
+				baseDir,
+				source: "ondemand-skill-load",
+				hide: frontmatter.hide === true || frontmatter.disableModelInvocation === true,
+			};
+		} catch {
+			return undefined;
+		}
+	}
+
+	return undefined;
+}
+
+/**
  * Handler for skill:// URLs.
  */
 export class SkillProtocolHandler implements ProtocolHandler {
@@ -50,7 +90,12 @@ export class SkillProtocolHandler implements ProtocolHandler {
 			throw new Error("skill:// URL requires a skill name: skill://<name>");
 		}
 
-		const skill = skills.find(s => s.name === skillName);
+		let skill = skills.find(s => s.name === skillName);
+		if (!skill) {
+			// Skills written after session start (e.g. loom-webbridge) may not be
+			// in the process-global snapshot. Try to load directly from disk.
+			skill = await loadSkillFromDisk(skillName, context?.cwd);
+		}
 		if (!skill) {
 			const available = skills.map(s => s.name);
 			const availableStr = available.length > 0 ? available.join(", ") : "none";

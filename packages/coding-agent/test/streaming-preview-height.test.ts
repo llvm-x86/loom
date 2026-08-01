@@ -12,6 +12,43 @@ import { TUI, visibleWidth } from "@oh-my-pi/pi-tui";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 import { VirtualTerminal } from "../../tui/test/virtual-terminal";
 
+// The renderer only clears native scrollback (ED3) where that is safe. Inside a
+// terminal multiplexer it must not: tmux/screen/zellij pane history belongs to
+// the user, so the engine re-anchors and recommits below the stale fragment
+// instead (duplication, never loss). A scrollback-*replacement* contract is
+// therefore a direct-terminal contract and has to pin the environment — a suite
+// running inside a multiplexer (CI-in-tmux, an agent pane) otherwise exercises
+// the re-anchor branch and sees the previous frames it asserts are gone. TERM is
+// pinned too: the detector falls back to the `tmux-*`/`screen-*` TERM prefix when
+// the session env vars are stripped (`sudo` without -E, env-sanitizing launchers).
+const NO_MULTIPLEXER_ENV: Record<string, string | undefined> = {
+	TMUX: undefined,
+	STY: undefined,
+	ZELLIJ: undefined,
+	CMUX_WORKSPACE_ID: undefined,
+	CMUX_SURFACE_ID: undefined,
+	CMUX_REMOTE_TRANSPORT: undefined,
+	TERM: "xterm-256color",
+};
+
+/** Apply an env patch, returning the restore thunk. */
+function patchEnv(patch: Record<string, string | undefined>): () => void {
+	const saved: Record<string, string | undefined> = {};
+	for (const key in patch) {
+		saved[key] = Bun.env[key];
+		const value = patch[key];
+		if (value === undefined) delete Bun.env[key];
+		else Bun.env[key] = value;
+	}
+	return () => {
+		for (const key in saved) {
+			const value = saved[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+	};
+}
+
 // The streaming edit preview is a fixed-height tail window ("cursor"): the last
 // EDIT_STREAMING_PREVIEW_LINES rows of the recomputed diff are pinned to the
 // bottom, so the box stays a steady, full window of real diff context.
@@ -273,6 +310,10 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 			"+  return finalValue;",
 			" }",
 		].join("\n");
+		// Patch before the TUI is constructed: this test asserts that finalization
+		// *replaces* the streamed preview everywhere in native scrollback, which is
+		// only the contract on a direct terminal (see NO_MULTIPLEXER_ENV).
+		const restoreEnv = patchEnv(NO_MULTIPLEXER_ENV);
 		const { component, term, tui, scheduler } = makeTuiComponent();
 
 		try {
@@ -349,6 +390,7 @@ describe("streaming edit preview height (stable, full tail window)", () => {
 			component.stopAnimation();
 			tui.stop();
 			await term.flush();
+			restoreEnv();
 		}
 		// Real TUI + Ghostty WASM integration can exceed Bun's default budget on CI:
 		// startup, repeated native scrollback refreshes, and throttled render frames are

@@ -1,5 +1,5 @@
 /**
- * `omp auth-broker` command handlers.
+ * `loom auth-broker` command handlers.
  *
  * Sub-verbs:
  *   - `serve [--bind=…]` — boots the broker against the local SQLite store.
@@ -183,7 +183,7 @@ async function runLogin(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	if (!providerArg) {
 		if (flags.via) {
 			throw new Error(
-				"Usage: omp auth-broker login <provider> --via=user@host (provider required for remote login)",
+				"Usage: loom auth-broker login <provider> --via=user@host (provider required for remote login)",
 			);
 		}
 		providerArg = await pickProviderInteractively(providers);
@@ -565,7 +565,7 @@ function describeImportEntry(entry: ImportPlanEntry): string {
 async function runImport(flags: AuthBrokerCommandArgs["flags"]): Promise<void> {
 	const target = flags.source;
 	if (!target) {
-		throw new Error("Usage: omp auth-broker import <file|dir> [--provider=<id>] [--include-disabled] [--dry-run]");
+		throw new Error("Usage: loom auth-broker import <file|dir> [--provider=<id>] [--include-disabled] [--dry-run]");
 	}
 	const resolvedTarget = path.resolve(target.startsWith("~") ? target.replace(/^~/, os.homedir()) : target);
 	const { entries, skipped } = await loadImportPlan(resolvedTarget, flags.provider, flags.includeDisabled === true);

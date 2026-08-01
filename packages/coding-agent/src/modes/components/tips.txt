@@ -11,7 +11,7 @@ Drop the word `ultrathink` in your message for harder multi-step reasoning — w
 Say `orchestrate` in your message to drive a multi-phase task with parallel subagents — watch it glow as you type
 Say `workflowz` in your message to drive the task with parallel subagents in eval — watch it glow as you type
 Log in to several accounts of the same provider — `/login` again — and omp load-balances across them automatically
-Run `omp auth-broker serve` once and every machine pulls live tokens over the wire — refresh keys never leave the host; `omp auth-gateway` fronts it as a drop-in proxy any OpenAI-compatible client can hit
+Run `loom auth-broker serve` once and every machine pulls live tokens over the wire — refresh keys never leave the host; `loom auth-gateway` fronts it as a drop-in proxy any OpenAI-compatible client can hit
 Press alt+p (or /switch) to switch provider, and ctrl+p to cycle role models smol -> slow -> etc
 Press ctrl+r to search your prompt history and reuse a past message
 `/force read` pins the next turn to one specific tool when the model keeps reaching for the wrong one

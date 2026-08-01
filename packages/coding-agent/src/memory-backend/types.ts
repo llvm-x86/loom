@@ -74,6 +74,12 @@ export interface MemoryBackendOperationContext {
 	agentDir: string;
 	cwd: string;
 	session?: AgentSession;
+	/**
+	 * Runtime session id for provenance stamping, for callers that hold a
+	 * ToolSession (no AgentSession) rather than a full session — e.g. the
+	 * learn tool. Never model-supplied.
+	 */
+	sessionId?: string | null;
 }
 
 export interface MemoryRuntimeContext {

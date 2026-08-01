@@ -138,7 +138,7 @@ Commands:
 Model / agent:
   -m, --model <provider/model>   Model (repeatable). Default anthropic/claude-sonnet-4-6
       --agent <name>             omp (default) | oracle | nop | any harbor agent
-      --install <source|local|published> omp install mode (default: source).
+      --install <source|local|published> loom install mode (default: source).
                                  source = mount /work/pi read-only + prebuilt linux deps tree; TS changes
                                  apply per-trial with no rebuild. local = pack a tarball. published = npm.
       --version <v>              omp version for published install (default: latest)

@@ -31,6 +31,43 @@ function plainBuffer(term: VirtualTerminal): string[] {
 		.filter(Boolean);
 }
 
+// `resetDisplay()` only clears native scrollback (ED3) where that is safe. Inside
+// a terminal multiplexer it must not: tmux/screen/zellij pane history belongs to
+// the user, so the engine re-anchors and recommits below the stale frame instead
+// (duplication, never loss). The buffer-level test below asserts the stale rows
+// are *removed*, which is the direct-terminal contract, so it has to pin the
+// environment — a suite running inside a multiplexer (CI-in-tmux, an agent pane)
+// otherwise exercises the re-anchor branch and still sees the pending tail. TERM
+// is pinned too: the detector falls back to the `tmux-*`/`screen-*` TERM prefix
+// when the session env vars are stripped (`sudo` without -E, sanitizing launchers).
+const NO_MULTIPLEXER_ENV: Record<string, string | undefined> = {
+	TMUX: undefined,
+	STY: undefined,
+	ZELLIJ: undefined,
+	CMUX_WORKSPACE_ID: undefined,
+	CMUX_SURFACE_ID: undefined,
+	CMUX_REMOTE_TRANSPORT: undefined,
+	TERM: "xterm-256color",
+};
+
+/** Apply an env patch, returning the restore thunk. */
+function patchEnv(patch: Record<string, string | undefined>): () => void {
+	const saved: Record<string, string | undefined> = {};
+	for (const key in patch) {
+		saved[key] = Bun.env[key];
+		const value = patch[key];
+		if (value === undefined) delete Bun.env[key];
+		else Bun.env[key] = value;
+	}
+	return () => {
+		for (const key in saved) {
+			const value = saved[key];
+			if (value === undefined) delete Bun.env[key];
+			else Bun.env[key] = value;
+		}
+	};
+}
+
 describe("ToolExecutionComponent write repaint seam", () => {
 	const components: ToolExecutionComponent[] = [];
 
@@ -98,6 +135,7 @@ describe("ToolExecutionComponent write repaint seam", () => {
 	});
 
 	it("removes stale pending tail rows from the terminal buffer when the first partial result arrives", async () => {
+		const restoreEnv = patchEnv(NO_MULTIPLEXER_ENV);
 		const term = new VirtualTerminal(80, 8, 1_000);
 		const scheduler = new StressRenderScheduler();
 		const tui = new TUI(term, undefined, { renderScheduler: scheduler });
@@ -135,6 +173,7 @@ describe("ToolExecutionComponent write repaint seam", () => {
 		} finally {
 			tui.stop();
 			await term.flush();
+			restoreEnv();
 		}
 	});
 });
