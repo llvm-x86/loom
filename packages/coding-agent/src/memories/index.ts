@@ -1265,6 +1265,8 @@ const MAX_LEARNED_LESSONS = 100;
 /** Per-field char caps so a single huge capture can't bloat learned.md. */
 const MAX_LEARNED_CONTENT_CHARS = 2000;
 const MAX_LEARNED_CONTEXT_CHARS = 400;
+/** Cap on one provenance-trailer value (session id, cwd) before JSON encoding. */
+const MAX_PROVENANCE_FIELD_CHARS = 200;
 
 /**
  * Strip prompt-injection vectors from a single line of lesson text: control/
@@ -1300,6 +1302,47 @@ function normalizeLearnedText(text: string, maxChars: number): string {
 /** Per-path write chains serializing `learned.md` read-modify-write. */
 const learnedWriteChains = new Map<string, Promise<unknown>>();
 
+/** Opening delimiter of the tool-written provenance trailer on each stored lesson line. */
+const PROVENANCE_TRAILER_PREFIX = "<!-- prov:";
+
+/**
+ * Runtime provenance stamped onto every stored lesson. Values ALWAYS come
+ * from the runtime, never from model-supplied args — a model echoing a
+ * `<!-- prov:… -->` blob in its lesson text gets it destroyed by
+ * neutralizeInjection (angle brackets stripped) before it reaches the file.
+ */
+export interface LearnedLessonProvenance {
+	sessionId?: string | null;
+}
+
+/**
+ * Build the `<!-- prov:{…} -->` trailer appended to a stored lesson line.
+ * Every string value passes through the same normalizeLearnedText pipeline
+ * as lesson text (neutralize → redactSecrets → boundChars): neutralize
+ * strips `<`/`>`/control chars so the JSON can never close its own comment
+ * early, redactSecrets catches a token-shaped cwd or session id, and
+ * boundChars caps length. `tool`/`backend` are constants and `ts` is the
+ * runtime clock — nothing here is model-controlled.
+ */
+function buildProvenanceTrailer(cwd: string, provenance?: LearnedLessonProvenance): string {
+	const field = (value: string): string => normalizeLearnedText(value, MAX_PROVENANCE_FIELD_CHARS);
+	const payload = {
+		v: 1,
+		session_id: field(provenance?.sessionId ?? ""),
+		cwd: field(cwd),
+		tool: "learn",
+		ts: Math.floor(Date.now() / 1000),
+		backend: "local",
+	};
+	return `${PROVENANCE_TRAILER_PREFIX}${JSON.stringify(payload)} -->`;
+}
+
+/** Strip a trailing provenance trailer so dedupe compares lesson text, not timestamps. */
+function stripProvenanceTrailer(line: string): string {
+	const idx = line.indexOf(` ${PROVENANCE_TRAILER_PREFIX}`);
+	return idx === -1 ? line : line.slice(0, idx);
+}
+
 /**
  * Append one lesson to the project's `learned.md` (newest-first, deduped,
  * capped, secret-redacted, injection-neutralized). The file backs the `learn`
@@ -1309,6 +1352,7 @@ export async function saveLearnedLesson(
 	agentDir: string,
 	cwd: string,
 	input: MemoryBackendSaveInput,
+	provenance?: LearnedLessonProvenance,
 ): Promise<MemoryBackendSaveResult> {
 	const content = normalizeLearnedText(input.content, MAX_LEARNED_CONTENT_CHARS);
 	if (!content) {
@@ -1316,12 +1360,15 @@ export async function saveLearnedLesson(
 	}
 	const context = input.context ? normalizeLearnedText(input.context, MAX_LEARNED_CONTEXT_CHARS) : "";
 	const line = context ? `- ${content} _(context: ${context})_` : `- ${content}`;
+	const storedLine = `${line} ${buildProvenanceTrailer(cwd, provenance)}`;
 	const filePath = path.join(getMemoryRoot(agentDir, cwd), LEARNED_LESSONS_FILE);
 
 	// Serialize the read-modify-write per file: parallel `learn` calls (sibling
 	// subagents, or two shared tool calls in one turn) share the project memory
 	// root, so an unguarded RMW would let the last writer drop the other's lesson.
-	const run = (learnedWriteChains.get(filePath) ?? Promise.resolve()).then(() => appendLearnedLine(filePath, line));
+	const run = (learnedWriteChains.get(filePath) ?? Promise.resolve()).then(() =>
+		appendLearnedLine(filePath, storedLine),
+	);
 	const guarded = run.catch(() => {});
 	learnedWriteChains.set(filePath, guarded);
 	try {
@@ -1341,10 +1388,13 @@ async function appendLearnedLine(filePath: string, line: string): Promise<void> 
 	} catch (err) {
 		if (!isEnoent(err)) throw err;
 	}
+	// Dedupe on the trailer-stripped line: the trailer carries a fresh
+	// timestamp on every save, so comparing whole lines would never dedupe.
+	const dedupeKey = stripProvenanceTrailer(line);
 	const prior = existing
 		.split("\n")
 		.map(l => l.trim())
-		.filter(l => l.startsWith("- ") && l !== line);
+		.filter(l => l.startsWith("- ") && stripProvenanceTrailer(l) !== dedupeKey);
 	const lessons = [line, ...prior].slice(0, MAX_LEARNED_LESSONS);
 	await Bun.write(filePath, `${lessons.join("\n")}\n`);
 }

@@ -36280,6 +36280,41 @@
 				"supportsDeveloperRole": false
 			}
 		},
+		"k3-256k": {
+			"id": "k3-256k",
+			"name": "K3 256k",
+			"api": "openai-completions",
+			"provider": "kimi-code",
+			"baseUrl": "https://api.kimi.com/coding/v1",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 262144,
+			"maxTokens": 32000,
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				],
+				"defaultLevel": "high",
+				"requiresEffort": true
+			},
+			"compat": {
+				"thinkingFormat": "zai",
+				"reasoningContentField": "reasoning_content",
+				"supportsDeveloperRole": false
+			}
+		},
 		"kimi-for-coding": {
 			"id": "kimi-for-coding",
 			"name": "K2.7 Coding",

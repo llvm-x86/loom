@@ -1,11 +1,11 @@
 /**
  * MCP Configuration File Writer
  *
- * Utilities for reading/writing .omp/mcp.json files at user or project level.
+ * Utilities for reading/writing .loom/mcp.json files at user or project level.
  */
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { isEnoent } from "@oh-my-pi/pi-utils";
+import { CONFIG_DIR_NAME, isEnoent, LEGACY_CONFIG_DIR_NAME } from "@oh-my-pi/pi-utils";
 import { invalidate as invalidateFsCache } from "../capability/fs";
 
 import { validateServerConfig } from "./config";
@@ -270,7 +270,7 @@ export interface SetMcpServerEnabledOptions {
 	projectPath: string;
 	/**
 	 * Absolute path to the loaded row's source mcp.json. Provide ONLY for
-	 * formats this codebase owns (native `.omp/mcp.json` and `mcp-json`
+	 * formats this codebase owns (native `.loom/mcp.json` and `mcp-json`
 	 * `mcp.json`/`.mcp.json`). Tool-owned configs (opencode.json, claude.json,
 	 * settings.json …) MUST be omitted; we never mutate another tool's file.
 	 */
@@ -280,13 +280,31 @@ export interface SetMcpServerEnabledOptions {
 }
 
 /**
+ * Ordered project-level candidates for `projectPath`.
+ *
+ * `getMCPConfigPath("project")` names the canonical `<cwd>/.loom/mcp.json`, but
+ * discovery still reads the pre-rename `.omp/` directory as a lower-priority
+ * fallback (see `NATIVE_PROJECT_DIR_NAMES`). A server whose definition still
+ * lives in `.omp/mcp.json` must be toggled *in place*: writing the flag into a
+ * fresh `.loom/mcp.json` would leave the stale definition behind, and discovery
+ * — which merges both — would keep surfacing the old state, so the toggle would
+ * appear to do nothing.
+ */
+function projectConfigCandidates(projectPath: string): string[] {
+	const dir = path.dirname(projectPath);
+	if (path.basename(dir) !== CONFIG_DIR_NAME) return [projectPath];
+	return [projectPath, path.join(path.dirname(dir), LEGACY_CONFIG_DIR_NAME, path.basename(projectPath))];
+}
+
+/**
  * Flip a server's enabled/disabled state regardless of where it lives.
  *
  * Resolution order, mirroring `/mcp enable` / `/mcp disable` plus the dashboard
  * fix for non-writable source configs:
  *
  * - Server found in `sourcePath` (writable) → write `enabled` on that entry.
- * - Else server in project mcp.json → write `enabled` there.
+ * - Else server in project mcp.json (canonical config dir, then the legacy
+ *   one) → write `enabled` there.
  * - Else server in user mcp.json → write `enabled` there.
  * - Else (server defined in a tool-owned source like opencode.json, OR a
  *   purely discovered server):
@@ -303,7 +321,11 @@ export interface SetMcpServerEnabledOptions {
  */
 export async function setMcpServerEnabled(options: SetMcpServerEnabledOptions): Promise<void> {
 	const { userPath, projectPath, sourcePath, name, enabled } = options;
-	const candidatePaths = [...new Set([sourcePath, projectPath, userPath].filter(path => path !== undefined))];
+	const candidatePaths = [
+		...new Set(
+			[sourcePath, ...projectConfigCandidates(projectPath), userPath].filter(candidate => candidate !== undefined),
+		),
+	];
 	let updatedInConfig = false;
 
 	for (const filePath of candidatePaths) {

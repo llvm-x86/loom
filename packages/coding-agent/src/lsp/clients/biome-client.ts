@@ -4,6 +4,7 @@
  */
 import path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
+import { LRUCache } from "lru-cache/raw";
 import type { Diagnostic, DiagnosticSeverity, LinterClient, ServerConfig } from "../../lsp/types";
 
 // =============================================================================
@@ -113,11 +114,20 @@ async function runBiome(
 
 // Surface broken-binary / CLI failures once instead of silently reporting
 // "no diagnostics" forever (and instead of spamming every writethrough).
-const reportedBiomeFailures = new Set<string>();
+/**
+ * Distinct `<kind>:<cwd>` failure keys whose warning has already been logged.
+ * Keys are bounded by the number of working directories a process lints in,
+ * which is small in practice but unbounded in principle for a long-lived
+ * daemon. Worst case 64 keys x ~256 UTF-16 units of path = ~32 KB. Evicting
+ * a key costs exactly one duplicate `logger.warn` line if that cwd fails
+ * again later.
+ */
+export const BIOME_FAILURE_DEDUPE_MAX = 64;
+const reportedBiomeFailures = new LRUCache<string, true>({ max: BIOME_FAILURE_DEDUPE_MAX });
 
 function warnBiomeOnce(key: string, message: string, meta: Record<string, unknown>): void {
 	if (reportedBiomeFailures.has(key)) return;
-	reportedBiomeFailures.add(key);
+	reportedBiomeFailures.set(key, true);
 	logger.warn(message, meta);
 }
 

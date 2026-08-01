@@ -9,6 +9,45 @@ import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const isWindows = process.platform === "win32";
 
+/**
+ * Candidate fixture roots for the cross-tree search suite, in preference
+ * order. That suite needs two trees whose only shared ancestor is the
+ * filesystem root, so the pair is chosen by first path segment rather than by
+ * name. Which of these are writable varies by sandbox — `/var/tmp` is mounted
+ * read-only on some CI images — so they are probed instead of hardcoded.
+ */
+const CROSS_TREE_ROOT_CANDIDATES = ["/tmp", "/var/tmp", "/dev/shm", "/run/shm", os.homedir(), os.tmpdir()];
+
+/** Two writable roots with distinct top-level segments (so their only common
+ *  ancestor is `/`), or undefined when the filesystem offers only one. */
+async function resolveCrossTreeRoots(): Promise<[string, string] | undefined> {
+	let first: string | undefined;
+	let firstTop: string | undefined;
+	for (const candidate of CROSS_TREE_ROOT_CANDIDATES) {
+		const top = path.resolve(candidate).split(path.sep)[1] ?? "";
+		if (!top || top === firstTop) continue;
+		try {
+			await removeWithRetries(await fs.mkdtemp(path.join(candidate, "pi-search-probe-")));
+		} catch {
+			continue;
+		}
+		if (first === undefined) {
+			first = candidate;
+			firstTop = top;
+			continue;
+		}
+		return [first, candidate];
+	}
+	return undefined;
+}
+
+const crossTreeRoots = isWindows ? undefined : await resolveCrossTreeRoots();
+if (!isWindows && !crossTreeRoots) {
+	console.warn(
+		`Skipping "search across unrelated filesystem trees": none of ${CROSS_TREE_ROOT_CANDIDATES.join(", ")} yielded two writable roots whose only common ancestor is "/".`,
+	);
+}
+
 function createTestSession(cwd: string, overrides: Partial<ToolSession> = {}): ToolSession {
 	return {
 		cwd,
@@ -87,27 +126,34 @@ describe.skipIf(isWindows)("search with omitted paths", () => {
 	});
 });
 
-describe.skipIf(isWindows)("search across unrelated filesystem trees", () => {
-	let dirA: string;
-	let dirB: string;
-	let cwd: string;
+describe.skipIf(isWindows || !crossTreeRoots)("search across unrelated filesystem trees", () => {
+	let dirA: string | undefined;
+	let dirB: string | undefined;
+	let cwd: string | undefined;
 
 	beforeEach(async () => {
 		// Place fixtures in two unrelated top-level subtrees so their only shared
 		// ancestor is the filesystem root. Without the multi-target fanout, the
 		// search tool would scan from `/` and walk the entire filesystem.
-		dirA = await fs.mkdtemp(path.join("/tmp", "pi-search-multi-A-"));
-		dirB = await fs.mkdtemp(path.join("/var/tmp", "pi-search-multi-B-"));
+		if (!crossTreeRoots) throw new Error("Suite is skipped without two cross-tree roots");
+		const [rootA, rootB] = crossTreeRoots;
+		dirA = await fs.mkdtemp(path.join(rootA, "pi-search-multi-A-"));
+		dirB = await fs.mkdtemp(path.join(rootB, "pi-search-multi-B-"));
 		cwd = await fs.mkdtemp(path.join(os.tmpdir(), "pi-search-multi-cwd-"));
 		await Bun.write(path.join(dirA, "alpha.txt"), "shared-needle alpha\n");
 		await Bun.write(path.join(dirB, "beta.txt"), "shared-needle beta\n");
 	});
 
 	afterEach(async () => {
-		await Promise.all([removeWithRetries(dirA), removeWithRetries(dirB), removeWithRetries(cwd)]);
+		// A fixture root that failed to materialize stays undefined; removing it
+		// would throw and mask the real beforeEach failure.
+		const created = [dirA, dirB, cwd].filter((dir): dir is string => dir !== undefined);
+		dirA = dirB = cwd = undefined;
+		await Promise.all(created.map(dir => removeWithRetries(dir)));
 	});
 
 	it("returns matches from both trees without rooting the scan at /", async () => {
+		if (!dirA || !dirB || !cwd) throw new Error("Cross-tree fixtures were not created");
 		const tools = await createTools(createTestSession(cwd));
 		const tool = tools.find(entry => entry.name === "grep");
 		if (!tool) throw new Error("Missing grep tool");

@@ -1441,7 +1441,8 @@ function hasActiveNativeKimiK3Reasoning(
 	model: Model<"openai-completions">,
 	options: OpenAICompletionsOptions | undefined,
 ): boolean {
-	if (model.provider !== "kimi-code" || model.id.toLowerCase() !== "k3" || !model.reasoning) return false;
+	const nativeK3Ids = new Set(["k3", "k3-256k"]);
+	if (model.provider !== "kimi-code" || !nativeK3Ids.has(model.id.toLowerCase()) || !model.reasoning) return false;
 	if (options?.reasoning === undefined || options.disableReasoning) return false;
 	try {
 		const url = new URL(model.baseUrl);

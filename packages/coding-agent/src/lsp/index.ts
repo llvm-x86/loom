@@ -9,6 +9,7 @@ import type {
 } from "@oh-my-pi/pi-agent-core";
 import { logger, once, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
+import { LRUCache } from "lru-cache/raw";
 import { type Theme, theme } from "../modes/theme/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -253,8 +254,17 @@ async function notifyFileSaved(
 	);
 }
 
-// Cache config per cwd to avoid repeated file I/O
-const configCache = new Map<string, LspConfig>();
+/**
+ * Working directories whose resolved {@link LspConfig} is memoized to avoid
+ * re-reading (and re-detecting) the server table on every LSP call. A config
+ * holds one descriptor per detected server — tens of small objects, so worst
+ * case is ~32 configs x a few KB = well under 1 MB. Previously an unbounded
+ * module global: every cwd a long-lived process ever touched (subagents,
+ * `ssh` mounts, `--cwd` switches) stayed resident for the life of the
+ * process. Evicting a cwd costs one `loadConfig` re-read on its next use.
+ */
+export const LSP_CONFIG_CACHE_MAX = 32;
+const configCache = new LRUCache<string, LspConfig>({ max: LSP_CONFIG_CACHE_MAX });
 
 function getConfig(cwd: string): LspConfig {
 	let config = configCache.get(cwd);
@@ -1102,7 +1112,32 @@ interface LspWritethroughBatchState {
 	options: ResolvedWritethroughOptions;
 }
 
-const writethroughBatches = new Map<string, LspWritethroughBatchState>();
+/**
+ * Concurrently open writethrough batches. One batch exists per in-flight
+ * `apply_patch` / multi-file edit call, so 32 is already far above any real
+ * fan-out; the bound only exists so a runaway caller cannot grow the map
+ * without limit.
+ */
+export const WRITETHROUGH_BATCH_MAX = 32;
+/**
+ * Idle lifetime of an open batch. A batch is created by the first non-flush
+ * writethrough and removed by its flush, so a batch that has not been touched
+ * for this long belongs to an edit call that threw before flushing — it will
+ * never be flushed and its pending entries (each holding a full file's new
+ * text) would otherwise stay resident for the life of the process.
+ *
+ * The age resets on every touch (`updateAgeOnGet`), so a slow but live batch
+ * is never expired out from under its caller. Worst case retained:
+ * {@link WRITETHROUGH_BATCH_MAX} batches x their pending file texts, for at
+ * most 5 idle minutes.
+ */
+export const WRITETHROUGH_BATCH_TTL_MS = 5 * 60 * 1000;
+const writethroughBatches = new LRUCache<string, LspWritethroughBatchState>({
+	max: WRITETHROUGH_BATCH_MAX,
+	ttl: WRITETHROUGH_BATCH_TTL_MS,
+	updateAgeOnGet: true,
+	ttlAutopurge: true,
+});
 
 function getOrCreateWritethroughBatch(id: string, options: ResolvedWritethroughOptions): LspWritethroughBatchState {
 	const existing = writethroughBatches.get(id);

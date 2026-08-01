@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `LEGACY_APP_NAME` to the `dirs` module, the pre-rename app name used as the filename prefix of dated process logs (`omp.YYYY-MM-DD.PID.log`), so readers that scan the logs directory can still recognize files the startup migration relocated without renaming.
+
 ## [17.0.5] - 2026-07-18
 
 ### Changed

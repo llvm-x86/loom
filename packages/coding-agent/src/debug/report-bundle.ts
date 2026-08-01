@@ -6,7 +6,7 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type { WorkProfile } from "@oh-my-pi/pi-natives";
-import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { APP_NAME, getLogPath, getLogsDir, getReportsDir, isEnoent, LEGACY_APP_NAME } from "@oh-my-pi/pi-utils";
 import { writeArchive } from "../utils/zip";
 import type { CpuProfile, HeapSnapshot } from "./profiler";
 import { collectSystemInfo, sanitizeEnv } from "./system-info";
@@ -277,7 +277,16 @@ async function collectSameDayLogs(linesPerFile: number): Promise<string> {
 	return chunks.join("\n\n");
 }
 
-const LOG_FILE_PATTERN = new RegExp(`^${APP_NAME}\\.(\\d{4}-\\d{2}-\\d{2})\\.\\d+\\.log(?:\\.\\d+)?$`);
+/**
+ * Matches a dated per-process log filename, capturing its date. Both the
+ * current and pre-rename app-name prefixes are accepted: the startup migration
+ * moves legacy `omp.<date>.<pid>.log` files into the current state root without
+ * renaming them, and a report or log viewer that silently dropped them would
+ * lose exactly the crash output it exists to surface.
+ */
+const LOG_FILE_PATTERN = new RegExp(
+	`^(?:${APP_NAME}|${LEGACY_APP_NAME})\\.(\\d{4}-\\d{2}-\\d{2})\\.\\d+\\.log(?:\\.\\d+)?$`,
+);
 
 export async function createDebugLogSource(): Promise<DebugLogSource> {
 	const logsDir = getLogsDir();

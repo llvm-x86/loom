@@ -2,6 +2,11 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Tightened `InMemorySnapshotStore` memory bounds: `maxTotalBytes` 64 MiB -> 8 MiB and `maxVersionsPerPath` 4 -> 2, and exported `DEFAULT_MAX_PATHS` / `DEFAULT_MAX_VERSIONS_PER_PATH` / `DEFAULT_MAX_TOTAL_BYTES` with documented worst cases. Two versions is the depth stale-tag recovery replays (live content plus the state it was edited from); a tag naming an older state now misses and takes the existing re-read path
+- Replaced `Snapshot.seenLines` (`Set<number>`, one entry per displayed line) with the new `SeenLines` sorted-range set. Reads are contiguous, so a whole-file read of a 50k-line file is now two array slots instead of a 50k-element `Set`; `size`/`has`/iteration semantics are unchanged and the worst case (fully sparse read) is still smaller than the `Set` it replaces
+
 ## [17.0.4] - 2026-07-18
 
 ### Fixed

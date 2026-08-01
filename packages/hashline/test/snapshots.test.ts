@@ -93,7 +93,7 @@ describe("InMemorySnapshotStore", () => {
 		store.relocate(PATH, dest);
 		expect(store.byHash(PATH, tag)).toBeNull();
 		expect(store.byHash(dest, tag)?.text).toBe("A\n");
-		expect(store.byHash(dest, tag)?.seenLines).toEqual(new Set([1]));
+		expect([...(store.byHash(dest, tag)?.seenLines ?? [])]).toEqual([1]);
 		expect(store.head(dest)?.hash).toBe(tag);
 	});
 
@@ -133,8 +133,8 @@ describe("InMemorySnapshotStore", () => {
 			expect(store.byContent(PATH, COLLIDE_B)?.text).toBe(COLLIDE_B);
 			// seenLines never cross-contaminate: the [1] and [2] reads stay on
 			// their own snapshots even though both tags say `1D84`.
-			expect(store.byContent(PATH, COLLIDE_A)?.seenLines).toEqual(new Set([1]));
-			expect(store.byContent(PATH, COLLIDE_B)?.seenLines).toEqual(new Set([2]));
+			expect([...(store.byContent(PATH, COLLIDE_A)?.seenLines ?? [])]).toEqual([1]);
+			expect([...(store.byContent(PATH, COLLIDE_B)?.seenLines ?? [])]).toEqual([2]);
 			// byHash surfaces the most-recently-recorded version among the
 			// colliders (B was recorded second → head).
 			expect(store.byHash(PATH, tagA)?.text).toBe(COLLIDE_B);
@@ -148,7 +148,7 @@ describe("InMemorySnapshotStore", () => {
 			expect(again).toBe(first);
 			// One snapshot, seenLines union. The collider B is not present, so
 			// byContent(B) is null even though the tag matches.
-			expect(store.byContent(PATH, COLLIDE_A)?.seenLines).toEqual(new Set([1, 2]));
+			expect([...(store.byContent(PATH, COLLIDE_A)?.seenLines ?? [])]).toEqual([1, 2]);
 			expect(store.byContent(PATH, COLLIDE_B)).toBeNull();
 		});
 	});

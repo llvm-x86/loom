@@ -105,6 +105,9 @@ export async function startDaemon(port: number): Promise<StartResult> {
 		const deadline = Date.now() + 10_000;
 		while (Date.now() < deadline) {
 			if (await isDaemonRunning(port)) {
+				// Ensure the agent skill is present so future sessions can resolve
+				// skill://loom-webbridge instead of showing a broken skill link.
+				await installWebBridgeSkill().catch(() => {});
 				return { started: true, alreadyRunning: false, pid: child.pid, url, logPath };
 			}
 			await Bun.sleep(150);
@@ -196,6 +199,8 @@ export async function serveDaemon(port: number): Promise<void> {
 	daemon.start();
 	await fs.mkdir(webBridgeDir(), { recursive: true });
 	await fs.writeFile(pidFilePath(), String(process.pid), "utf8");
+	// Ensure the skill is on disk so the harness can discover skill://loom-webbridge.
+	await installWebBridgeSkill().catch(() => {});
 	let stopping = false;
 	const shutdown = async (): Promise<void> => {
 		if (stopping) return;
