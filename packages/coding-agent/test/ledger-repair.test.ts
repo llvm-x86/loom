@@ -120,7 +120,21 @@ describe("ledger self-repair", () => {
 			expect(result).toContain("## Landmines\n- ⚠️ a standing constraint.\n\n## Current state");
 		});
 
-		it("never touches a cut-suspect candidate — surgery would mask the guard's signature", () => {
+		it("keeps a title preamble above the moved hazards (live defect: 3 ledgers)", () => {
+			// Inserting directly after the title line displaced the preamble INTO
+			// the moved hazard extent — the byte-identity assert refused all three
+			// real ledgers with a preamble. The slot is before the first '##'.
+			const preamble = "Running state of this repo/deploy. Read before working.";
+			const previous = `${TITLE}\n\n${preamble}\n\n## Current state\nIntact.\n\n## Landmines\n- ⚠️ a standing constraint.\n`;
+			const result = remediateCandidate(previous, previous);
+			expect(result.indexOf(preamble)).toBeLessThan(result.indexOf("## Landmines"));
+			expect(result.indexOf("## Landmines")).toBeLessThan(result.indexOf("## Current state"));
+			const extent = result.match(/^## .+$/m);
+			expect(extent?.[0]).toBe("## Landmines");
+			expect(result).toContain("## Landmines\n- ⚠️ a standing constraint.\n\n## Current state");
+		});
+
+	it("never touches a cut-suspect candidate — surgery would mask the guard's signature", () => {
 			// A spliced section landing AFTER a trailing truncation marker would move
 			// the marker off the tail and let a cut ledger pass the guard.
 			const previous = `${TITLE}\n\n## Landmines\n- ⚠️ a standing constraint.\n\n## Current state\nIntact.\n`;

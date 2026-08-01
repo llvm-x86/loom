@@ -482,13 +482,20 @@ function sectionExtentAt(text: string, headingIndex: number): { start: number; e
 	return { start: headingIndex, end: next === -1 ? text.length : bodyStart + next };
 }
 
-/** Insert `section` (pre-trimmed) immediately after the `#` title line — the hazards-first slot. */
+/** Insert `section` (pre-trimmed) immediately before the first `##` heading —
+ * the hazards-first slot. Inserting directly after the `#` title line would
+ * displace any preamble between title and first section INTO the moved hazard
+ * extent (live defect: three ledgers refused repair on the byte-identity
+ * assert). Title and preamble stay put; hazards become the first `##`. */
 function insertAfterTitleBlock(text: string, section: string): string {
-	const title = text.match(/^# .+$/m);
-	if (title?.index === undefined) return `${section}\n\n${text}`;
-	const head = text.slice(0, title.index + title[0].length);
-	const tail = text.slice(title.index + title[0].length).replace(/^\s+/, "");
-	return tail === "" ? `${head}\n\n${section}\n` : `${head}\n\n${section}\n\n${tail}`;
+	const first = text.match(/^## .+$/m);
+	if (first?.index === undefined) {
+		const trimmed = text.replace(/\s+$/, "");
+		return trimmed === "" ? `${section}\n` : `${trimmed}\n\n${section}\n`;
+	}
+	const head = text.slice(0, first.index).replace(/\s+$/, "");
+	const tail = text.slice(first.index);
+	return `${head}\n\n${section}\n\n${tail}`;
 }
 
 // Hazards-first is positional: a wholesale rewrite that REORDERS the hazard
