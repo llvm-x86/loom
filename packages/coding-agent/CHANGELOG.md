@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Reduced resident memory across subagent fan-outs: a finished subagent's lifecycle reviver no longer captures the run that produced it, so parking actually releases the subagent's conversation, session journal, tool registry and settings snapshot instead of only detaching them.
+- Changed the `task.agentIdleTtlMs` default from 420000 to 30000 so a finished subagent's live session is released ~14x sooner. Parked agents stay addressable and are revived from their session file with full history on the next message, resume, or Agent Hub focus.
+- Bounded the vibe worker registry's killed-session tombstones so a long vibe-mode run no longer retains one record per worker ever spawned.
 - Reduced session memory by applying the 500,000-character persistence cap to the in-memory journal entry, not just its serialized JSONL line. Signed and encrypted blocks (`thinkingSignature`, `textSignature`, `thoughtSignature`, `redactedThinking`, Responses `encrypted_content`) are still retained verbatim.
 - Bounded the in-memory artifact fallback used by non-persistent sessions (SDK/headless embedding, `--no-persist`) to 4 MiB total with oldest-first eviction. Output larger than the budget now reports no artifact instead of advertising an `artifact://` id that could never resolve.
 - Reduced resume memory by rehydrating persisted `blob:sha256:` image references on first access instead of materializing every payload at session load. `forkFrom` keeps the eager pass.

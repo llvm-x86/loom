@@ -2193,6 +2193,115 @@ export async function runSubagentFollowUpTurn(options: FollowUpTurnOptions): Pro
 }
 
 /**
+ * Session options for one subagent, minus the two members that must never be
+ * shared between the original run and a later revival:
+ *
+ * - `sessionManager` — the live journal of the run that built it. Holding it
+ *   past the run pins every message the subagent ever produced.
+ * - `onFirstChatDispatch` — a launch-latency probe that writes into the
+ *   spawning invocation's locals; meaningless on a revived turn and, being a
+ *   closure over the run, enough on its own to pin it.
+ *
+ * Everything left is parent-owned or per-agent configuration whose size does
+ * not grow with the conversation, so a parked agent can retain it cheaply.
+ */
+type SubagentSessionTemplate = Omit<CreateAgentSessionOptions, "sessionManager" | "onFirstChatDispatch">;
+
+/**
+ * Keep the registry status of an adopted subagent in sync with its session.
+ * Later turns flip it: revive/wake → running, turn drained → idle.
+ *
+ * Module-level on purpose: the reviver calls this, and a closure defined
+ * inside {@link runSubprocess} would drag that whole invocation into the
+ * lifecycle manager's retained state. The subscription intentionally survives
+ * the run; a disposed session emits nothing, so it needs no teardown.
+ */
+function installRegistryStatusSync(id: string, target: AgentSession): void {
+	target.subscribe(event => {
+		if (event.type === "agent_start") {
+			AgentRegistry.global().setStatus(id, "running");
+		} else if (event.type === "agent_end") {
+			AgentRegistry.global().setStatus(id, "idle");
+		}
+	});
+}
+
+/** Inputs for the subagent system-prompt hook, as plain data. */
+interface SubagentSystemPromptArgs {
+	id: string;
+	agentSystemPrompt: string;
+	context: string;
+	planReference: string;
+	planReferencePath: string;
+	worktree: string;
+	outputSchema: unknown;
+	outputSchemaOverridesAgent: boolean;
+	ircEnabled: boolean;
+}
+
+/**
+ * Build the subagent's system-prompt hook. Module-level for the same reason as
+ * {@link installRegistryStatusSync}: the hook lives inside a
+ * {@link SubagentSessionTemplate} that a parked agent keeps, so it must close
+ * over this small record and nothing else.
+ */
+function buildSubagentSystemPrompt(args: SubagentSystemPromptArgs): (defaultPrompt: string[]) => string[] {
+	return defaultPrompt => {
+		const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
+			agent: args.agentSystemPrompt,
+			context: args.context,
+			planReference: args.planReference,
+			planReferencePath: args.planReferencePath,
+			worktree: args.worktree,
+			outputSchema: args.outputSchema,
+			outputSchemaOverridesAgent: args.outputSchemaOverridesAgent,
+			// Resolved per build so a revived agent sees the roster as it is now,
+			// not as it was when the agent first spawned.
+			ircPeers: args.ircEnabled ? renderIrcPeerRoster(args.id) : "",
+			ircSelfId: args.ircEnabled ? args.id : "",
+		});
+		return defaultPrompt.length === 0
+			? [subagentPrompt]
+			: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
+	};
+}
+
+/**
+ * Build the lifecycle reviver for a kept-alive subagent.
+ *
+ * Park closed the JSONL writer, so reopening takes the single-writer lock
+ * cleanly and `createAgentSession` replays the file into the rebuilt agent
+ * (`agent.replaceMessages`) — the parked agent comes back with its full
+ * history. Isolated runs are not resumable (the worktree is merged + cleaned)
+ * and never get a reviver.
+ *
+ * Module-level so the returned closure captures exactly `args` and nothing
+ * from the spawning invocation. The lifecycle manager holds this function for
+ * the agent's whole idle/parked life, so anything it reaches is memory the
+ * park was supposed to release: built inline it would keep the original
+ * SessionManager — and with it every message of the run — alive, making
+ * `park()` free nothing at all.
+ */
+function createSubagentReviver(args: {
+	id: string;
+	sessionFile: string;
+	template: SubagentSessionTemplate;
+	parentArtifactManager: ArtifactManager | undefined;
+}): () => Promise<AgentSession> {
+	return async () => {
+		const reopened = await SessionManager.open(args.sessionFile, undefined, undefined, {
+			suppressBreadcrumb: true,
+		});
+		if (args.parentArtifactManager) {
+			reopened.adoptArtifactManager(args.parentArtifactManager);
+		}
+		const { session } = await createAgentSession({ ...args.template, sessionManager: reopened });
+		installRegistryStatusSync(args.id, session);
+		return session;
+	};
+}
+
+/**
  * Run a single agent in-process.
  */
 export async function runSubprocess(options: ExecutorOptions): Promise<SingleResult> {
@@ -2257,9 +2366,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		0,
 		Math.trunc(Number(options.maxRuntimeMs ?? settings.get("task.maxRuntimeMs") ?? 0) || 0),
 	);
-	// TTL before an adopted idle subagent is parked by the lifecycle manager.
-	// <= 0 disables parking (the session stays live until process teardown).
-	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs") ?? 420_000) || 0);
+	// TTL before an adopted idle subagent is parked by the lifecycle manager
+	// (`task.agentIdleTtlMs` owns the default). A live subagent pins its whole
+	// conversation, so this window is the steady-state cost of a finished
+	// fan-out; <= 0 disables parking and keeps it live until process teardown.
+	const agentIdleTtlMs = Math.trunc(Number(settings.get("task.agentIdleTtlMs")) || 0);
 	const configuredDefaultBudget = Math.max(
 		0,
 		Math.trunc(Number(settings.get("task.softRequestBudget") ?? SOFT_REQUEST_BUDGET.default) || 0),
@@ -2334,19 +2445,6 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	const progress = monitor.progress;
 	let unsubscribe: (() => void) | null = null;
 	let reviveSession: (() => Promise<AgentSession>) | null = null;
-	// Adopted (kept-alive) subagents flip registry status from session events on
-	// later turns: revive/wake → running, turn drained → idle. The subscription
-	// intentionally survives this run; a disposed session emits nothing, so it
-	// needs no teardown.
-	const installRegistryStatusSync = (target: AgentSession): void => {
-		target.subscribe(event => {
-			if (event.type === "agent_start") {
-				AgentRegistry.global().setStatus(id, "running");
-			} else if (event.type === "agent_end") {
-				AgentRegistry.global().setStatus(id, "idle");
-			}
-		});
-	};
 
 	const runSubagent = async (): Promise<{
 		exitCode: number;
@@ -2592,11 +2690,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 
 			const { normalized: normalizedOutputSchema } = normalizeSchema(outputSchema);
 
-			// Captured by the lifecycle reviver: rebuilding an equivalent session from
-			// the same JSONL file re-invokes createAgentSession with the exact options
-			// of the original run (same agent id, tools, model, system prompt,
-			// artifacts dir) — only the SessionManager differs.
-			const buildSubagentSessionOptions = (sessionManagerForRun: SessionManager): CreateAgentSessionOptions => ({
+			// Plain data, no closure over this invocation: a kept-alive agent hands
+			// this template to the lifecycle manager and keeps it for its whole
+			// idle/parked life, so anything reachable from here survives `park()`.
+			// The only function member is built by a module-level factory
+			// (`buildSubagentSystemPrompt`); `sessionManager` and the
+			// launch-latency probe are supplied per session, never stored.
+			const sessionTemplate: SubagentSessionTemplate = {
 				cwd: worktree ?? cwd,
 				authStorage,
 				modelRegistry,
@@ -2622,23 +2722,17 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				rules: options.rules,
 				preloadedExtensionPaths: restrictToolNames ? [] : options.preloadedExtensionPaths,
 				preloadedCustomToolPaths: restrictToolNames ? [] : options.preloadedCustomToolPaths,
-				systemPrompt: defaultPrompt => {
-					const subagentPrompt = prompt.render(subagentSystemPromptTemplate, {
-						agent: agent.systemPrompt,
-						context: options.context?.trim() ?? "",
-						planReference: options.planReference?.content ?? "",
-						planReferencePath: options.planReference?.path ?? "",
-						worktree: worktree ?? "",
-						outputSchema: normalizedOutputSchema,
-						outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
-						ircPeers: ircEnabled ? renderIrcPeerRoster(id) : "",
-						ircSelfId: ircEnabled ? id : "",
-					});
-					return defaultPrompt.length === 0
-						? [subagentPrompt]
-						: [...defaultPrompt.slice(0, -1), subagentPrompt, defaultPrompt[defaultPrompt.length - 1]];
-				},
-				sessionManager: sessionManagerForRun,
+				systemPrompt: buildSubagentSystemPrompt({
+					id,
+					agentSystemPrompt: agent.systemPrompt,
+					context: options.context?.trim() ?? "",
+					planReference: options.planReference?.content ?? "",
+					planReferencePath: options.planReference?.path ?? "",
+					worktree: worktree ?? "",
+					outputSchema: normalizedOutputSchema,
+					outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
+					ircEnabled,
+				}),
 				hasUI: false,
 				prewalk,
 				spawns: spawnsEnv,
@@ -2658,12 +2752,15 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				localProtocolOptions: options.localProtocolOptions,
 				telemetry: subagentTelemetry,
 				parentEvalSessionId: options.parentEvalSessionId,
+			};
+
+			const sessionPromise = createAgentSession({
+				...sessionTemplate,
+				sessionManager,
 				onFirstChatDispatch: () => {
 					firstChatDispatchAt ??= performance.now();
 				},
 			});
-
-			const sessionPromise = createAgentSession(buildSubagentSessionOptions(sessionManager));
 			let session: AgentSession;
 			try {
 				({ session } = await awaitAbortable(sessionPromise));
@@ -2677,23 +2774,14 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			sessionCreatedAt = performance.now();
 
 			monitor.setActiveSession(session);
-			installRegistryStatusSync(session);
+			installRegistryStatusSync(id, session);
 			if (sessionFile !== null && worktree === undefined) {
-				// Lifecycle reviver: park closed the JSONL writer, so reopening takes
-				// the single-writer lock cleanly and restores the full message history
-				// (createAgentSession → agent.replaceMessages). Isolated runs are not
-				// resumable (worktree is merged + cleaned) and never get a reviver.
-				reviveSession = async () => {
-					const reopened = await SessionManager.open(sessionFile, undefined, undefined, {
-						suppressBreadcrumb: true,
-					});
-					if (options.parentArtifactManager) {
-						reopened.adoptArtifactManager(options.parentArtifactManager);
-					}
-					const { session: revived } = await createAgentSession(buildSubagentSessionOptions(reopened));
-					installRegistryStatusSync(revived);
-					return revived;
-				};
+				reviveSession = createSubagentReviver({
+					id,
+					sessionFile,
+					template: sessionTemplate,
+					parentArtifactManager: options.parentArtifactManager,
+				});
 			}
 
 			// Emit lifecycle start event
