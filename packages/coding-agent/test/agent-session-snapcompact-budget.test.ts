@@ -22,6 +22,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import { effectiveReserveTokens, estimateTokens, prepareCompaction } from "@oh-my-pi/pi-agent-core/compaction";
+import type { TextContent } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
@@ -31,6 +32,24 @@ import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
 import { TempDir } from "@oh-my-pi/pi-utils";
 import * as snapcompact from "@oh-my-pi/snapcompact";
+
+/**
+ * `chars` characters of filler, split across text blocks.
+ *
+ * Session persistence caps any single retained string at `MAX_PERSIST_CHARS`
+ * (500,000) — on disk and, since the in-memory parity fix, in the live journal
+ * too. A single filler block past that is silently truncated and the context
+ * pressure these tests are tuning never materializes, so keep every block
+ * comfortably under the cap.
+ */
+function fillerBlocks(chars: number): TextContent[] {
+	const maxBlockChars = 400_000;
+	const blocks: TextContent[] = [];
+	for (let remaining = chars; remaining > 0; remaining -= maxBlockChars) {
+		blocks.push({ type: "text", text: "x".repeat(Math.min(remaining, maxBlockChars)) });
+	}
+	return blocks;
+}
 
 describe("AgentSession snapcompact frame-budget sizing", () => {
 	let tempDir: TempDir;
@@ -132,10 +151,9 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		// Filler tuned so `baseTokens ≈ 100k`, leaving ~70k headroom — the
 		// regime where a shape-aware cap reserve actually matters.
 		const targetRecentTokens = 100_000;
-		const filler = "x".repeat(targetRecentTokens * 4);
 		sessionManager.appendMessage({
 			role: "user",
-			content: [{ type: "text", text: filler }],
+			content: fillerBlocks(targetRecentTokens * 4),
 			timestamp: Date.now(),
 		});
 
@@ -208,10 +226,9 @@ describe("AgentSession snapcompact frame-budget sizing", () => {
 		const headroomTokens = 1500;
 		const targetRecentTokens = ctxWindow - reserve - headroomTokens;
 		// Rough 4-chars-per-token rule for the tiktoken estimator on ASCII.
-		const filler = "x".repeat(targetRecentTokens * 4);
 		sessionManager.appendMessage({
 			role: "user",
-			content: [{ type: "text", text: filler }],
+			content: fillerBlocks(targetRecentTokens * 4),
 			timestamp: Date.now(),
 		});
 

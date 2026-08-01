@@ -4,6 +4,9 @@
 
 ### Changed
 
+- Reduced session memory by applying the 500,000-character persistence cap to the in-memory journal entry, not just its serialized JSONL line. Signed and encrypted blocks (`thinkingSignature`, `textSignature`, `thoughtSignature`, `redactedThinking`, Responses `encrypted_content`) are still retained verbatim.
+- Bounded the in-memory artifact fallback used by non-persistent sessions (SDK/headless embedding, `--no-persist`) to 4 MiB total with oldest-first eviction. Output larger than the budget now reports no artifact instead of advertising an `artifact://` id that could never resolve.
+- Reduced resume memory by rehydrating persisted `blob:sha256:` image references on first access instead of materializing every payload at session load. `forkFrom` keeps the eager pass.
 - `TranscriptContainer` now releases a block's per-width render cache once every row it contributed has entered native scrollback, and drops its own recorded copies of that block's rows. The assembled transcript keeps the rows, so the frame is byte-identical and the block is never re-rendered while the assembly holds; a width change, theme invalidation, or destructive scrollback replay rebuilds the assembly and the block re-derives from its own source. `readToolRenderer.renderResult` is the reference implementation of the new `releaseNativeScrollbackRenderCache` hook.
 - Bounded the discovery filesystem caches in `capability/fs`: `readFile` text and `readDirEntries` listings now live in LRUs capped by `CONTENT_CACHE_MAX_ENTRIES` / `CONTENT_CACHE_MAX_CHARS` and `DIR_CACHE_MAX_ENTRIES` / `DIR_CACHE_MAX_DIRENTS` instead of unbounded `Map`s that retained every file and every cwd ancestor for the life of the process. A miss costs one re-read
 - Bounded `DiagnosticsLedger` by `DIAGNOSTICS_LEDGER_MAX_FILES` / `DIAGNOSTICS_LEDGER_MAX_IDENTITIES`; evicting a cold file re-reports its diagnostics once
