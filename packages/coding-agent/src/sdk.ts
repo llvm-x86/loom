@@ -148,6 +148,7 @@ import {
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
+import { ensureScratchDir } from "./task/scratch";
 import type { StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
@@ -408,6 +409,13 @@ export interface CreateAgentSessionOptions {
 	customSystemPrompt?: string;
 	/** Already-loaded text appended through the bundled system prompt templates. */
 	appendSystemPrompt?: string;
+	/**
+	 * Session-scoped env entries merged into every tool-spawned process env
+	 * (per-invocation entries win). Subagent runs carry their scratch
+	 * `OMP_SCRATCH_DIR`/`TMPDIR` redirect here — never `process.env`, which
+	 * in-process subagents share with the parent.
+	 */
+	toolEnv?: Record<string, string>;
 	/**
 	 * Already-loaded title-generation system prompt override (typically
 	 * {@link discoverTitleSystemPromptFile} → {@link resolvePromptInput}). When
@@ -1317,6 +1325,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			SessionManager.create(cwd, SessionManager.getDefaultSessionDir(cwd, agentDir)),
 		);
 	const providerSessionId = options.providerSessionId ?? sessionManager.getSessionId();
+	// Eager per-session scratch dir for top-level (interactive) sessions,
+	// created before the system prompt renders so the prompt names a path that
+	// already exists. Subagent scratch is per-task and created by the task
+	// executor. Best-effort: undefined degrades to no scratch prompt block.
+	const isSubagentSession = (options.taskDepth ?? 0) > 0 || options.parentTaskPrefix !== undefined;
+	const scratchDir = isSubagentSession
+		? undefined
+		: await ensureScratchDir(cwd, sessionManager.getSessionId(), "session");
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
@@ -1685,6 +1701,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
+			toolEnv: options.toolEnv,
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,
@@ -2560,6 +2577,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				personality: agentKind === "sub" ? "none" : settings.get("personality"),
 				renderMermaid: settings.get("tui.renderMermaid"),
 				activeRepoContext,
+				scratch: scratchDir ?? "",
 			});
 
 			if (options.systemPrompt === undefined) {

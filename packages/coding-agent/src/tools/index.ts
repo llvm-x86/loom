@@ -192,6 +192,12 @@ export interface ToolSession {
 	enableMCP?: boolean;
 	/** Whether an edit-capable tool is available in this session (controls hashline output) */
 	hasEditTool?: boolean;
+	/**
+	 * Session-scoped env entries merged into every tool-spawned process env
+	 * (per-invocation entries win). Carries the subagent scratch
+	 * `OMP_SCRATCH_DIR`/`TMPDIR` redirect; never `process.env`.
+	 */
+	toolEnv?: Record<string, string>;
 	/** Event bus for tool/extension communication */
 	eventBus?: EventBus;
 	/** Output schema for structured completion (subagents). */

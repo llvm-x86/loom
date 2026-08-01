@@ -58,6 +58,7 @@ import type { EventBus } from "../utils/event-bus";
 import { buildNamedToolChoice } from "../utils/tool-choice";
 import type { WorkspaceTree } from "../workspace-tree";
 import { generateTaskLabel } from "./label";
+import { assertScratchDir, buildScratchToolEnv, ensureScratchDir } from "./scratch";
 import { subprocessToolRegistry } from "./subprocess-tool-registry";
 import {
 	type AgentDefinition,
@@ -2234,6 +2235,7 @@ interface SubagentSystemPromptArgs {
 	planReference: string;
 	planReferencePath: string;
 	worktree: string;
+	scratch: string;
 	outputSchema: unknown;
 	outputSchemaOverridesAgent: boolean;
 	ircEnabled: boolean;
@@ -2253,6 +2255,7 @@ function buildSubagentSystemPrompt(args: SubagentSystemPromptArgs): (defaultProm
 			planReference: args.planReference,
 			planReferencePath: args.planReferencePath,
 			worktree: args.worktree,
+			scratch: args.scratch,
 			outputSchema: args.outputSchema,
 			outputSchemaOverridesAgent: args.outputSchemaOverridesAgent,
 			// Resolved per build so a revived agent sees the roster as it is now,
@@ -2286,9 +2289,13 @@ function createSubagentReviver(args: {
 	id: string;
 	sessionFile: string;
 	template: SubagentSessionTemplate;
+	scratchDir: string | undefined;
 	parentArtifactManager: ArtifactManager | undefined;
 }): () => Promise<AgentSession> {
 	return async () => {
+		// The scratch dir is named in the system prompt; a swept or externally
+		// removed dir must not break the revived session, so re-assert it.
+		if (args.scratchDir) await assertScratchDir(args.scratchDir);
 		const reopened = await SessionManager.open(args.sessionFile, undefined, undefined, {
 			suppressBreadcrumb: true,
 		});
@@ -2361,6 +2368,12 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
 		options.parentServiceTier,
 	);
+	// Eager per-task scratch dir, created before the session so the system
+	// prompt can name a path that already exists (a dir that must be created
+	// by the agent does not get used). Best-effort: undefined degrades to no
+	// scratch block and no tool-env redirect, never a failed spawn.
+	const scratchDir = await ensureScratchDir(cwd, id, "task");
+	const toolEnv = buildScratchToolEnv(scratchDir, subagentSettings.get("scratch.tmpdirRedirect") ?? true);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const maxRuntimeMs = Math.max(
 		0,
@@ -2729,11 +2742,13 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					planReference: options.planReference?.content ?? "",
 					planReferencePath: options.planReference?.path ?? "",
 					worktree: worktree ?? "",
+					scratch: scratchDir ?? "",
 					outputSchema: normalizedOutputSchema,
 					outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 					ircEnabled,
 				}),
 				hasUI: false,
+				toolEnv,
 				prewalk,
 				spawns: spawnsEnv,
 				taskDepth: childDepth,
@@ -2780,6 +2795,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					id,
 					sessionFile,
 					template: sessionTemplate,
+					scratchDir,
 					parentArtifactManager: options.parentArtifactManager,
 				});
 			}

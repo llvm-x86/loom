@@ -861,6 +861,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 			command = sudoCtx.command;
 			resolvedEnv = sudoCtx.env;
 		}
+		// Session-scoped tool env (scratch OMP_SCRATCH_DIR/TMPDIR redirect for
+		// subagent runs) underlies every invocation; per-call entries win.
+		if (this.session.toolEnv) {
+			resolvedEnv = { ...this.session.toolEnv, ...(resolvedEnv ?? {}) };
+		}
 		try {
 			// Resolve protocol URLs (skill://, agent://, etc.) in extracted cwd.
 			if (cwd?.includes("://") || cwd?.includes("local:/")) {

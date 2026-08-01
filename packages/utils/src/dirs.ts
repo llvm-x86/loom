@@ -582,12 +582,13 @@ export function getRemoteDir(): string {
  * Expand a leading `~` and require an absolute result. Returns `undefined` for
  * empty/whitespace input or a path that is still relative after expansion.
  *
- * A worktree base is process-global and consumed by both creation
- * (PR checkout, task isolation) and cleanup (`omp worktree`). A relative value
- * would resolve against whatever cwd happened to launch `omp`, so checkout and
- * cleanup could disagree — we refuse it rather than silently bind it to cwd.
+ * A managed base dir is process-global and consumed by both creation
+ * (PR checkout, task isolation, scratch) and cleanup (`omp worktree`,
+ * `omp scratch`). A relative value would resolve against whatever cwd
+ * happened to launch `omp`, so checkout and cleanup could disagree — we
+ * refuse it rather than silently bind it to cwd.
  */
-function resolveWorktreeBase(value: string | undefined): string | undefined {
+function resolveManagedBaseDir(value: string | undefined): string | undefined {
 	const trimmed = value?.trim();
 	if (!trimmed) return undefined;
 	let p = trimmed;
@@ -604,13 +605,13 @@ let worktreesDirOverride: string | undefined;
  * `worktree.base` setting in coding-agent; pass `undefined`/empty to clear and
  * fall back to `OMP_WORKTREE_DIR` or the `~/.loom/wt` default.
  *
- * `~` is expanded and a relative path is rejected (see {@link resolveWorktreeBase}).
+ * `~` is expanded and a relative path is rejected (see {@link resolveManagedBaseDir}).
  * Returns the absolute path that took effect, or `undefined` if the input was
  * cleared or rejected — callers can warn on a non-empty input that returns
  * `undefined`.
  */
 export function setWorktreesDir(dir: string | undefined): string | undefined {
-	worktreesDirOverride = resolveWorktreeBase(dir);
+	worktreesDirOverride = resolveManagedBaseDir(dir);
 	return worktreesDirOverride;
 }
 
@@ -622,7 +623,37 @@ export function setWorktreesDir(dir: string | undefined): string | undefined {
  * ignored and resolution falls through.
  */
 export function getWorktreesDir(): string {
-	return resolveWorktreeBase(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
+	return resolveManagedBaseDir(process.env.OMP_WORKTREE_DIR) ?? worktreesDirOverride ?? dirs.rootSubdir("wt", "data");
+}
+
+let scratchDirOverride: string | undefined;
+
+/**
+ * Relocate the base directory for per-run scratch dirs (task subagents and
+ * interactive sessions, plus `omp scratch` cleanup, all read the same base).
+ * Driven by the `scratch.base` setting in coding-agent; pass
+ * `undefined`/empty to clear and fall back to `OMP_SCRATCH_DIR` or the
+ * `~/.loom/scratch` default.
+ *
+ * `~` is expanded and a relative path is rejected (see {@link resolveManagedBaseDir}).
+ * Returns the absolute path that took effect, or `undefined` if the input was
+ * cleared or rejected — callers can warn on a non-empty input that returns
+ * `undefined`.
+ */
+export function setScratchDir(dir: string | undefined): string | undefined {
+	scratchDirOverride = resolveManagedBaseDir(dir);
+	return scratchDirOverride;
+}
+
+/**
+ * Get the per-run scratch directory. Resolution order: the `OMP_SCRATCH_DIR`
+ * env var, then the {@link setScratchDir} override (the `scratch.base`
+ * setting), then the `~/.loom/scratch` default. The env var and the override
+ * are both `~`-expanded and must be absolute; a relative value is ignored and
+ * resolution falls through.
+ */
+export function getScratchDir(): string {
+	return resolveManagedBaseDir(process.env.OMP_SCRATCH_DIR) ?? scratchDirOverride ?? dirs.rootSubdir("scratch", "data");
 }
 
 /** Get the SSH control socket directory (~/.loom/ssh-control). */
