@@ -57,6 +57,8 @@ interface JsSession {
 	worker: WorkerHandle;
 	state: "alive" | "dead";
 	pending: Map<string, PendingRun>;
+	/** ms since epoch of the last acquire or run; drives {@link sweepIdleJsContexts}. */
+	lastUsedAt: number;
 }
 
 const sessions = new Map<string, JsSession>();
@@ -71,6 +73,28 @@ const resettingSessions = new Map<string, Promise<void>>();
 const WORKER_INIT_TIMEOUT_MS = 15_000;
 const WORKER_CLOSE_TIMEOUT_MS = 1_000;
 const JS_EVAL_PROCESS_ARG = "__omp_worker_js_eval_process";
+/**
+ * Idle lifetime of a JS eval context before its worker is reclaimed.
+ *
+ * Every live context pins a spawned subprocess (see {@link spawnJsProcess})
+ * running a full Bun runtime — tens of MB of RSS each — and nothing but
+ * `disposeAllVmContexts()` (tests only) ever released one, so a single `js`
+ * cell early in a session held a whole process for the session's lifetime.
+ *
+ * 30 minutes is far beyond any interactive cell-to-cell gap, so the only
+ * contexts reclaimed are genuinely abandoned ones. Cost of a reclaim: the next
+ * cell on that session key spawns a fresh worker and starts from an empty
+ * global scope — identical to what a `reset: true` cell produces. A context
+ * with an in-flight run is never reclaimed.
+ */
+export const JS_CONTEXT_IDLE_TIMEOUT_MS = 30 * 60 * 1000;
+/**
+ * Sweep cadence for {@link JS_CONTEXT_IDLE_TIMEOUT_MS}. The timer only runs
+ * while at least one context is live and is unref'd, so a session that never
+ * evaluates JS pays nothing and the sweep never holds the process open.
+ */
+const JS_CONTEXT_SWEEP_INTERVAL_MS = 60_000;
+let idleSweepTimer: NodeJS.Timeout | undefined;
 // Active graceful-close grace period before a worker that ack'd `close` but never
 // emitted its `close` event is force-terminated. Defaults to the production floor;
 // tests override it (and restore it) to exercise the close-timeout -> terminate
@@ -157,7 +181,36 @@ export async function disposeAllVmContexts(): Promise<void> {
 		if (!all.includes(result.value)) all.push(result.value);
 	}
 	sessions.clear();
+	stopIdleSweep();
 	await Promise.all(all.map(session => killSession(session, new ToolError("JS context disposed"), { force: false })));
+}
+
+/**
+ * Reclaim contexts that have been idle past {@link JS_CONTEXT_IDLE_TIMEOUT_MS}
+ * and have no run in flight. Stops the sweep once nothing is left to watch.
+ */
+function sweepIdleJsContexts(): void {
+	const now = Date.now();
+	for (const session of [...sessions.values()]) {
+		if (session.pending.size > 0) continue;
+		if (now - session.lastUsedAt <= JS_CONTEXT_IDLE_TIMEOUT_MS) continue;
+		logger.debug("Reclaiming idle JS eval context", { sessionKey: session.sessionKey });
+		void killSessionFor(session, new ToolError("JS context reclaimed after idle timeout"), { force: false });
+	}
+	if (sessions.size === 0 && startingSessions.size === 0) stopIdleSweep();
+}
+
+function startIdleSweep(): void {
+	if (idleSweepTimer !== undefined) return;
+	const timer = setInterval(sweepIdleJsContexts, JS_CONTEXT_SWEEP_INTERVAL_MS);
+	timer.unref?.();
+	idleSweepTimer = timer;
+}
+
+function stopIdleSweep(): void {
+	if (idleSweepTimer === undefined) return;
+	clearInterval(idleSweepTimer);
+	idleSweepTimer = undefined;
 }
 
 /**
@@ -166,7 +219,7 @@ export async function disposeAllVmContexts(): Promise<void> {
  * fallback). Catches silent process-load and init-message regressions
  * that otherwise strand every cell on the init timeout in a distribution build —
  * the failure mode that motivated `installWorkerInbox`. Wired into
- * `omp --smoke-test` so binary / source / tarball installs all exercise it.
+ * `loom --smoke-test` so binary / source / tarball installs all exercise it.
  */
 export async function smokeTestJsEvalWorker(): Promise<void> {
 	const worker = spawnJsWorker();
@@ -177,6 +230,7 @@ export async function smokeTestJsEvalWorker(): Promise<void> {
 		worker,
 		state: "alive",
 		pending: new Map(),
+		lastUsedAt: Date.now(),
 	};
 	try {
 		await initWorker(session, { cwd: process.cwd(), sessionId: "smoke" }, WORKER_INIT_TIMEOUT_MS);
@@ -240,6 +294,7 @@ async function runOnce(
 	} finally {
 		options.runState.signal?.removeEventListener("abort", onAbort);
 		session.pending.delete(runId);
+		session.lastUsedAt = Date.now();
 	}
 }
 
@@ -248,6 +303,7 @@ async function acquireSession(sessionKey: string, snapshot: SessionSnapshot, tim
 	if (existing && existing.state === "alive") {
 		existing.sessionId = snapshot.sessionId;
 		existing.cwd = snapshot.cwd;
+		existing.lastUsedAt = Date.now();
 		return existing;
 	}
 	const starting = startingSessions.get(sessionKey);
@@ -264,6 +320,7 @@ async function acquireSession(sessionKey: string, snapshot: SessionSnapshot, tim
 			worker,
 			state: "alive",
 			pending: new Map(),
+			lastUsedAt: Date.now(),
 		};
 		// Init headroom is the fixed infrastructure floor; the caller's per-cell timeout
 		// dominates when larger so users can grant more by raising `timeout` on a cell.
@@ -293,7 +350,9 @@ async function acquireSession(sessionKey: string, snapshot: SessionSnapshot, tim
 				session.state = "alive";
 			}
 		}
+		session.lastUsedAt = Date.now();
 		sessions.set(sessionKey, session);
+		startIdleSweep();
 		return session;
 	})();
 	startingSessions.set(sessionKey, startup);

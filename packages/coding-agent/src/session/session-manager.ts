@@ -57,7 +57,12 @@ import {
 	type UsageStatistics,
 } from "./session-entries";
 import { findMostRecentSession, listAllSessions, listSessions, type SessionInfo } from "./session-listing";
-import { loadEntriesFromFile, readTitleSlotFromFile, resolveBlobRefsInEntries } from "./session-loader";
+import {
+	installLazyBlobRefsInEntries,
+	loadEntriesFromFile,
+	readTitleSlotFromFile,
+	resolveBlobRefsInEntries,
+} from "./session-loader";
 import { generateId, migrateToCurrentVersion } from "./session-migrations";
 import {
 	computeDefaultSessionDir,
@@ -65,7 +70,7 @@ import {
 	resolveManagedSessionRoot,
 	writeTerminalBreadcrumb,
 } from "./session-paths";
-import { prepareEntryForPersistence } from "./session-persistence";
+import { capEntryStringsInMemory, prepareEntryForPersistence } from "./session-persistence";
 import {
 	FileSessionStorage,
 	MemorySessionStorage,
@@ -78,6 +83,22 @@ const JSONL_SUFFIX_LENGTH = ".jsonl".length;
 const DRAFT_ONLY_SESSION_MARKER = ".draft-only-session";
 const SUPERSEDED_COMPACTION_SUMMARY = "[Superseded compaction summary elided after a newer compaction]";
 const SUPERSEDED_COMPACTION_SHORT_SUMMARY = "Superseded compaction elided";
+
+/**
+ * Total bytes retained by the in-memory artifact fallback (see
+ * {@link SessionManager.saveArtifact}). Only sessions with no artifacts
+ * directory reach that path, and `artifact://` resolution is file-backed, so
+ * the budget exists purely to stop the fallback from pinning arbitrarily large
+ * tool output — a single multi-hundred-MB build log used to be retained whole
+ * for the life of the process.
+ */
+const MAX_IN_MEMORY_ARTIFACT_BYTES = 4 * 1024 * 1024;
+
+/** One retained in-memory artifact; `bytes` is cached so eviction never re-measures. */
+interface RetainedArtifact {
+	readonly content: string;
+	readonly bytes: number;
+}
 
 function mintSessionId(): string {
 	return Bun.randomUUIDv7();
@@ -442,7 +463,8 @@ export class SessionManager {
 	#artifactManager: ArtifactManager | null = null;
 	#artifactManagerSessionFile: string | null = null;
 	#adoptedArtifactManager: ArtifactManager | null = null;
-	#inMemoryArtifacts: Map<string, string> | null = null;
+	#inMemoryArtifacts: Map<string, RetainedArtifact> | null = null;
+	#inMemoryArtifactBytes = 0;
 	#inMemoryArtifactCounter = 0;
 
 	#suppressBreadcrumb = false;
@@ -802,6 +824,7 @@ export class SessionManager {
 		this.#artifactManagerSessionFile = null;
 		this.#adoptedArtifactManager = null;
 		this.#inMemoryArtifacts = null;
+		this.#inMemoryArtifactBytes = 0;
 		this.#inMemoryArtifactCounter = 0;
 
 		if (this.#persist) {
@@ -835,6 +858,10 @@ export class SessionManager {
 	}
 
 	#recordEntry(entry: SessionEntry): void {
+		// Cap oversized strings on the retained object, not just on the JSONL
+		// line: the journal is the session's dominant steady-state retainer and
+		// an uncapped in-memory entry would outlive every consumer of it.
+		capEntryStringsInMemory(entry);
 		this.#entries.push(entry);
 		this.#index.insert(entry);
 		this.#appendToSessionFile(entry);
@@ -1003,7 +1030,11 @@ export class SessionManager {
 		}
 
 		const migrated = migrateToCurrentVersion(fileEntries);
-		await resolveBlobRefsInEntries(fileEntries, this.#blobs);
+		// Lazy: a resumed session's images are read from the blob store on first
+		// access, so branches the agent never replays never materialize. `forkFrom`
+		// stays eager — it rewrites every entry immediately, which resolves them all
+		// anyway.
+		installLazyBlobRefsInEntries(fileEntries, this.#blobs);
 		// loadEntriesFromFile guarantees entries[0] is a valid session header.
 		const header = fileEntries[0] as SessionHeader;
 
@@ -1337,14 +1368,37 @@ export class SessionManager {
 		return (await this.#artifactManagerForSession()?.allocatePath(toolType)) ?? {};
 	}
 
+	/**
+	 * Persist `content` as a session artifact and return its id, or `undefined`
+	 * when no artifact could be stored.
+	 *
+	 * With no artifacts directory (SDK/headless embedding, `--no-persist`, tests)
+	 * the text is retained in memory instead, bounded by
+	 * {@link MAX_IN_MEMORY_ARTIFACT_BYTES} in total and evicted oldest-first.
+	 * Content larger than the whole budget is not retained and reports no
+	 * artifact — the same "artifact unavailable" degradation callers already
+	 * handle when a file sink cannot be created: `enforceInlineByteCap` omits its
+	 * `[raw output: artifact://…]` footer and `spillLargeToolResult` omits the
+	 * recovery link, rather than advertising an id nothing can resolve.
+	 */
 	async saveArtifact(content: string, toolType: string): Promise<string | undefined> {
 		const manager = this.#artifactManagerForSession();
 		if (manager) return manager.save(content, toolType);
 
-		// Non-persistent session: keep an in-memory copy so spill truncation works.
+		const bytes = Buffer.byteLength(content, "utf-8");
+		if (bytes > MAX_IN_MEMORY_ARTIFACT_BYTES) return undefined;
+
 		this.#inMemoryArtifacts ??= new Map();
+		const artifacts = this.#inMemoryArtifacts;
+		for (const [evictId, retained] of artifacts) {
+			if (this.#inMemoryArtifactBytes + bytes <= MAX_IN_MEMORY_ARTIFACT_BYTES) break;
+			artifacts.delete(evictId);
+			this.#inMemoryArtifactBytes -= retained.bytes;
+		}
+
 		const id = String(this.#inMemoryArtifactCounter++);
-		this.#inMemoryArtifacts.set(id, content);
+		artifacts.set(id, { content, bytes });
+		this.#inMemoryArtifactBytes += bytes;
 		return id;
 	}
 

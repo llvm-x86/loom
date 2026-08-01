@@ -221,7 +221,9 @@ export async function installWindows(opts: PolicyOptions, entry: string): Promis
 			location: key,
 			message: `Could not write the force-install policy to ${key}: ${detail}`,
 			// `reg` treats a bare `;` as an argument separator: key/name/data must stay quoted.
-			manualCommand: `reg add "${key}" /v "${name}" /t REG_SZ /d "${entry}" /f`,
+			// Print the fallback as a multi-line PowerShell command so terminal wrapping does
+			// not split a single long line and break `reg add` syntax.
+			manualCommand: `reg add "${key}" \`\n  /v "${name}" \`\n  /t REG_SZ \`\n  /d "${entry}" \`\n  /f`,
 		};
 		if (hive === "HKLM" && /access is denied|requires elevation/i.test(detail)) continue;
 		return result;

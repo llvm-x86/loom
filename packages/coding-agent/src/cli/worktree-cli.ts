@@ -18,6 +18,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { getWorktreesDir, isEnoent } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
+import { classifyTaskIsolation } from "../task/worktree-gc";
 import * as git from "../utils/git";
 
 type WorktreeKind = "pr-checkout" | "task-isolation" | "empty" | "stray";
@@ -29,10 +30,12 @@ export interface WorktreeEntry {
 	path: string;
 	/** Classification of what we found on disk. */
 	kind: WorktreeKind;
-	/** Parent repo root, when this is a registered git worktree. */
+	/** Parent repo root, when this is a registered git worktree or an owned task-isolation dir. */
 	parentRepo?: string;
 	/** Branch name extracted from the parent's tracking file, when available. */
 	branch?: string;
+	/** Live owner of a task-isolation dir, from its owner.json marker. */
+	owner?: { pid: number; startedAt: string };
 	/** When set, the entry is unhealthy and `loom worktree clear` will remove it. */
 	orphanReason?: string;
 }
@@ -46,6 +49,8 @@ export interface ClearWorktreesOptions {
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
+	/** Also prune stale `omp/task/*` branches (last commit older than 7 days) in affected repos. Default false. */
+	taskBranches?: boolean;
 	json: boolean;
 }
 
@@ -75,6 +80,7 @@ export async function listWorktrees(options: ListWorktreesOptions): Promise<void
 export async function clearWorktrees(options: ClearWorktreesOptions): Promise<void> {
 	const entries = await scanWorktrees();
 	const targets = options.all ? entries : entries.filter(entry => entry.orphanReason !== undefined);
+	const parentsToPrune = new Set<string>();
 
 	if (targets.length === 0) {
 		if (options.json) {
@@ -82,10 +88,7 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 		} else {
 			console.log(chalk.dim(options.all ? "No worktrees to remove." : "No orphaned worktrees to remove."));
 		}
-		return;
-	}
-
-	if (options.dryRun) {
+	} else if (options.dryRun) {
 		if (options.json) {
 			console.log(JSON.stringify({ wouldRemove: targets.map(t => t.path) }, null, 2));
 		} else {
@@ -94,60 +97,64 @@ export async function clearWorktrees(options: ClearWorktreesOptions): Promise<vo
 			}
 			console.log(chalk.dim(`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed.`));
 		}
-		return;
-	}
-
-	const results: { path: string; ok: boolean; error?: string }[] = [];
-	const parentsToPrune = new Set<string>();
-	for (const target of targets) {
-		try {
-			if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
-				// Live worktree: ask git to remove it cleanly. If git refuses (locked,
-				// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
-				// clean the bookkeeping on the parent side.
-				const removed = await git.worktree.tryRemove(target.parentRepo, target.path, { force: true });
-				if (!removed) {
+	} else {
+		const results: { path: string; ok: boolean; error?: string }[] = [];
+		for (const target of targets) {
+			try {
+				if (target.kind === "pr-checkout" && target.parentRepo && !target.orphanReason) {
+					// Live worktree: ask git to remove it cleanly. If git refuses (locked,
+					// dirty, etc.), fall back to fs.rm and rely on `worktree prune` to
+					// clean the bookkeeping on the parent side.
+					const removed = await git.worktree.tryRemove(target.parentRepo, target.path, { force: true });
+					if (!removed) {
+						await fs.rm(target.path, { recursive: true, force: true });
+						parentsToPrune.add(target.parentRepo);
+					}
+				} else {
 					await fs.rm(target.path, { recursive: true, force: true });
-					parentsToPrune.add(target.parentRepo);
+					if (target.parentRepo) parentsToPrune.add(target.parentRepo);
 				}
-			} else {
-				await fs.rm(target.path, { recursive: true, force: true });
-				if (target.parentRepo) parentsToPrune.add(target.parentRepo);
+				results.push({ path: target.path, ok: true });
+			} catch (err) {
+				results.push({ path: target.path, ok: false, error: err instanceof Error ? err.message : String(err) });
 			}
-			results.push({ path: target.path, ok: true });
-		} catch (err) {
-			results.push({ path: target.path, ok: false, error: err instanceof Error ? err.message : String(err) });
 		}
-	}
 
-	// Best-effort: drop stale entries from each affected parent's `.git/worktrees/`.
-	for (const parent of parentsToPrune) {
-		try {
-			await git.worktree.prune(parent);
-		} catch {
-			/* parent repo may already be gone or pruned — ignore */
+		// Best-effort: drop stale entries from each affected parent's `.git/worktrees/`.
+		for (const parent of parentsToPrune) {
+			try {
+				await git.worktree.prune(parent);
+			} catch {
+				/* parent repo may already be gone or pruned — ignore */
+			}
 		}
-	}
 
-	const succeeded = results.filter(r => r.ok).length;
-	const failed = results.length - succeeded;
+		const succeeded = results.filter(r => r.ok).length;
+		const failed = results.length - succeeded;
 
-	if (options.json) {
-		console.log(JSON.stringify({ removed: succeeded, failed, results }, null, 2));
-		if (failed > 0) process.exitCode = 1;
-		return;
-	}
-
-	for (const result of results) {
-		if (result.ok) {
-			console.log(`${chalk.green("removed")}  ${result.path}`);
+		if (options.json) {
+			console.log(JSON.stringify({ removed: succeeded, failed, results }, null, 2));
 		} else {
-			console.log(`${chalk.red("failed ")}  ${result.path}`);
-			if (result.error) console.log(`          ${chalk.dim(result.error)}`);
+			for (const result of results) {
+				if (result.ok) {
+					console.log(`${chalk.green("removed")}  ${result.path}`);
+				} else {
+					console.log(`${chalk.red("failed ")}  ${result.path}`);
+					if (result.error) console.log(`          ${chalk.dim(result.error)}`);
+				}
+			}
+			console.log(chalk.dim(`\n${succeeded} removed${failed > 0 ? ` · ${chalk.red(`${failed} failed`)}` : ""}`));
 		}
+		if (failed > 0) process.exitCode = 1;
 	}
-	console.log(chalk.dim(`\n${succeeded} removed${failed > 0 ? ` · ${chalk.red(`${failed} failed`)}` : ""}`));
-	if (failed > 0) process.exitCode = 1;
+
+	if (options.taskBranches) {
+		const repos = new Set<string>(parentsToPrune);
+		for (const entry of entries) {
+			if (entry.parentRepo) repos.add(entry.parentRepo);
+		}
+		await pruneStaleTaskBranches(repos, options);
+	}
 }
 
 // ───────────────────────────────────────────────────────────────────────────
@@ -214,11 +221,21 @@ async function classifyDir(dir: string): Promise<WorktreeEntry | null> {
 	for (const mountDir of TASK_ISOLATION_MOUNT_DIRS) {
 		const mountStat = await fs.stat(path.join(dir, mountDir)).catch(() => null);
 		if (!mountStat?.isDirectory()) continue;
-		return {
-			path: dir,
-			kind: "task-isolation",
-			orphanReason: "task-isolation leftover (no live task owns it)",
-		};
+		// Liveness-aware: dirs owned by a live process stay live; only dead-pid
+		// or legacy leftovers past the grace window are orphaned.
+		const classified = await classifyTaskIsolation(dir);
+		const owner = classified.owner ? { pid: classified.owner.pid, startedAt: classified.owner.startedAt } : undefined;
+		const parentRepo = classified.owner?.repoRoot;
+		if (classified.orphaned) {
+			return {
+				path: dir,
+				kind: "task-isolation",
+				parentRepo,
+				owner,
+				orphanReason: classified.orphanReason ?? "task-isolation leftover (no live task owns it)",
+			};
+		}
+		return { path: dir, kind: "task-isolation", parentRepo, owner };
 	}
 	return null;
 }
@@ -284,6 +301,7 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 		parts.push(`${repo} · ${branch}`);
 	} else if (entry.kind === "task-isolation") {
 		parts.push("task-isolation sandbox");
+		if (entry.owner) parts.push(`owned by pid ${entry.owner.pid} since ${entry.owner.startedAt}`);
 	} else if (entry.kind === "empty") {
 		parts.push("legacy project shell");
 	} else {
@@ -291,4 +309,79 @@ function formatEntryDetail(entry: WorktreeEntry): string {
 	}
 	if (entry.orphanReason) parts.push(entry.orphanReason);
 	return parts.join(" — ");
+}
+
+// ───────────────────────────────────────────────────────────────────────────
+// Stale task-branch pruning
+// ───────────────────────────────────────────────────────────────────────────
+
+/** Task branches created by task isolation (`task/worktree.ts`) use this prefix. */
+const TASK_BRANCH_PREFIX = "omp/task/";
+/** Branches whose last commit is older than this are considered stale. */
+const TASK_BRANCH_STALE_MS = 7 * 24 * 60 * 60 * 1000;
+
+interface TaskBranch {
+	name: string;
+	committedAt: number;
+}
+
+/**
+ * List `omp/task/*` branches with their last-commit timestamp. `git.branch.list`
+ * has no date support, so this shells out to `for-each-ref` the same way
+ * `utils/git.ts` spawns git. Returns [] when the repo is gone or git fails.
+ */
+async function listTaskBranches(repoRoot: string): Promise<TaskBranch[]> {
+	const child = Bun.spawn(
+		[
+			"git",
+			"for-each-ref",
+			"--format=%(refname:short)%00%(committerdate:iso8601)",
+			`refs/heads/${TASK_BRANCH_PREFIX}`,
+		],
+		{ cwd: repoRoot, stdout: "pipe", stderr: "ignore" },
+	);
+	const stdout = await new Response(child.stdout).text();
+	const exitCode = await child.exited;
+	if (exitCode !== 0) return [];
+	const branches: TaskBranch[] = [];
+	for (const line of stdout.split("\n")) {
+		if (!line) continue;
+		const [name, date] = line.split("\0");
+		if (!name || !date) continue;
+		const committedAt = Date.parse(date);
+		if (Number.isNaN(committedAt)) continue;
+		branches.push({ name, committedAt });
+	}
+	return branches;
+}
+
+/** Delete `omp/task/*` branches older than TASK_BRANCH_STALE_MS in each repo. Best-effort per branch. */
+async function pruneStaleTaskBranches(repos: Set<string>, options: ClearWorktreesOptions): Promise<void> {
+	const cutoff = Date.now() - TASK_BRANCH_STALE_MS;
+	for (const repo of repos) {
+		let branches: TaskBranch[];
+		try {
+			branches = await listTaskBranches(repo);
+		} catch {
+			continue; // repo may already be gone
+		}
+		for (const branch of branches) {
+			if (branch.committedAt >= cutoff) continue;
+			if (options.dryRun) {
+				if (!options.json) console.log(`${chalk.yellow("would delete branch")}  ${branch.name}  ${chalk.dim(`(${repo})`)}`);
+				continue;
+			}
+			try {
+				const deleted = await git.branch.tryDelete(repo, branch.name);
+				if (!deleted) throw new Error("git branch -D exited non-zero");
+				if (!options.json) console.log(`${chalk.green("deleted branch")}  ${branch.name}  ${chalk.dim(`(${repo})`)}`);
+			} catch (err) {
+				if (!options.json) {
+					console.log(`${chalk.red("failed branch  ")}  ${branch.name}  ${chalk.dim(`(${repo})`)}`);
+					console.log(`          ${chalk.dim(err instanceof Error ? err.message : String(err))}`);
+				}
+				process.exitCode = 1;
+			}
+		}
+	}
 }

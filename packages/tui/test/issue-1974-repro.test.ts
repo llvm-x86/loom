@@ -40,7 +40,7 @@ class LineList implements Component {
 }
 
 /**
- * Minimal append-only live region. Models the real omp setup where
+ * Minimal append-only live region. Models the real loom setup where
  * `TranscriptContainer` wraps a streaming `AssistantMessageComponent` whose
  * rendered rows are all declared final (settled) as they stream, so its
  * scrolled-off head commits to pane history mid-stream.

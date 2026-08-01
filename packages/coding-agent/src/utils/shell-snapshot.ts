@@ -206,6 +206,73 @@ fi
 }
 
 /**
+ * Directory permission bits that must be clear. A snapshot inlines the values
+ * of the env vars referenced by captured functions (#3470), so the UUID
+ * filenames are secrets too — `ls` on a group/world-readable directory leaks
+ * them even when every file inside is 0600.
+ */
+const PRIVATE_DIR_MASK = 0o077;
+
+/** Resolved snapshot directories, keyed by the `os.tmpdir()` they live under. */
+const snapshotDirs = new Map<string, string>();
+
+/** True when `dir` is a real directory owned by us with no group/other access. */
+function isPrivateDir(dir: string): boolean {
+	try {
+		// `lstat`, not `stat`: a symlink planted in a world-writable tmpdir must
+		// be rejected even when it points at a 0700 directory we own.
+		const stat = fs.lstatSync(dir);
+		if (!stat.isDirectory() || (stat.mode & PRIVATE_DIR_MASK) !== 0) return false;
+		const uid = process.getuid?.();
+		return uid === undefined || stat.uid === uid;
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * Resolve the directory that holds snapshot files, guaranteeing it is a real
+ * directory we own at mode 0700.
+ *
+ * `os.tmpdir()` is world-writable, so the well-known child path can already be
+ * squatted: `mkdir`'s `mode` is masked by the umask on a fresh directory and
+ * ignored entirely for an existing one, and the defensive `chmod` fails with
+ * EPERM when the squatter is another user (a root-owned 1777
+ * `/tmp/omp-shell-snapshots` is enough). So verify the result rather than
+ * trusting it, and walk a ladder of candidates: the plain name, then a
+ * uid-qualified one so a shared box does not push every user but the first
+ * onto the last resort — `mkdtemp`, which the kernel always creates at 0700
+ * under an unpredictable name, at the cost of a fresh directory per process.
+ */
+function resolveSnapshotDir(): string {
+	const tmpDir = os.tmpdir();
+	const cached = snapshotDirs.get(tmpDir);
+	if (cached && isPrivateDir(cached)) return cached;
+
+	const uid = process.getuid?.();
+	const names = uid === undefined ? ["omp-shell-snapshots"] : ["omp-shell-snapshots", `omp-shell-snapshots-${uid}`];
+	let dir: string | undefined;
+	for (const name of names) {
+		const candidate = path.join(tmpDir, name);
+		try {
+			fs.mkdirSync(candidate, { recursive: true, mode: 0o700 });
+			fs.chmodSync(candidate, 0o700);
+		} catch {
+			// Squatted, unwritable, or shadowed by a non-directory — try the next.
+		}
+		if (isPrivateDir(candidate)) {
+			dir = candidate;
+			break;
+		}
+	}
+	// `mkdtemp` appends exactly six random characters, so it can never collide
+	// with the uid-qualified candidate above.
+	dir ??= fs.mkdtempSync(path.join(tmpDir, "omp-shell-snapshots-"));
+	snapshotDirs.set(tmpDir, dir);
+	return dir;
+}
+
+/**
  * Create a shell snapshot, caching the result.
  * Returns the path to the snapshot file, or null if creation failed.
  */
@@ -230,18 +297,7 @@ export async function getOrCreateSnapshot(
 
 	const rcFile = getShellConfigFile(shell, env);
 
-	// Create snapshot directory with owner-only perms — the script may inline
-	// env vars referenced by captured functions (#3470) and `os.tmpdir()` is
-	// shared on Linux. `mode: 0o700` applies to a fresh mkdir; an existing dir
-	// keeps its mode, so chmod it defensively. Ignore EPERM (dir owned by
-	// another user on a shared box).
-	const snapshotDir = path.join(os.tmpdir(), "omp-shell-snapshots");
-	fs.mkdirSync(snapshotDir, { recursive: true, mode: 0o700 });
-	try {
-		fs.chmodSync(snapshotDir, 0o700);
-	} catch {
-		// best-effort
-	}
+	const snapshotDir = resolveSnapshotDir();
 
 	// Generate unique snapshot path
 	const shellName = shell.includes("zsh") ? "zsh" : shell.includes("bash") ? "bash" : "sh";

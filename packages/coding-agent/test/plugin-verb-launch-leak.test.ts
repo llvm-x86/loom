@@ -1,7 +1,7 @@
 /**
  * Regression test for #2935 and #4845: the plugins/marketplace docs advertise
  * `omp list` / `omp remove` / `omp marketplace <sub>` / `omp uninstall …` etc.
- * as top-level commands, but only `omp install` is registered. Before the fix,
+ * as top-level commands, but only `loom install` is registered. Before the fix,
  * `resolveCliArgv(["list"])` rewrote the bare verb to `["launch", "list"]`, so
  * `omp list` silently started an interactive agent session with "list" as the
  * initial LLM prompt instead of managing plugins (the real command is

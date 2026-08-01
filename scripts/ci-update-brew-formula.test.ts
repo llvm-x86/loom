@@ -2,10 +2,10 @@ import { describe, expect, it } from "bun:test";
 import { renderFormula } from "./ci-update-brew-formula";
 
 const SUMS = {
-	"omp-darwin-arm64": "darwin_arm64_sha",
-	"omp-darwin-x64": "darwin_x64_sha",
-	"omp-linux-arm64": "linux_arm64_sha",
-	"omp-linux-x64": "linux_x64_sha",
+	"loom-darwin-arm64": "darwin_arm64_sha",
+	"loom-darwin-x64": "darwin_x64_sha",
+	"loom-linux-arm64": "linux_arm64_sha",
+	"loom-linux-x64": "linux_x64_sha",
 };
 
 describe("renderFormula", () => {
@@ -18,7 +18,7 @@ describe("renderFormula", () => {
 	it("attaches `using: :nounzip` to every per-platform url stanza", () => {
 		const matches = formula.match(/using: :nounzip/g) ?? [];
 		expect(matches).toHaveLength(4);
-		for (const arch of ["omp-darwin-arm64", "omp-darwin-x64", "omp-linux-arm64", "omp-linux-x64"]) {
+		for (const arch of ["loom-darwin-arm64", "loom-darwin-x64", "loom-linux-arm64", "loom-linux-x64"]) {
 			expect(formula).toMatch(
 				new RegExp(
 					`url "https://github\\.com/[^"]+/${arch}",\\s+using: :nounzip\\s+sha256 "${SUMS[arch as keyof typeof SUMS]}"`,
@@ -32,7 +32,7 @@ describe("renderFormula", () => {
 	// sandbox profile) during the build (issue #2398).
 	it("wraps `generate_completions_from_executable` with a HOME redirect to buildpath", () => {
 		expect(formula).toMatch(
-			/with_env\(HOME: buildpath\) do\n\s+generate_completions_from_executable\(bin\/"omp", "completions", shells: \[:bash, :zsh, :fish\]\)\n\s+end/,
+			/with_env\(HOME: buildpath\) do\n\s+generate_completions_from_executable\(bin\/"loom", "completions", shells: \[:bash, :zsh, :fish\]\)\n\s+end/,
 		);
 		// And the bare form (which is what failed in the sandbox) must not appear
 		// outside the `with_env` block.

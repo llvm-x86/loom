@@ -90,4 +90,54 @@ describe("findCommittedPrefixResync", () => {
 		// auditTo=10 means rows 10..19 are outside the audit
 		expect(findCommittedPrefixResync(frame, prefix, 10)).toBe(-1);
 	});
+
+	// The engine passes a BOUNDED view: rows far above the seam are shed so the
+	// ledger stays constant-size over a long session. Shed rows read as
+	// `undefined`, and the contract is that shedding may only ever move a
+	// re-anchor DOWN (toward duplication), never suppress one that the retained
+	// rows can still see.
+	describe("bounded prefix view", () => {
+		function bounded(all: readonly string[], base: number) {
+			return {
+				length: all.length,
+				base,
+				at: (index: number) => (index < base || index >= all.length ? undefined : all[index]),
+			};
+		}
+
+		// The tail sample stops after 8 non-blank comparisons, so both shifted
+		// rows have to land in the last 8 rows for the sample to read a shift.
+		it("still detects a shift that reaches the retained tail sample", () => {
+			const committed = rows("r", 200);
+			const frame = [...committed];
+			frame[194] = "r194-shift";
+			frame[198] = "r198-shift";
+			expect(findCommittedPrefixResync(frame, bounded(committed, 150))).toBe(194);
+		});
+
+		it("re-anchors at the earliest RETAINED divergence when an older one was shed", () => {
+			// Rows 0..149 are gone. Row 10 also changed, but the engine cannot
+			// see it: history keeps that stale row (the same artifact the
+			// tail-sample tolerance already accepts) and the repair recommits
+			// from the earliest divergence it can still prove.
+			const committed = rows("r", 200);
+			const frame = [...committed];
+			frame[10] = "r10-shed-divergence";
+			frame[194] = "r194-shift";
+			frame[198] = "r198-shift";
+			expect(findCommittedPrefixResync(frame, bounded(committed, 150))).toBe(194);
+		});
+
+		it("stays quiet when only shed rows changed and the retained rows still align", () => {
+			const committed = rows("r", 200);
+			const frame = [...committed];
+			frame[10] = "r10-shed-divergence";
+			expect(findCommittedPrefixResync(frame, bounded(committed, 150))).toBe(-1);
+		});
+
+		it("re-anchors at frame.length when the frame shrinks below the retained base", () => {
+			const committed = rows("r", 200);
+			expect(findCommittedPrefixResync(rows("r", 40), bounded(committed, 150))).toBe(40);
+		});
+	});
 });
