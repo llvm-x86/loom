@@ -18,8 +18,9 @@ import {
 	StructuredSubagentError,
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
-import type { AgentDefinition, SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import { type AgentDefinition, getTaskSchema, type SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
+import { $ } from "bun";
 
 const AGENT: AgentDefinition = {
 	name: "worker",
@@ -31,15 +32,23 @@ const AGENT: AgentDefinition = {
 };
 
 function session(
-	options: { planMode?: boolean; outputSchema?: unknown; maxDepth?: number; isolationMode?: "none" | "worktree" } = {},
+	options: {
+		planMode?: boolean;
+		outputSchema?: unknown;
+		maxDepth?: number;
+		isolationMode?: "none" | "auto" | "worktree" | "rcopy";
+		isolationByDefault?: boolean;
+		cwd?: string;
+	} = {},
 ): ToolSession {
 	return {
-		cwd: "/tmp",
+		cwd: options.cwd ?? "/tmp",
 		hasUI: false,
 		outputSchema: options.outputSchema,
 		settings: Settings.isolated({
 			"task.maxRecursionDepth": options.maxDepth ?? 2,
 			"task.isolation.mode": options.isolationMode ?? "none",
+			"task.isolation.byDefault": options.isolationByDefault ?? false,
 			"task.enableLsp": true,
 		}),
 		getSessionFile: () => null,
@@ -157,6 +166,111 @@ describe("structured subagent primitive", () => {
 			),
 		).rejects.toThrow("isolation, apply, and merge controls are unavailable in plan mode");
 		expect(discover).not.toHaveBeenCalled();
+	});
+
+	describe("task.isolation.byDefault", () => {
+		it("isolates a spawn that sent no explicit flag", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ isolationMode: "auto", isolationByDefault: true }) }),
+			);
+			expect(policy.isIsolated).toBe(true);
+		});
+
+		it("lets an explicit isolated=false escape the default", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({
+					session: session({ isolationMode: "auto", isolationByDefault: true }),
+					isolation: { requested: false },
+				}),
+			);
+			expect(policy.isIsolated).toBe(false);
+		});
+
+		it("stays non-isolated without throwing when the mode is none", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ isolationMode: "none", isolationByDefault: true }) }),
+			);
+			expect(policy.isIsolated).toBe(false);
+		});
+
+		it("never isolates a plan-mode spawn", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ planMode: true, isolationMode: "auto", isolationByDefault: true }) }),
+			);
+			expect(policy.isIsolated).toBe(false);
+		});
+
+		it("leaves spawns non-isolated when the setting is off", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(request({ session: session({ isolationMode: "auto" }) }));
+			expect(policy.isIsolated).toBe(false);
+		});
+
+		it("still rejects an explicit isolated=true when the mode is none", async () => {
+			mockDiscovery();
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: session({ isolationMode: "none", isolationByDefault: true }),
+						isolation: { requested: true },
+					}),
+				),
+			).rejects.toThrow('task.isolation.mode to be set; current mode is "none"');
+		});
+
+		it("keeps accepting an explicit isolated=false through the task tool schema", () => {
+			const schema = getTaskSchema({ isolationEnabled: true, batchEnabled: false, defaultAgent: "task" });
+			expect(schema({ task: "check", isolated: false })).toEqual({
+				agent: "task",
+				task: "check",
+				isolated: false,
+			});
+		});
+
+		it("runs the unchanged merge-back path for a default-isolated spawn", async () => {
+			mockDiscovery();
+			const repoRoot = await fs.mkdtemp(path.join(os.tmpdir(), "omp-default-isolation-"));
+			let artifactsDir: string | undefined;
+			try {
+				const git = async (...args: string[]) => {
+					const run = await $`git ${args}`.cwd(repoRoot).quiet().nothrow();
+					if (run.exitCode !== 0) throw new Error(`git ${args.join(" ")}: ${run.stderr.toString()}`);
+				};
+				await git("init");
+				await git("config", "user.email", "isolation@example.com");
+				await git("config", "user.name", "Isolation");
+				await Bun.write(path.join(repoRoot, "seed.txt"), "seed\n");
+				await git("add", "seed.txt");
+				await git("commit", "-m", "base");
+
+				let worktree: string | undefined;
+				vi.spyOn(executorModule, "runSubprocess").mockImplementation(async options => {
+					worktree = options.worktree;
+					await Bun.write(path.join(options.worktree ?? repoRoot, "seed.txt"), "edited by subagent\n");
+					return result();
+				});
+
+				const settled = await runStructuredSubagent(
+					request({ session: session({ cwd: repoRoot, isolationMode: "rcopy", isolationByDefault: true }) }),
+				);
+				artifactsDir = settled.artifactsDir;
+
+				// The spawn never asked for isolation: the default put it in a
+				// worktree, and the standard patch merge brought its edit home.
+				expect(settled.policy.isIsolated).toBe(true);
+				expect(worktree).toBeDefined();
+				expect(worktree).not.toBe(repoRoot);
+				expect(settled.changesApplied).toBe(true);
+				expect(await Bun.file(path.join(repoRoot, "seed.txt")).text()).toBe("edited by subagent\n");
+			} finally {
+				await fs.rm(repoRoot, { recursive: true, force: true });
+				if (artifactsDir) await fs.rm(artifactsDir, { recursive: true, force: true });
+			}
+		});
 	});
 
 	it("leases temporary artifacts for a retained invocation and registers them for agent URLs", async () => {

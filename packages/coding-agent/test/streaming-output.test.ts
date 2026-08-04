@@ -723,7 +723,8 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		const meta = outputMeta().truncationFromSummary(dumped, { direction: "tail" }).get();
 		// No window truncation → no styled TUI warning and no range/limit footer.
 		expect(meta?.truncation).toBeUndefined();
-		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8 });
+		// 42 dropped line bytes + the 3-byte `…` marker the cap emits in their place.
+		expect(meta?.limits?.columnTruncated).toEqual({ maxColumn: 8, droppedBytes: 45 });
 
 		const notice = formatOutputNotice(meta);
 		expect(notice).toContain("Some lines truncated to 8 chars");

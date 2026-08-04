@@ -4,7 +4,7 @@ import * as evalIndex from "@oh-my-pi/pi-coding-agent/eval";
 import type { EvalToolDetails } from "@oh-my-pi/pi-coding-agent/eval/types";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { EvalTool } from "@oh-my-pi/pi-coding-agent/tools/eval";
-import { formatOutputNotice } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
+import { formatOutputNotice, OutputMetaBuilder } from "@oh-my-pi/pi-coding-agent/tools/output-meta";
 
 function makeSession(settings = Settings.isolated()): ToolSession {
 	return {
@@ -107,5 +107,55 @@ describe("EvalTool live stdout streaming", () => {
 
 		expect(result.details?.meta?.truncation).toBeUndefined();
 		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 8 chars");
+	});
+});
+
+describe("column truncation recovery (regression: dropped bytes were unrecoverable)", () => {
+	function summary(over: Record<string, unknown> = {}) {
+		return {
+			output: "X".repeat(768),
+			truncated: false,
+			totalLines: 1,
+			totalBytes: 3000,
+			outputLines: 1,
+			outputBytes: 768,
+			columnMax: 768,
+			columnTruncatedLines: 1,
+			columnDroppedBytes: 2232,
+			artifactId: "42",
+			...over,
+		};
+	}
+
+	it("names the artifact when only the column cap fired", () => {
+		const meta = new OutputMetaBuilder()
+			.truncationFromSummary(summary(), { direction: "tail" })
+			.get();
+		expect(meta?.limits?.columnTruncated?.artifactId).toBe("42");
+		const notice = formatOutputNotice(meta);
+		expect(notice).toContain("Some lines truncated to 768 chars");
+		expect(notice).toContain("2232 bytes dropped");
+		expect(notice).toContain("artifact://42");
+	});
+
+	it("omits the recovery clause when the sink captured no artifact", () => {
+		const meta = new OutputMetaBuilder()
+			.truncationFromSummary(summary({ artifactId: undefined, columnDroppedBytes: undefined }), {
+				direction: "tail",
+			})
+			.get();
+		const notice = formatOutputNotice(meta);
+		expect(notice).toContain("Some lines truncated to 768 chars");
+		expect(notice).not.toContain("artifact://");
+		expect(notice).not.toContain("bytes dropped");
+	});
+
+	it("still reports recovery when window truncation also fired", () => {
+		const meta = new OutputMetaBuilder()
+			.truncationFromSummary(summary({ truncated: true, totalLines: 900, outputLines: 100 }), {
+				direction: "tail",
+			})
+			.get();
+		expect(formatOutputNotice(meta)).toContain("artifact://42");
 	});
 });
