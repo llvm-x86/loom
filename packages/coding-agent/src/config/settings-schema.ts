@@ -755,7 +755,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Output Limits",
 			label: "Output Column Cap",
 			description:
-				"Per-line byte cap for streaming tool outputs (bash, python, js eval) and `read`. Lines wider than this are ellipsis-truncated; remaining bytes up to the next newline are dropped. 0 disables.",
+				"Per-line UTF-8 byte cap for streaming tool outputs (bash, python, js eval) and `read`. A line wider than this keeps the first `cap - 3` bytes (never splitting a character), gets a `…` marker charged against the same budget, and loses the rest up to the next newline. Streaming output stays recoverable via its artifact; `read` via the `:raw` selector. 0 disables.",
 			options: [
 				{ value: "0", label: "Off", description: "No per-line cap" },
 				{ value: "256", label: "256", description: "Tight" },

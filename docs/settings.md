@@ -448,7 +448,7 @@ tools:
 | `tools.approval` | record | `{}` | Per-tool policy keyed by tool name; each value is `allow`, `deny`, or `prompt`. e.g. `omp config set tools.approval '{"bash":"prompt"}'`. |
 | `tools.maxTimeout` | number | `0` | Max tool runtime in seconds; `0` = no cap. |
 | `tools.intentTracing` | boolean | `true` | Record per-call intent strings. |
-| `tools.outputMaxColumns` | number | `768` | Per-line byte cap for streaming output; `0` disables. |
+| `tools.outputMaxColumns` | number | `768` | Per-line UTF-8 byte cap for streaming output and `read`; the `…` marker is charged against it, so `768` keeps `765` data bytes. `0` disables. |
 | `tools.artifactSpillThreshold` | number | `50` | KB of tool output above which output spills to an artifact. |
 | `tools.artifactHeadBytes` | number | `20` | KB of head kept inline on spill; `0` = tail-only. |
 | `tools.artifactTailBytes` | number | `20` | KB of tail kept inline on spill. |
