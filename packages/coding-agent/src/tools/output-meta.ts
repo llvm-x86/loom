@@ -69,7 +69,7 @@ export interface LimitsMeta {
 	matchLimit?: { reached: number; suggestion: number };
 	resultLimit?: { reached: number; suggestion: number };
 	headLimit?: { reached: number; suggestion: number };
-	columnTruncated?: { maxColumn: number };
+	columnTruncated?: { maxColumn: number; droppedBytes?: number; artifactId?: string };
 }
 
 /**
@@ -195,8 +195,14 @@ export class OutputMetaBuilder {
 		// it is not a window/byte truncation, so surface it as its own limit
 		// notice rather than a "Showing lines X-Y … limit" range. This runs even
 		// when the output is otherwise complete (`truncated === false`).
+		//
+		// The dropped bytes are NOT lost: the sink mirrors the raw uncapped stream
+		// to the artifact file as soon as a chunk trips the cap. Carry the id (and
+		// the drop size) on the limit notice, because when nothing else truncated
+		// there is no `TruncationMeta` to hang it on and the agent would otherwise
+		// never learn the full output is recoverable.
 		if (summary.columnMax != null && summary.columnMax > 0 && (summary.columnTruncatedLines ?? 0) > 0) {
-			this.columnTruncated(summary.columnMax);
+			this.columnTruncated(summary.columnMax, summary.columnDroppedBytes, summary.artifactId);
 		}
 		if (!summary.truncated) return this;
 
@@ -341,10 +347,21 @@ export class OutputMetaBuilder {
 		return this;
 	}
 
-	/** Add column truncation notice. No-op if maxColumn <= 0. */
-	columnTruncated(maxColumn: number): this {
+	/**
+	 * Add column truncation notice. No-op if maxColumn <= 0. `droppedBytes` and
+	 * `artifactId` describe what the cap discarded and where the full uncapped
+	 * stream was mirrored, so the notice can offer a recovery path.
+	 */
+	columnTruncated(maxColumn: number, droppedBytes?: number, artifactId?: string): this {
 		if (maxColumn <= 0) return this;
-		this.#meta.limits = { ...this.#meta.limits, columnTruncated: { maxColumn } };
+		this.#meta.limits = {
+			...this.#meta.limits,
+			columnTruncated: {
+				maxColumn,
+				...(droppedBytes != null && droppedBytes > 0 ? { droppedBytes } : {}),
+				...(artifactId ? { artifactId } : {}),
+			},
+		};
 		return this;
 	}
 
@@ -523,7 +540,12 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 		parts.push(`${l.reached} results limit reached. Use limit=${l.suggestion} for more`);
 	}
 	if (meta.limits?.columnTruncated) {
-		parts.push(`Some lines truncated to ${meta.limits.columnTruncated.maxColumn} chars`);
+		const c = meta.limits.columnTruncated;
+		const dropped = c.droppedBytes != null && c.droppedBytes > 0 ? `, ${c.droppedBytes} bytes dropped` : "";
+		// Without this reference a column-capped line is unrecoverable: nothing
+		// else in the result names the artifact when no window truncation fired.
+		const recovery = c.artifactId ? `; full output artifact://${c.artifactId}` : "";
+		parts.push(`Some lines truncated to ${c.maxColumn} chars${dropped}${recovery}`);
 	}
 
 	// Diagnostics
