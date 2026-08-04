@@ -11,10 +11,16 @@
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { getScratchDir, getWorktreesDir, logger } from "@oh-my-pi/pi-utils";
+import {
+	getWorktreesDir,
+	logger,
+	MANAGED_RUN_OWNER_FILE,
+	resolveScratchRoot,
+	type ScratchRootResolution,
+} from "@oh-my-pi/pi-utils";
 
 /** Marker file recording which loom process owns a task-isolation workspace. */
-export const TASK_ISOLATION_OWNER_FILE = "owner.json";
+export const TASK_ISOLATION_OWNER_FILE: string = MANAGED_RUN_OWNER_FILE;
 
 /** Grace window for legacy task-isolation dirs that carry no owner marker. */
 export const TASK_ISOLATION_STALE_GRACE_MS = 86_400_000; // 24h
@@ -36,6 +42,21 @@ export interface TaskIsolationOwner {
 	startedAt: string;
 	repoRoot: string;
 	taskId: string;
+	/**
+	 * Identity of the single run that owns the dir. Scratch mixes it into the
+	 * dir name so two runs sharing `(repoRoot, taskId)` — same-named subagents
+	 * in one repo — can never land on the same dir, and a re-assert of the same
+	 * run is told apart from a foreign claim. Absent on worktree markers and on
+	 * markers written before this field existed.
+	 */
+	runId?: string;
+	/**
+	 * Name of the correlating task-isolation worktree dir under
+	 * `getWorktreesDir()`. Scratch dir names no longer equal worktree dir names
+	 * (the run component broke that identity), so the correlation is carried
+	 * here instead. Absent on worktree markers.
+	 */
+	worktree?: string;
 }
 
 export interface TaskIsolationClass {
@@ -81,6 +102,8 @@ export async function readTaskIsolationOwner(baseDir: string): Promise<TaskIsola
 		startedAt: candidate.startedAt,
 		repoRoot: candidate.repoRoot,
 		taskId: candidate.taskId,
+		...(typeof candidate.runId === "string" ? { runId: candidate.runId } : {}),
+		...(typeof candidate.worktree === "string" ? { worktree: candidate.worktree } : {}),
 	};
 }
 
@@ -98,6 +121,16 @@ export function isPidAlive(pid: number): boolean {
 		if (code === "EPERM") return true;
 		return false;
 	}
+}
+
+/**
+ * True when `dir` carries an owner marker naming a process that is still
+ * running. Used both to classify a workspace and to recognise a directory that
+ * is a live run's own space rather than a root full of other runs' spaces.
+ */
+export async function hasLiveOwner(dir: string): Promise<boolean> {
+	const owner = await readTaskIsolationOwner(dir);
+	return owner !== null && isPidAlive(owner.pid);
 }
 
 /**
@@ -166,6 +199,15 @@ interface SweepRootOptions {
  */
 async function sweepRoot(root: string, options: SweepRootOptions): Promise<TaskIsolationSweepResult> {
 	const result: TaskIsolationSweepResult = { removed: [], failed: [] };
+	// A root carrying a live owner marker is not a root: it is one live run's
+	// own workspace, reached because something pointed the root variable at it.
+	// Every entry below would then be that run's work product, and the liveness
+	// rule guards a root's CHILDREN, never the root itself — so sweeping here
+	// deletes exactly what liveness is supposed to protect.
+	if (await hasLiveOwner(root)) {
+		logger.warn("refusing to sweep a live run's own workspace as a root", { root });
+		return result;
+	}
 	let entries: Dirent[];
 	try {
 		entries = await fs.readdir(root, { withFileTypes: true });
@@ -204,13 +246,37 @@ export async function sweepOrphanedTaskIsolations(): Promise<TaskIsolationSweepR
 	return sweepRoot(getWorktreesDir(), { requireMountSubdir: true, deadGraceMs: 0 });
 }
 
+const warnedRejectedRoots = new Set<string>();
+
 /**
- * Best-effort sweep of orphaned scratch dirs under `getScratchDir()`. A dir
- * whose owner process is gone is kept for {@link SCRATCH_DEAD_OWNER_GRACE_MS}
- * (forensics window) before removal; live-owner dirs are never removed.
+ * Resolve the scratch root, warning once per rejected candidate. Every
+ * consumer of the root goes through here so a substitution — an inherited
+ * `OMP_SCRATCH_DIR` that named a run dir, silently replaced by the configured
+ * or default root — is always on the record. A vanished scratch dir has to be
+ * explicable from the logs.
+ */
+export function resolveScratchRootLogged(): ScratchRootResolution {
+	const resolution = resolveScratchRoot();
+	if (resolution.rejected !== undefined && !warnedRejectedRoots.has(resolution.rejected)) {
+		warnedRejectedRoots.add(resolution.rejected);
+		logger.warn("scratch root substituted: OMP_SCRATCH_DIR named a managed run dir, not a root", {
+			rejected: resolution.rejected,
+			resolved: resolution.path,
+			source: resolution.source,
+		});
+	}
+	return resolution;
+}
+
+/**
+ * Best-effort sweep of orphaned scratch dirs under the resolved scratch root.
+ * A dir whose owner process is gone is kept for
+ * {@link SCRATCH_DEAD_OWNER_GRACE_MS} (forensics window) before removal;
+ * live-owner dirs are never removed.
  */
 export async function sweepOrphanedScratchDirs(): Promise<TaskIsolationSweepResult> {
-	return sweepRoot(getScratchDir(), { requireMountSubdir: false, deadGraceMs: SCRATCH_DEAD_OWNER_GRACE_MS });
+	const root = resolveScratchRootLogged().path;
+	return sweepRoot(root, { requireMountSubdir: false, deadGraceMs: SCRATCH_DEAD_OWNER_GRACE_MS });
 }
 
 let workspaceSweepDone = false;

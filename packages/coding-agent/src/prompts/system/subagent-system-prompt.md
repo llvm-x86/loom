@@ -34,8 +34,9 @@ You NEVER modify files outside this tree or in the original repository.
 
 {{#if scratch}}
 # Scratch Space
-Disposable files (repro scripts, fixtures, cookie jars, temp JSON, downloaded archives) go in `{{scratch}}` — it is owned by this task and garbage-collected.
+Disposable files (repro scripts, fixtures, cookie jars, temp JSON, downloaded archives) go in `{{scratch}}` — it is owned by this task and garbage-collected. Your tools also see it as `$OMP_RUN_SCRATCH`.
 NEVER write scratch to /tmp, the repo, or the working tree. Anything worth keeping MUST be copied into the repo or returned via yield; scratch is deleted after the run.
+`$OMP_SCRATCH_DIR` is the shared scratch ROOT (every run's dir), NOT yours — never write there and never point a tool at it as if it were your own space.
 {{/if}}
 
 {{#if ircPeers}}

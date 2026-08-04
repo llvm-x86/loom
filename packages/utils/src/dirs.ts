@@ -646,14 +646,61 @@ export function setScratchDir(dir: string | undefined): string | undefined {
 }
 
 /**
- * Get the per-run scratch directory. Resolution order: the `OMP_SCRATCH_DIR`
- * env var, then the {@link setScratchDir} override (the `scratch.base`
- * setting), then the `~/.loom/scratch` default. The env var and the override
- * are both `~`-expanded and must be absolute; a relative value is ignored and
- * resolution falls through.
+ * Filename of the ownership marker every managed RUN directory carries — a
+ * task-isolation worktree (`~/.loom/wt/<seg>/owner.json`) or a per-run scratch
+ * dir (`~/.loom/scratch/<seg>/owner.json`). Declared here so root resolution
+ * can recognise a run dir without importing from coding-agent;
+ * `TASK_ISOLATION_OWNER_FILE` re-exports it as the single source of truth.
  */
+export const MANAGED_RUN_OWNER_FILE: string = "owner.json";
+
+/** Where a resolved scratch root came from; `default` means nobody chose it. */
+export type ScratchRootSource = "env" | "setting" | "default";
+
+export interface ScratchRootResolution {
+	/** Absolute path of the resolved scratch root. */
+	path: string;
+	/** Which input won. Destructive bulk operations gate on `default`. */
+	source: ScratchRootSource;
+	/**
+	 * The `OMP_SCRATCH_DIR` value refused because it named a managed run dir,
+	 * when resolution had to fall through past it. Callers surface it: a silent
+	 * substitution is how "why did my scratch dir vanish" becomes unanswerable.
+	 */
+	rejected?: string;
+}
+
+/**
+ * Resolve the per-run scratch ROOT — the directory that holds one dir per run,
+ * never a run's own dir. Order: the `OMP_SCRATCH_DIR` env var, then the
+ * {@link setScratchDir} override (the `scratch.base` setting), then the
+ * `~/.loom/scratch` default. The env var and the override are both
+ * `~`-expanded and must be absolute; a relative value is ignored and
+ * resolution falls through.
+ *
+ * An `OMP_SCRATCH_DIR` naming a managed run dir is refused. The env var is
+ * inherited by everything a run spawns, so a run that exported its OWN dir
+ * under this name would point every nested loom's GC at its live work product:
+ * the liveness rule protects a root's CHILDREN, not the root itself, so
+ * `scratch clear --all` would delete that run's subdirectories and the 24h
+ * sweep would take its `tmp/`. A run's own dir travels under
+ * `OMP_RUN_SCRATCH` instead. The `scratch.base` override is deliberate
+ * operator configuration rather than an inherited value, so it is not
+ * second-guessed here — the sweep's own live-owner refusal covers it.
+ */
+export function resolveScratchRoot(): ScratchRootResolution {
+	const fromEnv = resolveManagedBaseDir(process.env.OMP_SCRATCH_DIR);
+	if (fromEnv !== undefined && !fs.existsSync(path.join(fromEnv, MANAGED_RUN_OWNER_FILE))) {
+		return { path: fromEnv, source: "env" };
+	}
+	const rejected = fromEnv;
+	if (scratchDirOverride !== undefined) return { path: scratchDirOverride, source: "setting", rejected };
+	return { path: dirs.rootSubdir("scratch", "data"), source: "default", rejected };
+}
+
+/** Absolute path of the scratch root; see {@link resolveScratchRoot} for provenance. */
 export function getScratchDir(): string {
-	return resolveManagedBaseDir(process.env.OMP_SCRATCH_DIR) ?? scratchDirOverride ?? dirs.rootSubdir("scratch", "data");
+	return resolveScratchRoot().path;
 }
 
 /** Get the SSH control socket directory (~/.loom/ssh-control). */

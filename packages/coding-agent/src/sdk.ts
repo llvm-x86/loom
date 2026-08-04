@@ -148,7 +148,7 @@ import {
 } from "./system-prompt";
 import { AgentOutputManager } from "./task/output-manager";
 import { wrapStreamFnWithProviderConcurrency } from "./task/provider-concurrency";
-import { ensureScratchDir } from "./task/scratch";
+import { buildScratchToolEnv, ensureScratchDir } from "./task/scratch";
 import type { StructuredSubagentSchemaMode } from "./task/types";
 import {
 	AUTO_THINKING,
@@ -411,9 +411,10 @@ export interface CreateAgentSessionOptions {
 	appendSystemPrompt?: string;
 	/**
 	 * Session-scoped env entries merged into every tool-spawned process env
-	 * (per-invocation entries win). Subagent runs carry their scratch
-	 * `OMP_SCRATCH_DIR`/`TMPDIR` redirect here — never `process.env`, which
-	 * in-process subagents share with the parent.
+	 * (per-invocation entries win). Every run carries its scratch
+	 * `OMP_RUN_SCRATCH`/`OMP_SCRATCH_DIR` (and the optional `TMPDIR` redirect)
+	 * here — never `process.env`, which in-process subagents share with the
+	 * parent.
 	 */
 	toolEnv?: Record<string, string>;
 	/**
@@ -1333,6 +1334,15 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const scratchDir = isSubagentSession
 		? undefined
 		: await ensureScratchDir(cwd, sessionManager.getSessionId(), "session");
+	// Top-level sessions export the same run-dir variables as subagents, so
+	// their tools stop littering bare /tmp. The TMPDIR redirect stays opt-in
+	// here (`scratch.interactiveTmpdirRedirect`, off by default) because the
+	// commands a user runs themselves may expect the system temp dir; the
+	// subagent kill switch gates both.
+	const scratchToolEnv = buildScratchToolEnv(
+		scratchDir,
+		(settings.get("scratch.tmpdirRedirect") ?? true) && (settings.get("scratch.interactiveTmpdirRedirect") ?? false),
+	);
 	const forkCacheShapeChanged =
 		options.model !== undefined ||
 		options.modelPattern !== undefined ||
@@ -1701,7 +1711,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			outputSchemaMode: options.outputSchemaMode,
 			requireYieldTool: options.requireYieldTool,
 			prewalkArmed: options.prewalk !== undefined,
-			toolEnv: options.toolEnv,
+			// A subagent's scratch env arrives on `options.toolEnv` from the task
+			// executor; a top-level session builds its own above. Caller entries
+			// win so an embedder can still override either.
+			toolEnv: scratchToolEnv ? { ...scratchToolEnv, ...options.toolEnv } : options.toolEnv,
 			taskDepth: options.taskDepth ?? 0,
 			getSessionFile: () => sessionManager.getSessionFile() ?? null,
 			getEvalKernelOwnerId: () => evalKernelOwnerId,

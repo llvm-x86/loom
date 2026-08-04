@@ -43,8 +43,9 @@ Working directory layout (sorted by mtime, recent first; depth ≤ 3):
 
 {{#if scratch}}
 # Scratch Space
-Disposable files (repro scripts, fixtures, cookie jars, temp JSON, downloaded archives) go in `{{scratch}}` — it is owned by this session and garbage-collected.
+Disposable files (repro scripts, fixtures, cookie jars, temp JSON, downloaded archives) go in `{{scratch}}` — it is owned by this session and garbage-collected. Your tools also see it as `$OMP_RUN_SCRATCH`.
 NEVER write scratch to /tmp, the repo, or the working tree. Anything worth keeping MUST be copied into the repo or another durable location; scratch is deleted after the session ends.
+`$OMP_SCRATCH_DIR` is the shared scratch ROOT (every run's dir), NOT yours — never write there and never point a tool at it as if it were your own space.
 {{/if}}
 
 Today is {{date}}, and the current working directory is '{{cwd}}'.
