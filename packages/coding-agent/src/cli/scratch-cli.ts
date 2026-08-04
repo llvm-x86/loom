@@ -7,18 +7,31 @@
  *   - `s<digest>` — per-interactive-session scratch, created at session start.
  *
  * Every dir carries an `owner.json` marker (`{pid, startedAt, repoRoot,
- * taskId}`) written by `ensureScratchDir`. A dir is orphaned when its owning
- * process is gone and `SCRATCH_DEAD_OWNER_GRACE_MS` has elapsed since the dir
- * was last modified (the post-mortem forensics window); marker-less legacy
- * dirs get the same mtime-based grace. Live-owner dirs are NEVER removed,
- * not even by `clear --all`.
+ * taskId, runId, worktree}`) written by `ensureScratchDir`. A dir is orphaned
+ * when its owning process is gone and `SCRATCH_DEAD_OWNER_GRACE_MS` has
+ * elapsed since the dir was last modified (the post-mortem forensics window);
+ * marker-less legacy dirs get the same mtime-based grace. Live-owner dirs are
+ * NEVER removed, not even by `clear --all`.
+ *
+ * Two rules keep that promise honest and keep this CLI in step with the
+ * in-process sweep: entries are classified from `Dirent`/`lstat`, so a symlink
+ * at the root is never followed, sized, or unlinked; and a root that is itself
+ * a live run's dir is refused outright, because the liveness rule protects a
+ * root's children rather than the root itself.
  */
 import type { Dirent } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { formatBytes, getScratchDir, isEnoent } from "@oh-my-pi/pi-utils";
+import { formatBytes, isEnoent, logger } from "@oh-my-pi/pi-utils";
 import chalk from "chalk";
-import { classifyTaskIsolation, isPidAlive, SCRATCH_DEAD_OWNER_GRACE_MS } from "../task/worktree-gc";
+import {
+	classifyTaskIsolation,
+	isPidAlive,
+	readTaskIsolationOwner,
+	resolveScratchRootLogged,
+	SCRATCH_DEAD_OWNER_GRACE_MS,
+	type TaskIsolationOwner,
+} from "../task/worktree-gc";
 
 export interface ScratchEntry {
 	/** Absolute path to the scratch dir under `~/.loom/scratch/`. */
@@ -28,7 +41,7 @@ export interface ScratchEntry {
 	/** Total size in bytes (recursive walk, best-effort). */
 	sizeBytes: number;
 	/** Owner from the owner.json marker, when present and valid. */
-	owner?: { pid: number; startedAt: string; repoRoot: string; taskId: string };
+	owner?: TaskIsolationOwner;
 	/** When set, the entry is orphaned and `loom scratch clear` will remove it. */
 	orphanReason?: string;
 }
@@ -42,17 +55,26 @@ export interface ClearScratchOptions {
 	all: boolean;
 	/** Print what would be removed without touching the filesystem. */
 	dryRun: boolean;
+	/**
+	 * Explicit confirmation for `--all` against the DEFAULT fleet root. `--all`
+	 * waives the forensics grace, so on a root nobody chose it can wipe every
+	 * crashed run's post-mortem in one keystroke — including after a rejected
+	 * `OMP_SCRATCH_DIR` silently substituted that root.
+	 */
+	yes: boolean;
 	json: boolean;
 }
 
 export async function listScratch(options: ListScratchOptions): Promise<void> {
+	const root = resolveScratchRootLogged().path;
+	if (await refusesLiveRunRoot(root, options.json)) return;
 	const entries = await scanScratchDirs();
 	if (options.json) {
 		console.log(JSON.stringify(entries, null, 2));
 		return;
 	}
 	if (entries.length === 0) {
-		console.log(chalk.dim(`No scratch dirs found under ${getScratchDir()}.`));
+		console.log(chalk.dim(`No scratch dirs found under ${root}.`));
 		return;
 	}
 	let live = 0;
@@ -75,7 +97,19 @@ export async function listScratch(options: ListScratchOptions): Promise<void> {
 }
 
 export async function clearScratch(options: ClearScratchOptions): Promise<void> {
+	const resolution = resolveScratchRootLogged();
+	if (await refusesLiveRunRoot(resolution.path, options.json)) return;
 	const entries = await scanScratchDirs();
+	if (resolution.rejected !== undefined) {
+		const substitution = `Substituted scratch root: OMP_SCRATCH_DIR=${resolution.rejected} names a run's own dir, using ${resolution.path} (${resolution.source}) with ${entries.length} entr${entries.length === 1 ? "y" : "ies"}.`;
+		if (!options.json) console.log(chalk.yellow(substitution));
+		logger.warn("scratch clear resolved a substituted root", {
+			rejected: resolution.rejected,
+			resolved: resolution.path,
+			source: resolution.source,
+			entries: entries.length,
+		});
+	}
 	// Liveness rule: a dir whose owner pid is alive is never deleted, not even
 	// by --all. `--all` widens the target set from orphaned-only to everything
 	// without a live owner (i.e. it bypasses the dead/legacy grace windows).
@@ -85,22 +119,57 @@ export async function clearScratch(options: ClearScratchOptions): Promise<void> 
 
 	if (targets.length === 0) {
 		if (options.json) {
-			console.log(JSON.stringify({ removed: 0, kept: entries.length }));
+			console.log(
+				JSON.stringify({ root: resolution.path, rootSource: resolution.source, removed: 0, kept: entries.length }),
+			);
 		} else {
 			console.log(chalk.dim(options.all ? "No scratch dirs to remove." : "No orphaned scratch dirs to remove."));
 		}
 		return;
 	}
 
-	if (options.dryRun) {
-		if (options.json) {
-			console.log(JSON.stringify({ wouldRemove: targets.map(t => t.path) }, null, 2));
-		} else {
-			for (const target of targets) {
-				console.log(`${chalk.yellow("would remove")}  ${target.path}`);
-			}
-			console.log(chalk.dim(`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed.`));
+	// Enumerate BEFORE unlinking, always. A summary printed afterwards loses
+	// the names of everything it just destroyed — which is exactly how a
+	// mistaken `--all` becomes unauditable. `--dry-run` is this block and
+	// nothing else.
+	if (options.json) {
+		console.log(
+			JSON.stringify(
+				{
+					root: resolution.path,
+					rootSource: resolution.source,
+					all: options.all,
+					wouldRemove: targets.map(t => t.path),
+				},
+				null,
+				2,
+			),
+		);
+	} else {
+		for (const target of targets) {
+			console.log(`${chalk.yellow("would remove")}  ${target.path}`);
 		}
+		console.log(
+			chalk.dim(
+				`\n${targets.length} dir${targets.length === 1 ? "" : "s"} would be removed from ${resolution.path} (${resolution.source} root).`,
+			),
+		);
+	}
+	if (options.dryRun) return;
+
+	// `--all` waives the forensics grace, so it needs a deliberate choice of
+	// target. Only `env` (a human typing OMP_SCRATCH_DIR=) and `setting`
+	// (operator config) count as one. `default` is nobody's choice, and
+	// `inherited` is loom's own injection into an agent's tool env — treating
+	// that as consent is what let a fixture typo wipe the fleet's window.
+	const unchosenRoot = resolution.source === "default" || resolution.source === "inherited";
+	if (options.all && unchosenRoot && !options.yes) {
+		// Deliberately does NOT name the flag that bypasses this: an agent told
+		// "re-run with --yes" complies. A human can read `--help`.
+		const reason = `Refusing --all against the ${resolution.source === "inherited" ? "inherited" : "default"} scratch root ${resolution.path}: it holds every run's post-mortem scratch and --all waives the ${SCRATCH_DEAD_OWNER_GRACE_MS / 3_600_000}h grace. The ${targets.length} dir${targets.length === 1 ? " listed above was" : "s listed above were"} NOT removed. Use --dry-run to inspect, or clear a specific root you chose yourself.`;
+		if (options.json) console.log(JSON.stringify({ refused: true, needsConfirmation: true, reason }, null, 2));
+		else console.log(chalk.yellow(reason));
+		process.exitCode = 1;
 		return;
 	}
 
@@ -141,21 +210,42 @@ interface ScannedScratchEntry extends ScratchEntry {
 	live: boolean;
 }
 
+/**
+ * Refuse to treat a live run's OWN scratch dir as the scratch root. Reached
+ * when something points the root at a run dir (a stale `scratch.base`, a
+ * hand-set variable): every "entry" under it would then be that run's live
+ * work product, and `clear --all` bypasses every grace window because the
+ * marker protecting that run sits one level up. Prints why and returns true
+ * when the command must stop.
+ */
+async function refusesLiveRunRoot(root: string, json: boolean): Promise<boolean> {
+	const owner = await readTaskIsolationOwner(root);
+	if (owner === null || !isPidAlive(owner.pid)) return false;
+	const reason = `${root} is a live run's own scratch dir (owner pid ${owner.pid}, task ${owner.taskId}), not a scratch root — refusing. Its subdirectories are that run's work product. Point the root at the scratch root (unset OMP_SCRATCH_DIR or fix scratch.base); a run's own dir is exported as OMP_RUN_SCRATCH.`;
+	if (json) console.log(JSON.stringify({ refused: true, root, reason }, null, 2));
+	else console.log(chalk.yellow(reason));
+	return true;
+}
+
 async function scanScratchDirs(): Promise<ScannedScratchEntry[]> {
-	const root = getScratchDir();
-	let topLevel: string[];
+	const root = resolveScratchRootLogged().path;
+	let topLevel: Dirent[];
 	try {
-		topLevel = await fs.readdir(root);
+		topLevel = await fs.readdir(root, { withFileTypes: true });
 	} catch (err) {
 		if (isEnoent(err)) return [];
 		throw err;
 	}
 
 	const entries: ScannedScratchEntry[] = [];
-	for (const name of topLevel) {
+	for (const entry of topLevel) {
+		// lstat semantics, matching the sweep's `Dirent.isDirectory()`: a
+		// symlink at the root is not a scratch dir. Following it reported the
+		// TARGET's size, classified the link as an orphaned legacy leftover,
+		// and unlinked it — while the in-process sweep ignored it entirely.
+		if (!entry.isDirectory()) continue;
+		const name = entry.name;
 		const dir = path.join(root, name);
-		const stat = await fs.stat(dir).catch(() => null);
-		if (!stat?.isDirectory()) continue;
 		const classified = await classifyTaskIsolation(dir, SCRATCH_DEAD_OWNER_GRACE_MS);
 		const sizeBytes = await dirSizeBytes(dir);
 		const owner = classified.owner ?? undefined;
@@ -186,7 +276,7 @@ async function dirSizeBytes(dir: string): Promise<number> {
 		if (child.isDirectory()) {
 			total += await dirSizeBytes(childPath);
 		} else {
-			const stat = await fs.stat(childPath).catch(() => null);
+			const stat = await fs.lstat(childPath).catch(() => null);
 			if (stat) total += stat.size;
 		}
 	}

@@ -2,13 +2,9 @@ import { afterEach, beforeEach, describe, expect, it } from "bun:test";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { prompt } from "@oh-my-pi/pi-utils";
-
 import { clearScratch } from "@oh-my-pi/pi-coding-agent/cli/scratch-cli";
 import { buildScratchToolEnv, ensureScratchDir } from "@oh-my-pi/pi-coding-agent/task/scratch";
 import { getTaskIsolationSegment } from "@oh-my-pi/pi-coding-agent/task/worktree";
-import projectPromptTemplate from "../src/prompts/system/project-prompt.md" with { type: "text" };
-import subagentSystemPromptTemplate from "../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 import {
 	isPidAlive,
 	readTaskIsolationOwner,
@@ -17,6 +13,9 @@ import {
 	TASK_ISOLATION_OWNER_FILE,
 	type TaskIsolationOwner,
 } from "@oh-my-pi/pi-coding-agent/task/worktree-gc";
+import { getScratchDir, prompt, setScratchDir } from "@oh-my-pi/pi-utils";
+import projectPromptTemplate from "../src/prompts/system/project-prompt.md" with { type: "text" };
+import subagentSystemPromptTemplate from "../src/prompts/system/subagent-system-prompt.md" with { type: "text" };
 
 function writeOwner(baseDir: string, owner: TaskIsolationOwner): void {
 	fs.writeFileSync(path.join(baseDir, TASK_ISOLATION_OWNER_FILE), JSON.stringify(owner), "utf8");
@@ -57,6 +56,7 @@ describe("task scratch dirs", () => {
 	});
 
 	afterEach(() => {
+		setScratchDir(undefined);
 		if (savedScratchDir === undefined) delete process.env.OMP_SCRATCH_DIR;
 		else process.env.OMP_SCRATCH_DIR = savedScratchDir;
 		if (savedWorktreeDir === undefined) delete process.env.OMP_WORKTREE_DIR;
@@ -90,26 +90,46 @@ describe("task scratch dirs", () => {
 			expect(owner!.taskId).toBe("session-1");
 		});
 
-		it("names a task scratch dir identically to its worktree isolation dir", async () => {
-			// Same digest input (repoRoot, taskId) ⇒ same segment as the worktree
-			// under ~/.loom/wt — forensics correlation between the two roots.
+		it("correlates a task scratch dir to its worktree by marker field, not by dir name", async () => {
+			// The name used to be the worktree segment, i.e. a digest of
+			// (repoRoot, taskId) only — which two same-named runs share. The
+			// correlation moved into the marker so the name can stay unique.
 			const dir = await ensureScratchDir(tempRoot, "task-1", "task");
 
-			expect(path.basename(dir!)).toBe(getTaskIsolationSegment(tempRoot, "task-1"));
+			const owner = await readTaskIsolationOwner(dir!);
+			expect(owner!.worktree).toBe(getTaskIsolationSegment(tempRoot, "task-1"));
+			expect(path.basename(dir!)).not.toBe(getTaskIsolationSegment(tempRoot, "task-1"));
 		});
 	});
 
 	describe("buildScratchToolEnv", () => {
-		it("injects OMP_SCRATCH_DIR and TMPDIR when the redirect is on", () => {
+		it("injects the run dir, the root, and TMPDIR when the redirect is on", () => {
 			const env = buildScratchToolEnv("/scratch/tabc123", true);
 
-			expect(env).toEqual({ OMP_SCRATCH_DIR: "/scratch/tabc123", TMPDIR: "/scratch/tabc123/tmp" });
+			expect(env).toEqual({
+				OMP_RUN_SCRATCH: "/scratch/tabc123",
+				OMP_SCRATCH_DIR: scratchRoot,
+				OMP_SCRATCH_ROOT_INHERITED: scratchRoot,
+				TMPDIR: "/scratch/tabc123/tmp",
+			});
 		});
 
 		it("omits TMPDIR when the redirect kill switch is off", () => {
 			const env = buildScratchToolEnv("/scratch/sdef456", false);
 
-			expect(env).toEqual({ OMP_SCRATCH_DIR: "/scratch/sdef456" });
+			expect(env).toEqual({
+				OMP_RUN_SCRATCH: "/scratch/sdef456",
+				OMP_SCRATCH_DIR: scratchRoot,
+				OMP_SCRATCH_ROOT_INHERITED: scratchRoot,
+			});
+		});
+
+		it("never names the run's own dir as the root", () => {
+			// One name for both meanings is what made a nested loom sweep the
+			// running agent's own dir.
+			const env = buildScratchToolEnv("/scratch/tabc123", true);
+
+			expect(env?.OMP_SCRATCH_DIR).not.toBe("/scratch/tabc123");
 		});
 
 		it("returns undefined when the run has no scratch dir", () => {
@@ -175,6 +195,46 @@ describe("task scratch dirs", () => {
 			const result = await sweepOrphanedScratchDirs();
 			expect(result).toEqual({ removed: [], failed: [] });
 		});
+
+		it("never follows or removes a symlink at the scratch root", async () => {
+			// The CLI used to fs.stat here (following the link), size the
+			// TARGET, call it an orphaned legacy dir, and unlink it. The sweep
+			// classifies from Dirent, so the two must agree: skip it.
+			const precious = path.join(tempRoot, "precious");
+			fs.mkdirSync(precious, { recursive: true });
+			fs.writeFileSync(path.join(precious, "CANARY.txt"), "do not delete me", "utf8");
+			const link = path.join(scratchRoot, "tsymlink");
+			fs.mkdirSync(scratchRoot, { recursive: true });
+			fs.symlinkSync(precious, link);
+			ageMs(link, SCRATCH_DEAD_OWNER_GRACE_MS + 60_000);
+
+			const result = await sweepOrphanedScratchDirs();
+
+			expect(result.removed).toEqual([]);
+			expect(fs.lstatSync(link).isSymbolicLink()).toBe(true);
+			expect(fs.readFileSync(path.join(precious, "CANARY.txt"), "utf8")).toBe("do not delete me");
+		});
+
+		it("refuses to sweep a root that is itself a live run's dir", async () => {
+			// Reached whenever a root variable ends up pointing at one run's own
+			// dir: every child is then that run's work product, and the liveness
+			// rule only ever guarded a root's children. The env var refuses a
+			// marked root outright, so drive the root through `scratch.base` to
+			// reach the sweep's own guard.
+			fs.mkdirSync(scratchRoot, { recursive: true });
+			writeOwner(scratchRoot, makeOwner(process.pid));
+			setScratchDir(scratchRoot);
+			expect(getScratchDir()).toBe(scratchRoot);
+			const work = path.join(scratchRoot, "tmp");
+			fs.mkdirSync(work, { recursive: true });
+			fs.writeFileSync(path.join(work, "in-use.dat"), "live", "utf8");
+			ageMs(work, SCRATCH_DEAD_OWNER_GRACE_MS + 60_000);
+
+			const result = await sweepOrphanedScratchDirs();
+
+			expect(result.removed).toEqual([]);
+			expect(fs.existsSync(path.join(work, "in-use.dat"))).toBe(true);
+		});
 	});
 
 	describe("clearScratch", () => {
@@ -187,7 +247,7 @@ describe("task scratch dirs", () => {
 			fs.mkdirSync(staleDead, { recursive: true });
 			writeOwner(staleDead, makeOwner(findDeadPid()));
 
-			await clearScratch({ all: true, dryRun: false, json: true });
+			await clearScratch({ all: true, dryRun: false, yes: true, json: true });
 
 			expect(fs.existsSync(live)).toBe(true);
 			// --all bypasses the grace window for dirs without a live owner.
@@ -204,7 +264,7 @@ describe("task scratch dirs", () => {
 			fs.mkdirSync(freshDead, { recursive: true });
 			writeOwner(freshDead, makeOwner(findDeadPid()));
 
-			await clearScratch({ all: false, dryRun: false, json: true });
+			await clearScratch({ all: false, dryRun: false, yes: true, json: true });
 
 			expect(fs.existsSync(staleDead)).toBe(false);
 			expect(fs.existsSync(freshDead)).toBe(true);

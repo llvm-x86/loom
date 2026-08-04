@@ -405,13 +405,15 @@ function errorMessage(err: unknown): string {
 
 /**
  * fs-safe segment naming a per-task workspace dir: prefix + 9 hex chars of
- * `Bun.hash(repoRoot\0id)`. Scratch dirs reuse this with a different prefix
- * so a task's scratch dir name correlates 1:1 with its worktree dir name.
+ * `Bun.hash(repoRoot\0id)`. Scratch dirs no longer reuse this name — a scratch
+ * dir must be unique per RUN, and `(repoRoot, id)` is shared by every run of
+ * an agent with the same name — but scratch still computes this segment and
+ * records it in its `owner.json` `worktree` field for correlation.
  */
-export function getTaskIsolationSegment(repoRoot: string, id: string, prefix = TASK_ISOLATION_DIR_PREFIX): string {
+export function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	const key = `${path.resolve(repoRoot)}\0${id}`;
 	const digest = Bun.hash(key).toString(16).padStart(16, "0").slice(-TASK_ISOLATION_DIR_DIGEST_CHARS);
-	return `${prefix}${digest}`;
+	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
 }
 
 export async function ensureIsolation(

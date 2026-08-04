@@ -31,6 +31,12 @@ export default class Scratch extends Command {
 			description: "Print what would be removed without touching the filesystem (clear)",
 			default: false,
 		}),
+		yes: Flags.boolean({
+			char: "y",
+			description:
+				"Confirm --all against the default scratch root. Required there because --all waives the forensics grace for every crashed run in the fleet; an explicitly configured root (OMP_SCRATCH_DIR or scratch.base) needs no confirmation.",
+			default: false,
+		}),
 		json: Flags.boolean({ char: "j", description: "Emit machine-readable JSON", default: false }),
 	};
 
@@ -39,7 +45,7 @@ export default class Scratch extends Command {
 		`${APP_NAME} scratch list --json`,
 		`${APP_NAME} scratch clear`,
 		`${APP_NAME} scratch clear --dry-run`,
-		`${APP_NAME} scratch clear --all`,
+		`${APP_NAME} scratch clear --all --yes`,
 	];
 
 	async run(): Promise<void> {
@@ -52,6 +58,7 @@ export default class Scratch extends Command {
 			await clearScratch({
 				all: flags.all ?? false,
 				dryRun: flags["dry-run"] ?? false,
+				yes: flags.yes ?? false,
 				json: flags.json ?? false,
 			});
 			return;

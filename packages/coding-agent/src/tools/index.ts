@@ -194,8 +194,9 @@ export interface ToolSession {
 	hasEditTool?: boolean;
 	/**
 	 * Session-scoped env entries merged into every tool-spawned process env
-	 * (per-invocation entries win). Carries the subagent scratch
-	 * `OMP_SCRATCH_DIR`/`TMPDIR` redirect; never `process.env`.
+	 * (per-invocation entries win). Carries the run's scratch
+	 * `OMP_RUN_SCRATCH`/`OMP_SCRATCH_DIR` and the optional `TMPDIR` redirect;
+	 * never `process.env`.
 	 */
 	toolEnv?: Record<string, string>;
 	/** Event bus for tool/extension communication */

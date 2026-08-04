@@ -4191,7 +4191,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Scratch Base Directory",
 			description:
-				"Base directory for per-run scratch dirs — every task subagent and interactive session gets an owned, garbage-collected scratch dir here, and `loom scratch` cleanup reads the same base. Unset uses ~/.loom/scratch. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_SCRATCH_DIR env var overrides this.",
+				"Base directory for per-run scratch dirs — every task subagent and interactive session gets an owned, garbage-collected scratch dir here, and `loom scratch` cleanup reads the same base. Unset uses ~/.loom/scratch. Must be an absolute or ~-relative path; relative paths are ignored. The OMP_SCRATCH_DIR env var overrides this, but only when it names a scratch ROOT: a value pointing at one run's own dir (it carries an owner.json) is ignored, since a run's own dir travels as OMP_RUN_SCRATCH.",
 		},
 	},
 
@@ -4203,7 +4203,19 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Redirect Subagent TMPDIR",
 			description:
-				"Point TMPDIR for subagent-spawned processes at the task's scratch dir (mktemp, tempfile, and library temp defaults land in owned, garbage-collected space). Disable if a tool expects shared /tmp state.",
+				"Point TMPDIR for subagent-spawned processes at the task's scratch dir (mktemp, tempfile, and library temp defaults land in owned, garbage-collected space). Disable if a tool expects shared /tmp state. Also the master switch for Redirect Interactive TMPDIR.",
+		},
+	},
+
+	"scratch.interactiveTmpdirRedirect": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Redirect Interactive TMPDIR",
+			description:
+				"Extend the TMPDIR redirect to top-level/interactive sessions, not just subagents. Off by default because commands you run yourself may expect the system temp dir. Ignored unless Redirect Subagent TMPDIR is on. Top-level sessions always get OMP_RUN_SCRATCH and OMP_SCRATCH_DIR regardless of this setting.",
 		},
 	},
 
