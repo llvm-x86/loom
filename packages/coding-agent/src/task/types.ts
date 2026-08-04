@@ -3,7 +3,7 @@ import { $env } from "@oh-my-pi/pi-utils";
 import { type BaseType, type } from "arktype";
 import type { AgentSessionEvent } from "../session/agent-session";
 import type { ConfiguredThinkingLevel } from "../thinking";
-import type { NestedRepoPatch } from "./worktree";
+import type { IgnoredChange, NestedRepoPatch } from "./worktree";
 
 /** Source of an agent definition */
 export type AgentSource = "bundled" | "user" | "project";
@@ -109,16 +109,17 @@ export const LABEL_MAX = 80;
 // Keep this explicit: ArkType serializes `unknown` as a boolean subschema, which llama.cpp grammars reject.
 const outputSchemaInputSchema = type("object | boolean | string | null");
 
+/**
+ * `isolated` is accepted by every variant, including the ones built when
+ * isolation is off. Stripping the key (arktype's `"+": "delete"`) made
+ * `isolated: true` under `task.isolation.mode: "none"` a silent no-op on the
+ * task tool while the eval `agent()` bridge threw — two surfaces, opposite
+ * answers, and the preflight rejection in `structured-subagent.ts` unreachable
+ * from here. Validation now carries the caller's intent through and preflight
+ * owns the verdict, so both surfaces reject (or accept `isolated: false`)
+ * identically.
+ */
 export const taskItemSchema = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"model?": "string>0|string>0[]",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"+": "delete",
-});
-const taskItemSchemaIsolated = type({
 	"name?": "string",
 	agent: "string = 'task'",
 	task: "string",
@@ -157,30 +158,16 @@ export const taskSchema = type({
 	"isolated?": "boolean",
 	"+": "delete",
 });
-const taskSchemaNoIsolation = type({
-	"name?": "string",
-	agent: "string = 'task'",
-	task: "string",
-	"model?": "string>0|string>0[]",
-	"outputSchema?": outputSchemaInputSchema,
-	"schemaMode?": '"permissive" | "strict"',
-	"+": "delete",
-});
 const taskSchemaBatch = type({
-	context: "string",
-	tasks: taskItemSchemaIsolated.array(),
-	"+": "delete",
-});
-const taskSchemaBatchNoIsolation = type({
 	context: "string",
 	tasks: taskItemSchema.array(),
 	"+": "delete",
 });
-const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaNoIsolation, taskSchemaBatch, taskSchemaBatchNoIsolation] as const;
+const ALL_TASK_SCHEMAS = [taskSchema, taskSchemaBatch] as const;
 
 type DynamicTaskSchema = (typeof ALL_TASK_SCHEMAS)[number];
 export type TaskSchema = typeof taskSchema;
-/** Active task tool parameter schema for the current isolation / batch flags */
+/** Active task tool parameter schema for the current batch flag */
 export type TaskToolSchemaInstance = DynamicTaskSchema | BaseType;
 
 const TASK_AGENT_NAME_PATTERN = /^[A-Za-z0-9_-]+$/;
@@ -194,85 +181,34 @@ function taskAgentSchemaRule(defaultAgent: string): string {
 	return "string";
 }
 
-function createTaskSchema(options: {
-	isolationEnabled: boolean;
-	batchEnabled: boolean;
-	defaultAgent: string;
-}): BaseType {
+function createTaskSchema(options: { batchEnabled: boolean; defaultAgent: string }): BaseType {
 	const agent = taskAgentSchemaRule(options.defaultAgent);
-	if (options.batchEnabled) {
-		if (options.isolationEnabled) {
-			const item = type.raw({
-				"name?": "string",
-				agent,
-				task: "string",
-				"model?": "string>0|string>0[]",
-				"outputSchema?": outputSchemaInputSchema,
-				"schemaMode?": '"permissive" | "strict"',
-				"isolated?": "boolean",
-				"+": "delete",
-			});
-			return type.raw({
-				context: "string",
-				tasks: item.array(),
-				"+": "delete",
-			});
-		}
-		const item = type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			"model?": "string>0|string>0[]",
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			"+": "delete",
-		});
-		return type.raw({
-			context: "string",
-			tasks: item.array(),
-			"+": "delete",
-		});
-	}
-	if (options.isolationEnabled) {
-		return type.raw({
-			"name?": "string",
-			agent,
-			task: "string",
-			"model?": "string>0|string>0[]",
-			"outputSchema?": outputSchemaInputSchema,
-			"schemaMode?": '"permissive" | "strict"',
-			"isolated?": "boolean",
-			"+": "delete",
-		});
-	}
-	return type.raw({
+	const item = {
 		"name?": "string",
 		agent,
 		task: "string",
 		"model?": "string>0|string>0[]",
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
+		"isolated?": "boolean",
 		"+": "delete",
-	});
+	} as const;
+	if (options.batchEnabled) {
+		return type.raw({
+			context: "string",
+			tasks: type.raw(item).array(),
+			"+": "delete",
+		});
+	}
+	return type.raw(item);
 }
 
-export function getTaskSchema(options: { isolationEnabled: boolean; batchEnabled: boolean }): DynamicTaskSchema;
-export function getTaskSchema(options: {
-	isolationEnabled: boolean;
-	batchEnabled: boolean;
-	defaultAgent: string;
-}): TaskToolSchemaInstance;
-export function getTaskSchema(options: {
-	isolationEnabled: boolean;
-	batchEnabled: boolean;
-	defaultAgent?: string;
-}): TaskToolSchemaInstance {
+export function getTaskSchema(options: { batchEnabled: boolean }): DynamicTaskSchema;
+export function getTaskSchema(options: { batchEnabled: boolean; defaultAgent: string }): TaskToolSchemaInstance;
+export function getTaskSchema(options: { batchEnabled: boolean; defaultAgent?: string }): TaskToolSchemaInstance {
 	const defaultAgent = options.defaultAgent ?? "task";
-	if (defaultAgent === "task") {
-		if (options.batchEnabled) return options.isolationEnabled ? taskSchemaBatch : taskSchemaBatchNoIsolation;
-		return options.isolationEnabled ? taskSchema : taskSchemaNoIsolation;
-	}
-	const key = `${options.isolationEnabled ? "iso" : "flat"}:${options.batchEnabled ? "batch" : "single"}:${defaultAgent}`;
+	if (defaultAgent === "task") return options.batchEnabled ? taskSchemaBatch : taskSchema;
+	const key = `${options.batchEnabled ? "batch" : "single"}:${defaultAgent}`;
 	const cached = taskSchemaCache.get(key);
 	if (cached) return cached;
 	const schema = createTaskSchema({ ...options, defaultAgent });
@@ -484,6 +420,32 @@ export interface AgentProgress {
 	inflightTaskDetails?: TaskToolDetails;
 }
 
+/**
+ * An isolated run whose work could not be captured. Every field exists so the
+ * parent can say what actually happened: pre-fix the only surviving signal was
+ * the string "merge failed" and the worktree was already gone.
+ */
+export interface IsolationCaptureFailure {
+	/** Underlying cause, verbatim (e.g. `diff exceeded capture limit: N bytes`). */
+	reason: string;
+	/** Isolation worktree, left on disk for manual recovery. */
+	isolationDir: string;
+	/** Recovery note written beside the task artifacts, when it could be written. */
+	notePath?: string;
+}
+
+/** Ignored-path divergence between an isolation copy and the parent repo. */
+export interface IgnoredChangeReport {
+	/** Diverging ignored paths, sorted. */
+	changes: IgnoredChange[];
+	/** Paths whose comparison was cut short, so an incomplete answer never reads as clean. */
+	unscanned: string[];
+	/** Directory the diverging files were copied into; absent when nothing was copied. */
+	preservedDir?: string;
+	/** Diverging paths deliberately not copied (too large, or unreadable). */
+	notPreserved: string[];
+}
+
 /** Result from a single agent execution */
 export interface SingleResult {
 	index: number;
@@ -536,6 +498,18 @@ export interface SingleResult {
 	branchBaseSha?: string;
 	/** Nested repo patches to apply after parent merge */
 	nestedPatches?: NestedRepoPatch[];
+	/**
+	 * Set when the isolated run itself succeeded but its changes could not be
+	 * turned into a patch. The isolation worktree is deliberately left on disk
+	 * in this case, so the work is recoverable by hand instead of destroyed.
+	 */
+	captureFailure?: IsolationCaptureFailure;
+	/**
+	 * Gitignored paths that diverge between the isolation copy and the parent
+	 * repo. Capture is git-only, so these are never merged — they are named
+	 * here (and copied aside when possible) rather than silently dropped.
+	 */
+	ignoredChanges?: IgnoredChangeReport;
 	/** Data extracted by registered subprocess tool handlers (keyed by tool name) */
 	extractedToolData?: Record<string, unknown[]>;
 	/**

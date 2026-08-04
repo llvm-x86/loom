@@ -1,9 +1,9 @@
-import type { Dirent } from "node:fs";
+import type { Dirent, Stats } from "node:fs";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as natives from "@oh-my-pi/pi-natives";
-import { getWorktreeDir, logger, Snowflake } from "@oh-my-pi/pi-utils";
+import { getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import * as jj from "../utils/jj";
 import { mapWithConcurrencyLimit } from "./parallel";
@@ -93,13 +93,23 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
 	return result;
 }
 
+/**
+ * Diff every untracked file against `/dev/null` so it lands in the synthetic
+ * baseline tree.
+ *
+ * Uses {@link git.diff.capture} rather than `git.diff`: a per-file diff that
+ * outgrows the transcript-sized output ceiling comes back with a truncation
+ * marker spliced in, and marker-bearing text is not a short patch — it is a
+ * corrupt one that `git apply --cached` rejects several stack frames later,
+ * after the isolation worktree has already been destroyed.
+ */
 async function captureUntrackedPatch(repoRoot: string, untracked: readonly string[]): Promise<string> {
 	if (untracked.length === 0) return "";
 	const nullPath = getGitNoIndexNullPath();
 	// Bound concurrent git spawns; large untracked sets would otherwise fork one
 	// process per file at once.
 	const { results: untrackedDiffs } = await mapWithConcurrencyLimit([...untracked], 8, entry =>
-		git.diff(repoRoot, {
+		git.diff.capture(repoRoot, {
 			allowFailure: true,
 			binary: true,
 			noIndex: { left: nullPath, right: entry },
@@ -110,11 +120,29 @@ async function captureUntrackedPatch(repoRoot: string, untracked: readonly strin
 
 async function captureRepoBaseline(repoRoot: string): Promise<RepoBaseline> {
 	const headCommit = (await git.head.sha(repoRoot)) ?? "";
-	const staged = await git.diff(repoRoot, { binary: true, cached: true });
-	const unstaged = await git.diff(repoRoot, { binary: true });
+	const staged = await git.diff.capture(repoRoot, { binary: true, cached: true });
+	const unstaged = await git.diff.capture(repoRoot, { binary: true });
 	const untracked = await git.ls.untracked(repoRoot);
 	const untrackedPatch = await captureUntrackedPatch(repoRoot, untracked);
 	return { repoRoot, headCommit, staged, unstaged, untracked, untrackedPatch };
+}
+
+/**
+ * Bytes of a patch's tail scanned for the git truncation marker.
+ *
+ * The marker is always appended at the very end of a single capture, so the
+ * tail is the only place it can legitimately appear. Scanning the whole patch
+ * would also flag a diff that merely *quotes* the marker — loom's own sources
+ * do — and refusing a valid change set is the failure this guard exists to
+ * prevent.
+ */
+const PATCH_TRUNCATION_TAIL_SCAN_BYTES = 256;
+
+function assertPatchIntact(patch: string, repoDir: string): void {
+	if (!patch.slice(-PATCH_TRUNCATION_TAIL_SCAN_BYTES).includes(git.GIT_OUTPUT_TRUNCATED_MARKER_PREFIX)) return;
+	throw new Error(
+		`Isolation patch capture for ${repoDir} was truncated by the git output limit; refusing to build a tree from a corrupt patch.`,
+	);
 }
 
 async function writeSyntheticTree(repoDir: string, baseTreeish: string, patches: readonly string[]): Promise<string> {
@@ -125,6 +153,7 @@ async function writeSyntheticTree(repoDir: string, baseTreeish: string, patches:
 		});
 		for (const patch of patches) {
 			if (!patch.trim()) continue;
+			assertPatchIntact(patch, repoDir);
 			await git.patch.applyText(repoDir, patch, {
 				cached: true,
 				env: { GIT_INDEX_FILE: tempIndex },
@@ -151,13 +180,13 @@ export async function captureBaseline(repoRoot: string): Promise<WorktreeBaselin
 
 async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRepoDir = repoDir): Promise<string> {
 	const currentHead = (await git.head.sha(repoDir)) ?? "";
-	const currentStaged = await git.diff(repoDir, { binary: true, cached: true });
-	const currentUnstaged = await git.diff(repoDir, { binary: true });
+	const currentStaged = await git.diff.capture(repoDir, { binary: true, cached: true });
+	const currentUnstaged = await git.diff.capture(repoDir, { binary: true });
 	const currentUntracked = await git.ls.untracked(repoDir);
 	const currentUntrackedPatch = await captureUntrackedPatch(repoDir, currentUntracked);
 	const committedPatch =
 		currentHead && currentHead !== rb.headCommit
-			? await git.diff.tree(repoDir, rb.headCommit, currentHead, {
+			? await git.diff.captureTree(repoDir, rb.headCommit, currentHead, {
 					allowFailure: true,
 					binary: true,
 				})
@@ -175,10 +204,239 @@ async function captureRepoDeltaPatch(repoDir: string, rb: RepoBaseline, objectRe
 		currentUntrackedPatch,
 	]);
 
-	return git.diff.tree(objectRepoDir, baselineTree, currentTree, {
+	return git.diff.captureTree(objectRepoDir, baselineTree, currentTree, {
 		allowFailure: true,
 		binary: true,
 	});
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Gitignored-file divergence
+// ═══════════════════════════════════════════════════════════════════════════
+
+/** How an ignored path differs between the isolation copy and the parent repo. */
+export type IgnoredChangeStatus = "added" | "modified" | "removed";
+
+/** One ignored path that does not match the parent repo. */
+export interface IgnoredChange {
+	/** Path relative to the isolation dir / repo root, POSIX-separated. */
+	relativePath: string;
+	status: IgnoredChangeStatus;
+	/** Size in the isolation copy; 0 for `removed`. */
+	bytes: number;
+}
+
+/**
+ * Result of {@link captureIgnoredChanges}. `unscanned` exists so an incomplete
+ * answer can never be read as a clean one.
+ */
+export interface IgnoredChangeScan {
+	changes: IgnoredChange[];
+	/** Paths whose comparison was cut short by the scan budget or an I/O error. */
+	unscanned: string[];
+}
+
+/** Entry ceiling for one ignored-file scan; a runaway guard, not a policy. */
+const IGNORED_SCAN_MAX_ENTRIES = 100_000;
+/** Total bytes read while comparing ignored file contents in one scan. */
+const IGNORED_SCAN_MAX_COMPARE_BYTES = 64 * 1024 * 1024;
+
+interface IgnoredScanBudget {
+	entries: number;
+	compareBytes: number;
+}
+
+async function lstatOrNull(target: string): Promise<Stats | null> {
+	try {
+		return await fs.lstat(target);
+	} catch {
+		return null;
+	}
+}
+
+/** Byte-exact comparison of two files; `null` when the compare budget is spent. */
+async function filesIdentical(
+	left: string,
+	right: string,
+	size: number,
+	budget: IgnoredScanBudget,
+): Promise<boolean | null> {
+	if (budget.compareBytes + size > IGNORED_SCAN_MAX_COMPARE_BYTES) return null;
+	budget.compareBytes += size;
+	try {
+		const [a, b] = await Promise.all([Bun.file(left).bytes(), Bun.file(right).bytes()]);
+		return a.length === b.length && Buffer.compare(a, b) === 0;
+	} catch {
+		return null;
+	}
+}
+
+/**
+ * Collect every file under `dir` as `relativePath -> lstat`. Returns `false`
+ * when the entry budget or an I/O error cut the walk short, which the caller
+ * reports as unscanned rather than treating a partial listing as the whole
+ * truth. A directory that simply does not exist on this side is not a failure —
+ * a build directory the agent created has no parent-side counterpart.
+ */
+async function collectTreeFiles(
+	dir: string,
+	prefix: string,
+	budget: IgnoredScanBudget,
+	out: Map<string, Stats>,
+): Promise<boolean> {
+	let entries: Dirent[];
+	try {
+		entries = await fs.readdir(dir, { withFileTypes: true });
+	} catch (err) {
+		return isEnoent(err);
+	}
+	for (const entry of entries) {
+		if (budget.entries >= IGNORED_SCAN_MAX_ENTRIES) return false;
+		budget.entries += 1;
+		const full = path.join(dir, entry.name);
+		const rel = `${prefix}${entry.name}`;
+		if (entry.isDirectory()) {
+			if (!(await collectTreeFiles(full, `${rel}/`, budget, out))) return false;
+			continue;
+		}
+		const stats = await lstatOrNull(full);
+		if (stats) out.set(rel, stats);
+	}
+	return true;
+}
+
+/**
+ * Compare one ignored path that is a file or symlink in at least one tree.
+ * Pushes into `changes`, `unscanned`, or neither (identical).
+ */
+async function compareIgnoredFile(
+	relativePath: string,
+	isolationPath: string,
+	repoPath: string,
+	left: Stats | null,
+	right: Stats | null,
+	exact: boolean,
+	budget: IgnoredScanBudget,
+	scan: IgnoredChangeScan,
+): Promise<void> {
+	if (!left) {
+		if (right) scan.changes.push({ relativePath, status: "removed", bytes: 0 });
+		return;
+	}
+	if (!right) {
+		scan.changes.push({ relativePath, status: "added", bytes: left.size });
+		return;
+	}
+	if (left.isSymbolicLink() || right.isSymbolicLink()) {
+		const [a, b] = await Promise.all([
+			fs.readlink(isolationPath).catch(() => null),
+			fs.readlink(repoPath).catch(() => null),
+		]);
+		if (a !== b) scan.changes.push({ relativePath, status: "modified", bytes: left.size });
+		return;
+	}
+	if (left.size !== right.size) {
+		scan.changes.push({ relativePath, status: "modified", bytes: left.size });
+		return;
+	}
+	// Equal size: only a content read can tell them apart. Inside a collapsed
+	// ignored directory we deliberately stop here — see captureIgnoredChanges.
+	if (!exact) return;
+	const identical = await filesIdentical(isolationPath, repoPath, left.size, budget);
+	if (identical === null) {
+		scan.unscanned.push(relativePath);
+		return;
+	}
+	if (!identical) scan.changes.push({ relativePath, status: "modified", bytes: left.size });
+}
+
+async function compareIgnoredDirectory(
+	relativePath: string,
+	isolationDir: string,
+	repoRoot: string,
+	budget: IgnoredScanBudget,
+	scan: IgnoredChangeScan,
+): Promise<void> {
+	const left = new Map<string, Stats>();
+	const right = new Map<string, Stats>();
+	const prefix = `${relativePath}/`;
+	const leftComplete = await collectTreeFiles(path.join(isolationDir, relativePath), prefix, budget, left);
+	const rightComplete = await collectTreeFiles(path.join(repoRoot, relativePath), prefix, budget, right);
+	if (!leftComplete || !rightComplete) {
+		scan.unscanned.push(prefix);
+		return;
+	}
+	for (const rel of new Set([...left.keys(), ...right.keys()])) {
+		await compareIgnoredFile(
+			rel,
+			path.join(isolationDir, rel),
+			path.join(repoRoot, rel),
+			left.get(rel) ?? null,
+			right.get(rel) ?? null,
+			false,
+			budget,
+			scan,
+		);
+	}
+}
+
+/**
+ * Compare the ignored files of an isolation copy against the parent repo.
+ *
+ * Isolation materialises the repo byte-for-byte, so `.env`, local config and
+ * build output are all present and writable inside the copy — while the capture
+ * path is pure git (`ls-files --others --exclude-standard`, `git diff`), and git
+ * never reports an ignored path. Anything an agent writes there is invisible to
+ * the merge and dies with the worktree.
+ *
+ * This does not merge those files: a path is ignored because the repo does not
+ * want it versioned, and folding it into a commit or patch would be a worse
+ * surprise than not merging it. It answers the honest question instead — WHICH
+ * ignored paths diverged — so the caller can name them and keep a copy.
+ *
+ * Cost policy: ignored entries come from one `ls-files --directory` call, so a
+ * wholly-ignored directory (`node_modules/`, `dist/`) is a single entry instead
+ * of a hundred thousand. Ignored FILES are compared byte-exactly (size, then
+ * contents, within {@link IGNORED_SCAN_MAX_COMPARE_BYTES}) — that is the
+ * `.env`/local-config case this exists for. Inside a collapsed directory the
+ * comparison is name, size and link target only: hashing a dependency tree on
+ * every spawn costs far more than the answer is worth, and a same-size in-place
+ * edit under an ignored build directory is the one case knowingly traded away.
+ * Whatever the budget or an I/O error cut short is listed in `unscanned`.
+ */
+export async function captureIgnoredChanges(isolationDir: string, repoRoot: string): Promise<IgnoredChangeScan> {
+	const scan: IgnoredChangeScan = { changes: [], unscanned: [] };
+	const budget: IgnoredScanBudget = { entries: 0, compareBytes: 0 };
+	let entries: string[];
+	try {
+		const [left, right] = await Promise.all([git.ls.ignoredEntries(isolationDir), git.ls.ignoredEntries(repoRoot)]);
+		entries = [...new Set([...left, ...right])].sort();
+	} catch (err) {
+		logger.warn("ignored-file scan could not list ignored entries", {
+			isolationDir,
+			error: errorMessage(err),
+		});
+		scan.unscanned.push(".");
+		return scan;
+	}
+	for (const entry of entries) {
+		if (entry.endsWith("/")) {
+			await compareIgnoredDirectory(entry.slice(0, -1), isolationDir, repoRoot, budget, scan);
+			continue;
+		}
+		await compareIgnoredFile(
+			entry,
+			path.join(isolationDir, entry),
+			path.join(repoRoot, entry),
+			await lstatOrNull(path.join(isolationDir, entry)),
+			await lstatOrNull(path.join(repoRoot, entry)),
+			true,
+			budget,
+			scan,
+		);
+	}
+	scan.changes.sort((a, b) => a.relativePath.localeCompare(b.relativePath));
+	return scan;
 }
 
 export interface NestedRepoPatch {

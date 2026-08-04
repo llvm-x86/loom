@@ -559,10 +559,12 @@ export class TaskTool implements AgentTool<TaskToolSchemaInstance, TaskToolDetai
 	#spawnSemaphore: Semaphore | undefined;
 
 	get parameters(): TaskToolSchemaInstance {
-		const planMode = this.session.getPlanModeState?.()?.enabled === true;
-		const isolationEnabled = !planMode && this.session.settings.get("task.isolation.mode") !== "none";
+		// `isolated` stays in the wire schema whatever the isolation settings say:
+		// preflight owns the verdict (see `resolveEffectiveSubagentPolicy`), and
+		// stripping the key here silently ignored a caller that asked for
+		// isolation while the eval `agent()` bridge rejected the same request.
 		const defaultAgent = resolveSpawnPolicy(this.session.getSessionSpawns()).defaultAgent;
-		return getTaskSchema({ isolationEnabled, batchEnabled: this.#isBatchEnabled(), defaultAgent });
+		return getTaskSchema({ batchEnabled: this.#isBatchEnabled(), defaultAgent });
 	}
 
 	renderCall(args: unknown, options: Parameters<typeof renderTaskCall>[1], theme: Theme) {

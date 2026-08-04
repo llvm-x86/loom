@@ -20,6 +20,15 @@ export interface GitCommandResult {
 	exitCode: number;
 	stdout: string;
 	stderr: string;
+	/**
+	 * True when stdout hit the caller's byte ceiling. `stdout` then carries
+	 * a {@link GIT_OUTPUT_TRUNCATED_MARKER_PREFIX} line and is display text only — feeding it
+	 * back to git as data (a patch, a tree-ish list) yields corruption, not a
+	 * short read.
+	 */
+	stdoutTruncated: boolean;
+	/** Total stdout bytes git produced, including bytes the ceiling dropped. */
+	stdoutBytes: number;
 }
 
 export interface GitRepository {
@@ -172,6 +181,26 @@ export class GitCommandError extends Error {
 	}
 }
 
+/**
+ * Raised when a caller demanded a complete git stream (see
+ * {@link diff.capture}) but the output ceiling truncated it. Carrying the real
+ * byte count out-of-band is the point: a spliced truncation marker turns a
+ * patch into garbage that `git apply` rejects far from the cause.
+ */
+export class GitOutputTruncatedError extends Error {
+	/** Total bytes git produced. */
+	readonly bytes: number;
+	/** Ceiling that was exceeded. */
+	readonly limitBytes: number;
+
+	constructor(label: string, bytes: number, limitBytes: number) {
+		super(`${label} exceeded capture limit: ${bytes} bytes (limit ${limitBytes} bytes)`);
+		this.name = "GitOutputTruncatedError";
+		this.bytes = bytes;
+		this.limitBytes = limitBytes;
+	}
+}
+
 // ════════════════════════════════════════════════════════════════════════════
 // Internal: Core execution
 // ════════════════════════════════════════════════════════════════════════════
@@ -215,9 +244,26 @@ export const GIT_COMMAND_TIMEOUT_MS = 5 * 60 * 1000;
 export const GIT_NETWORK_TIMEOUT_MS = 30 * 60 * 1000;
 /** Maximum captured stdout or stderr bytes retained from git and gh subprocesses. */
 export const GIT_COMMAND_OUTPUT_LIMIT_BYTES = 8 * 1024 * 1024;
+/**
+ * Ceiling for git output that is consumed as DATA rather than shown to a
+ * human — patch capture above all (see {@link diff.capture}).
+ *
+ * {@link GIT_COMMAND_OUTPUT_LIMIT_BYTES} exists to keep a chatty subprocess
+ * from ballooning a transcript; a patch that trips it is destroyed, not
+ * shortened, because the truncation marker makes the remainder unparseable.
+ * Data callers therefore get a far wider ceiling and a hard error at the edge
+ * instead of silent corruption. It is finite on purpose: an unbounded read of
+ * a runaway diff trades a recoverable failure for an OOM kill.
+ */
+export const GIT_PATCH_CAPTURE_LIMIT_BYTES = 256 * 1024 * 1024;
 
 const GIT_COMMAND_TIMEOUT_EXIT_CODE = 124;
-const GIT_OUTPUT_TRUNCATED_MARKER = "\n[git subprocess output truncated after 8 MiB]\n";
+/** Stable prefix of the marker spliced into truncated git output. */
+export const GIT_OUTPUT_TRUNCATED_MARKER_PREFIX = "[git subprocess output truncated after ";
+
+function truncationMarker(limitBytes: number): string {
+	return `\n${GIT_OUTPUT_TRUNCATED_MARKER_PREFIX}${limitBytes} bytes]\n`;
+}
 const GIT_COMMAND_TERMINATE_GRACE_MS = 5_000;
 
 type CommandName = "git" | "gh";
@@ -290,16 +336,27 @@ async function waitForExitWithTimeout(
 	}
 }
 
-async function readCappedText(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<string> {
+/** Text read from a capped stream, plus the out-of-band truncation facts. */
+interface CappedText {
+	text: string;
+	/** True when `text` was cut short and carries a truncation marker. */
+	truncated: boolean;
+	/** Total bytes the stream produced, including bytes the cap dropped. */
+	bytes: number;
+}
+
+async function readCappedText(stream: ReadableStream<Uint8Array>, maxBytes: number): Promise<CappedText> {
 	const reader = stream.getReader();
 	const decoder = new TextDecoder();
 	const chunks: string[] = [];
 	let remaining = maxBytes;
 	let truncated = false;
+	let bytes = 0;
 	try {
 		while (true) {
 			const { done, value } = await reader.read();
 			if (done) break;
+			bytes += value.length;
 			if (!truncated && value.length <= remaining) {
 				chunks.push(decoder.decode(value, { stream: true }));
 				remaining -= value.length;
@@ -312,8 +369,8 @@ async function readCappedText(stream: ReadableStream<Uint8Array>, maxBytes: numb
 			truncated = true;
 		}
 		chunks.push(decoder.decode());
-		if (truncated) chunks.push(GIT_OUTPUT_TRUNCATED_MARKER);
-		return chunks.join("");
+		if (truncated) chunks.push(truncationMarker(maxBytes));
+		return { text: chunks.join(""), truncated, bytes };
 	} finally {
 		reader.releaseLock();
 	}
@@ -350,10 +407,22 @@ async function collectSubprocessResult(
 		void stdoutPromise.catch(() => undefined);
 		void stderrPromise.catch(() => undefined);
 		await Promise.all([cancelOutput(stdoutStream), cancelOutput(stderrStream)]);
-		return { exitCode: GIT_COMMAND_TIMEOUT_EXIT_CODE, stdout: "", stderr: exit.stderr };
+		return {
+			exitCode: GIT_COMMAND_TIMEOUT_EXIT_CODE,
+			stdout: "",
+			stderr: exit.stderr,
+			stdoutTruncated: false,
+			stdoutBytes: 0,
+		};
 	}
 	const [stdout, stderr] = await Promise.all([stdoutPromise, stderrPromise]);
-	return { exitCode: exit.exitCode ?? 0, stdout, stderr };
+	return {
+		exitCode: exit.exitCode ?? 0,
+		stdout: stdout.text,
+		stderr: stderr.text,
+		stdoutTruncated: stdout.truncated,
+		stdoutBytes: stdout.bytes,
+	};
 }
 
 interface CommandOptions {
@@ -467,6 +536,48 @@ async function tryText(
 	ensureAvailable();
 	const result = await git(cwd, args, options);
 	if (result.exitCode !== 0) return undefined;
+	return result.stdout;
+}
+
+/** Options accepted by every data-capture call. */
+interface CaptureOptions {
+	/** Accept a non-zero exit without throwing (`diff --no-index` exits 1 on differences). */
+	readonly allowFailure?: boolean;
+	readonly env?: Record<string, string | undefined>;
+	/** Byte ceiling; defaults to {@link GIT_PATCH_CAPTURE_LIMIT_BYTES}. */
+	readonly maxOutputBytes?: number;
+	readonly signal?: AbortSignal;
+}
+
+/**
+ * Run a read-only git command whose stdout is DATA, and refuse to hand back a
+ * stream the output ceiling cut short.
+ *
+ * {@link runText} returns marker-spliced text on truncation, which is fine for
+ * something a human reads and fatal for something git has to parse again.
+ * `label` names the command in {@link GitOutputTruncatedError} so the failure
+ * points at the capture, not at the eventual `git apply`.
+ */
+async function captureCompleteText(
+	cwd: string,
+	args: readonly string[],
+	label: string,
+	options: CaptureOptions = {},
+): Promise<string> {
+	ensureAvailable();
+	const maxOutputBytes = options.maxOutputBytes ?? GIT_PATCH_CAPTURE_LIMIT_BYTES;
+	const result = await git(cwd, args, {
+		env: options.env,
+		maxOutputBytes,
+		readOnly: true,
+		signal: options.signal,
+	});
+	if (result.stdoutTruncated) {
+		throw new GitOutputTruncatedError(label, result.stdoutBytes, maxOutputBytes);
+	}
+	if (!options.allowFailure && result.exitCode !== 0) {
+		throw new GitCommandError(args, result);
+	}
 	return result.stdout;
 }
 
@@ -1185,6 +1296,39 @@ export const diff = Object.assign(
 		return runText(cwd, args, { env: options.env, readOnly: true, signal: options.signal });
 	},
 	{
+		/**
+		 * Capture a diff as DATA: complete or nothing.
+		 *
+		 * Identical arguments to {@link diff}, with two differences that matter
+		 * for anything fed back into `git apply` — the ceiling is
+		 * {@link GIT_PATCH_CAPTURE_LIMIT_BYTES} rather than the transcript-sized
+		 * default, and hitting it raises {@link GitOutputTruncatedError} instead
+		 * of returning marker-spliced text that no longer parses as a patch.
+		 */
+		async capture(cwd: string, options: DiffOptions & { maxOutputBytes?: number } = {}): Promise<string> {
+			return captureCompleteText(cwd, buildDiffArgs(options), "diff", {
+				allowFailure: options.allowFailure,
+				env: options.env,
+				maxOutputBytes: options.maxOutputBytes,
+				signal: options.signal,
+			});
+		},
+		/** {@link diff.capture} for `git diff-tree` between two tree-ishes. */
+		async captureTree(
+			cwd: string,
+			base: string,
+			headRef: string,
+			options: { binary?: boolean; signal?: AbortSignal; allowFailure?: boolean; maxOutputBytes?: number } = {},
+		): Promise<string> {
+			const args = ["diff-tree", "-r", "-p"];
+			if (options.binary) args.push("--binary");
+			args.push(base, headRef);
+			return captureCompleteText(cwd, args, "diff-tree", {
+				allowFailure: options.allowFailure,
+				maxOutputBytes: options.maxOutputBytes,
+				signal: options.signal,
+			});
+		},
 		/** List changed file paths. */
 		async changedFiles(
 			cwd: string,
@@ -2173,6 +2317,25 @@ export const ls = {
 	/** List untracked files (excludes ignored). */
 	async untracked(cwd: string, signal?: AbortSignal): Promise<string[]> {
 		return ls.files(cwd, { others: true, excludeStandard: true, signal });
+	},
+
+	/**
+	 * List ignored entries, collapsing a wholly-ignored directory to a single
+	 * `dir/` entry instead of enumerating it. Complementary to
+	 * {@link ls.untracked}, which deliberately excludes ignored paths — the two
+	 * together are the whole of what a working tree holds beyond HEAD.
+	 *
+	 * Uses {@link captureCompleteText}: a silently shortened list would mean
+	 * silently forgotten files, which is the failure this exists to prevent.
+	 */
+	async ignoredEntries(cwd: string, signal?: AbortSignal): Promise<string[]> {
+		const raw = await captureCompleteText(
+			cwd,
+			["ls-files", "-z", "--others", "--ignored", "--exclude-standard", "--directory", "--no-empty-directory"],
+			"ls-files --ignored",
+			{ signal },
+		);
+		return raw.split("\0").filter(entry => entry.length > 0);
 	},
 
 	/** List paths present in a ref, optionally filtered to specific paths. */
