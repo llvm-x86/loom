@@ -109,6 +109,7 @@ describe("task scratch dirs", () => {
 			expect(env).toEqual({
 				OMP_RUN_SCRATCH: "/scratch/tabc123",
 				OMP_SCRATCH_DIR: scratchRoot,
+				OMP_SCRATCH_ROOT_INHERITED: scratchRoot,
 				TMPDIR: "/scratch/tabc123/tmp",
 			});
 		});
@@ -116,7 +117,11 @@ describe("task scratch dirs", () => {
 		it("omits TMPDIR when the redirect kill switch is off", () => {
 			const env = buildScratchToolEnv("/scratch/sdef456", false);
 
-			expect(env).toEqual({ OMP_RUN_SCRATCH: "/scratch/sdef456", OMP_SCRATCH_DIR: scratchRoot });
+			expect(env).toEqual({
+				OMP_RUN_SCRATCH: "/scratch/sdef456",
+				OMP_SCRATCH_DIR: scratchRoot,
+				OMP_SCRATCH_ROOT_INHERITED: scratchRoot,
+			});
 		});
 
 		it("never names the run's own dir as the root", () => {

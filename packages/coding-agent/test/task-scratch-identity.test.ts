@@ -28,7 +28,7 @@ import {
 	sweepOrphanedScratchDirs,
 	TASK_ISOLATION_OWNER_FILE,
 } from "@oh-my-pi/pi-coding-agent/task/worktree-gc";
-import { getScratchDir, setScratchDir } from "@oh-my-pi/pi-utils";
+import { getScratchDir, resolveScratchRoot, setScratchDir } from "@oh-my-pi/pi-utils";
 
 /** A pid that is alive but is not this process — the "foreign live owner" case. */
 function spawnLivePid(): { pid: number; kill: () => void } {
@@ -335,6 +335,9 @@ describe("scratch run identity", () => {
 			expect(env).toEqual({
 				OMP_RUN_SCRATCH: path.join(scratchRoot, "tabc123456"),
 				OMP_SCRATCH_DIR: scratchRoot,
+				// Marks the root as loom-injected so `clear --all` from an agent
+				// shell still hits the confirmation gate.
+				OMP_SCRATCH_ROOT_INHERITED: scratchRoot,
 			});
 		});
 
@@ -466,5 +469,60 @@ describe("scratch run identity", () => {
 			expect(output).toContain(fallbackRoot);
 			expect(output).toContain("1 entry");
 		});
+	});
+});
+
+describe("scratch clear --all consent (BLOCK-1: an inherited root is not consent)", () => {
+	it("classifies a loom-injected root as inherited, a hand-typed one as env", () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "scratch-inherit-"));
+		const prevRoot = process.env.OMP_SCRATCH_DIR;
+		const prevMark = process.env.OMP_SCRATCH_ROOT_INHERITED;
+		try {
+			process.env.OMP_SCRATCH_DIR = root;
+			process.env.OMP_SCRATCH_ROOT_INHERITED = root;
+			expect(resolveScratchRoot().source).toBe("inherited");
+			delete process.env.OMP_SCRATCH_ROOT_INHERITED;
+			expect(resolveScratchRoot().source).toBe("env");
+		} finally {
+			if (prevRoot === undefined) delete process.env.OMP_SCRATCH_DIR;
+			else process.env.OMP_SCRATCH_DIR = prevRoot;
+			if (prevMark === undefined) delete process.env.OMP_SCRATCH_ROOT_INHERITED;
+			else process.env.OMP_SCRATCH_ROOT_INHERITED = prevMark;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
+	});
+
+	it("stamps the inherited marker with the very root it injects", () => {
+		const env = buildScratchToolEnv(path.join(os.tmpdir(), "runs", "s123456789"), false);
+		expect(env?.OMP_SCRATCH_ROOT_INHERITED).toBe(env?.OMP_SCRATCH_DIR);
+		expect(env?.OMP_RUN_SCRATCH).toBe(path.join(os.tmpdir(), "runs", "s123456789"));
+	});
+
+	it("refuses --all against an inherited root and removes nothing", async () => {
+		const root = fs.mkdtempSync(path.join(os.tmpdir(), "scratch-inherit-clear-"));
+		const dead = path.join(root, "tdeadbeef1");
+		fs.mkdirSync(dead, { recursive: true });
+		fs.writeFileSync(
+			path.join(dead, TASK_ISOLATION_OWNER_FILE),
+			JSON.stringify({ pid: 999_997, startedAt: "2026-08-01T00:00:00Z", repoRoot: root, taskId: "Gone" }),
+		);
+		fs.writeFileSync(path.join(dead, "FORENSICS.txt"), "post-mortem");
+		const prevRoot = process.env.OMP_SCRATCH_DIR;
+		const prevMark = process.env.OMP_SCRATCH_ROOT_INHERITED;
+		try {
+			process.env.OMP_SCRATCH_DIR = root;
+			process.env.OMP_SCRATCH_ROOT_INHERITED = root;
+			process.exitCode = 0;
+			await clearScratch({ all: true, dryRun: false, json: true, yes: false });
+			expect(fs.existsSync(path.join(dead, "FORENSICS.txt"))).toBe(true);
+			expect(process.exitCode).toBe(1);
+			process.exitCode = 0;
+		} finally {
+			if (prevRoot === undefined) delete process.env.OMP_SCRATCH_DIR;
+			else process.env.OMP_SCRATCH_DIR = prevRoot;
+			if (prevMark === undefined) delete process.env.OMP_SCRATCH_ROOT_INHERITED;
+			else process.env.OMP_SCRATCH_ROOT_INHERITED = prevMark;
+			fs.rmSync(root, { recursive: true, force: true });
+		}
 	});
 });

@@ -157,11 +157,16 @@ export async function clearScratch(options: ClearScratchOptions): Promise<void> 
 	}
 	if (options.dryRun) return;
 
-	// `--all` on a root nobody selected is the fleet's whole forensics window.
-	// An explicitly configured root (env var or `scratch.base`) is a deliberate
-	// target and needs no ceremony.
-	if (options.all && resolution.source === "default" && !options.yes) {
-		const reason = `Refusing --all against the default scratch root ${resolution.path}: it holds every run's post-mortem scratch and --all waives the ${SCRATCH_DEAD_OWNER_GRACE_MS / 3_600_000}h grace. The ${targets.length} dir${targets.length === 1 ? " listed above was" : "s listed above were"} NOT removed. Re-run with --yes to confirm, or --dry-run to inspect.`;
+	// `--all` waives the forensics grace, so it needs a deliberate choice of
+	// target. Only `env` (a human typing OMP_SCRATCH_DIR=) and `setting`
+	// (operator config) count as one. `default` is nobody's choice, and
+	// `inherited` is loom's own injection into an agent's tool env — treating
+	// that as consent is what let a fixture typo wipe the fleet's window.
+	const unchosenRoot = resolution.source === "default" || resolution.source === "inherited";
+	if (options.all && unchosenRoot && !options.yes) {
+		// Deliberately does NOT name the flag that bypasses this: an agent told
+		// "re-run with --yes" complies. A human can read `--help`.
+		const reason = `Refusing --all against the ${resolution.source === "inherited" ? "inherited" : "default"} scratch root ${resolution.path}: it holds every run's post-mortem scratch and --all waives the ${SCRATCH_DEAD_OWNER_GRACE_MS / 3_600_000}h grace. The ${targets.length} dir${targets.length === 1 ? " listed above was" : "s listed above were"} NOT removed. Use --dry-run to inspect, or clear a specific root you chose yourself.`;
 		if (options.json) console.log(JSON.stringify({ refused: true, needsConfirmation: true, reason }, null, 2));
 		else console.log(chalk.yellow(reason));
 		process.exitCode = 1;

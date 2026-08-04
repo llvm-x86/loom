@@ -39,7 +39,7 @@
  */
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, SCRATCH_ROOT_INHERITED_ENV } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import { getTaskIsolationSegment } from "./worktree";
 import {
@@ -223,8 +223,13 @@ export function buildScratchToolEnv(
 	tmpdirRedirect: boolean,
 ): Record<string, string> | undefined {
 	if (!scratchDir) return undefined;
+	const root = resolveScratchRootLogged().path;
 	const env: Record<string, string> = {
-		[SCRATCH_ROOT_ENV]: resolveScratchRootLogged().path,
+		[SCRATCH_ROOT_ENV]: root,
+		// Marks the root as loom-injected rather than caller-chosen, so a
+		// destructive `scratch clear --all` run from inside an agent shell
+		// still faces the confirmation gate instead of inheriting consent.
+		[SCRATCH_ROOT_INHERITED_ENV]: root,
 		[SCRATCH_RUN_DIR_ENV]: scratchDir,
 	};
 	if (tmpdirRedirect) env.TMPDIR = path.join(scratchDir, "tmp");

@@ -654,8 +654,20 @@ export function setScratchDir(dir: string | undefined): string | undefined {
  */
 export const MANAGED_RUN_OWNER_FILE: string = "owner.json";
 
-/** Where a resolved scratch root came from; `default` means nobody chose it. */
-export type ScratchRootSource = "env" | "setting" | "default";
+/**
+ * Where a resolved scratch root came from. `default` means nobody chose it;
+ * `inherited` means loom itself exported it into a run's tool env, so a
+ * command reading it inside an agent shell did NOT choose it either. Only
+ * `env` and `setting` represent a deliberate human/config choice.
+ */
+export type ScratchRootSource = "env" | "inherited" | "setting" | "default";
+
+/**
+ * Set by {@link buildScratchToolEnv} alongside the root it injects. Without
+ * it, every agent shell looks like a deliberate `OMP_SCRATCH_DIR=` invocation
+ * and skips the confirmation that guards the fleet's forensics window.
+ */
+export const SCRATCH_ROOT_INHERITED_ENV: string = "OMP_SCRATCH_ROOT_INHERITED";
 
 export interface ScratchRootResolution {
 	/** Absolute path of the resolved scratch root. */
@@ -691,7 +703,11 @@ export interface ScratchRootResolution {
 export function resolveScratchRoot(): ScratchRootResolution {
 	const fromEnv = resolveManagedBaseDir(process.env.OMP_SCRATCH_DIR);
 	if (fromEnv !== undefined && !fs.existsSync(path.join(fromEnv, MANAGED_RUN_OWNER_FILE))) {
-		return { path: fromEnv, source: "env" };
+		// A root loom injected into this run's env is not a choice the caller
+		// made; treating it as one skips the `--all` confirmation for every
+		// agent shell, which is the whole population that gate exists for.
+		const inherited = process.env[SCRATCH_ROOT_INHERITED_ENV] === fromEnv;
+		return { path: fromEnv, source: inherited ? "inherited" : "env" };
 	}
 	const rejected = fromEnv;
 	if (scratchDirOverride !== undefined) return { path: scratchDirOverride, source: "setting", rejected };
