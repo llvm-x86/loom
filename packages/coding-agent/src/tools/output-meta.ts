@@ -63,13 +63,46 @@ export interface DiagnosticMeta {
 }
 
 /**
+ * What a per-line column cap counts.
+ *
+ * `bytes` is the `tools.outputMaxColumns` budget shared by the streaming sink
+ * (`OutputSink#applyColumnCap`) and `read`: it caps UTF-8 bytes and the `…`
+ * marker is charged against the same budget, so the surviving data width is
+ * `maxColumn - COLUMN_CAP_ELLIPSIS_BYTES`.
+ *
+ * `chars` is grep's fixed match-line cap (`DEFAULT_MAX_COLUMN` via
+ * `truncateLine`): it caps UTF-16 code units and appends the marker on top.
+ *
+ * The unit is explicit because the notice states it; a default would let one
+ * surface silently report the other's accounting, which is the bug this
+ * field exists to prevent.
+ */
+export type ColumnCapUnit = "bytes" | "chars";
+
+/** The marker a per-line column cap leaves in place of the bytes it dropped. */
+export const COLUMN_CAP_ELLIPSIS = "…";
+
+/** UTF-8 size of {@link COLUMN_CAP_ELLIPSIS}, charged against a `bytes` cap. */
+export const COLUMN_CAP_ELLIPSIS_BYTES = 3;
+
+/** Per-line column cap that fired, and how it counted. */
+export interface ColumnTruncatedMeta {
+	maxColumn: number;
+	unit: ColumnCapUnit;
+	droppedBytes?: number;
+	artifactId?: string;
+	/** Surface where re-reading with the `:raw` selector returns full lines. */
+	rawRecovery?: boolean;
+}
+
+/**
  * Limit-specific notices.
  */
 export interface LimitsMeta {
 	matchLimit?: { reached: number; suggestion: number };
 	resultLimit?: { reached: number; suggestion: number };
 	headLimit?: { reached: number; suggestion: number };
-	columnTruncated?: { maxColumn: number; droppedBytes?: number; artifactId?: string };
+	columnTruncated?: ColumnTruncatedMeta;
 }
 
 /**
@@ -114,7 +147,7 @@ export interface TruncationTextOptions {
  * details.meta = outputMeta()
  *   .truncation(truncation, { direction: "head" })
  *   .matchLimit(limitReached ? effectiveLimit : 0)
- *   .columnTruncated(linesTruncated ? DEFAULT_MAX_COLUMN : 0)
+ *   .columnTruncated(DEFAULT_MAX_COLUMN, { unit: "chars" })
  *   .get();
  * ```
  */
@@ -201,8 +234,13 @@ export class OutputMetaBuilder {
 		// the drop size) on the limit notice, because when nothing else truncated
 		// there is no `TruncationMeta` to hang it on and the agent would otherwise
 		// never learn the full output is recoverable.
+		// The sink's cap is the `tools.outputMaxColumns` byte budget.
 		if (summary.columnMax != null && summary.columnMax > 0 && (summary.columnTruncatedLines ?? 0) > 0) {
-			this.columnTruncated(summary.columnMax, summary.columnDroppedBytes, summary.artifactId);
+			this.columnTruncated(summary.columnMax, {
+				unit: "bytes",
+				droppedBytes: summary.columnDroppedBytes,
+				artifactId: summary.artifactId,
+			});
 		}
 		if (!summary.truncated) return this;
 
@@ -317,7 +355,12 @@ export class OutputMetaBuilder {
 	}
 
 	/** Add limit notices in one call. */
-	limits(limits: { matchLimit?: number; resultLimit?: number; headLimit?: number; columnMax?: number }): this {
+	limits(limits: {
+		matchLimit?: number;
+		resultLimit?: number;
+		headLimit?: number;
+		column?: { max: number; unit: ColumnCapUnit; rawRecovery?: boolean };
+	}): this {
 		if (limits.matchLimit !== undefined) {
 			this.matchLimit(limits.matchLimit);
 		}
@@ -327,8 +370,11 @@ export class OutputMetaBuilder {
 		if (limits.headLimit !== undefined) {
 			this.headLimit(limits.headLimit);
 		}
-		if (limits.columnMax !== undefined) {
-			this.columnTruncated(limits.columnMax);
+		if (limits.column !== undefined) {
+			this.columnTruncated(limits.column.max, {
+				unit: limits.column.unit,
+				rawRecovery: limits.column.rawRecovery,
+			});
 		}
 		return this;
 	}
@@ -348,18 +394,29 @@ export class OutputMetaBuilder {
 	}
 
 	/**
-	 * Add column truncation notice. No-op if maxColumn <= 0. `droppedBytes` and
+	 * Add column truncation notice. No-op if maxColumn <= 0.
+	 *
+	 * `unit` says what `maxColumn` counts — see {@link ColumnCapUnit}; the
+	 * notice reports the surviving width in that unit. `droppedBytes` and
 	 * `artifactId` describe what the cap discarded and where the full uncapped
-	 * stream was mirrored, so the notice can offer a recovery path.
+	 * stream was mirrored, and `rawRecovery` marks a surface where re-reading
+	 * with `:raw` returns the full lines, so the notice can offer a recovery
+	 * path.
 	 */
-	columnTruncated(maxColumn: number, droppedBytes?: number, artifactId?: string): this {
+	columnTruncated(
+		maxColumn: number,
+		options: { unit: ColumnCapUnit; droppedBytes?: number; artifactId?: string; rawRecovery?: boolean },
+	): this {
 		if (maxColumn <= 0) return this;
+		const { unit, droppedBytes, artifactId, rawRecovery } = options;
 		this.#meta.limits = {
 			...this.#meta.limits,
 			columnTruncated: {
 				maxColumn,
+				unit,
 				...(droppedBytes != null && droppedBytes > 0 ? { droppedBytes } : {}),
 				...(artifactId ? { artifactId } : {}),
+				...(rawRecovery ? { rawRecovery } : {}),
 			},
 		};
 		return this;
@@ -513,6 +570,18 @@ export function formatStyledArtifactReference(artifactId: string, theme: Theme):
 }
 
 /**
+ * Describe a per-line column cap in its own unit, reporting the width that
+ * actually SURVIVES rather than the nominal cap. On a `bytes` cap the `…`
+ * marker is charged against the budget, so a stated 768 keeps 765 data bytes
+ * — reporting "768" there told the agent it had 3 more bytes than it did.
+ */
+function describeColumnCap(c: ColumnTruncatedMeta): string {
+	if (c.unit === "chars") return `Some lines truncated to ${c.maxColumn} chars`;
+	const kept = Math.max(0, c.maxColumn - COLUMN_CAP_ELLIPSIS_BYTES);
+	return `Some lines truncated to ${kept} of ${c.maxColumn} bytes`;
+}
+
+/**
  * Format notices from OutputMeta for LLM consumption.
  * Returns empty string if no notices needed.
  */
@@ -542,10 +611,16 @@ export function formatOutputNotice(meta: OutputMeta | undefined): string {
 	if (meta.limits?.columnTruncated) {
 		const c = meta.limits.columnTruncated;
 		const dropped = c.droppedBytes != null && c.droppedBytes > 0 ? `, ${c.droppedBytes} bytes dropped` : "";
-		// Without this reference a column-capped line is unrecoverable: nothing
-		// else in the result names the artifact when no window truncation fired.
-		const recovery = c.artifactId ? `; full output artifact://${c.artifactId}` : "";
-		parts.push(`Some lines truncated to ${c.maxColumn} chars${dropped}${recovery}`);
+		// Without a recovery clause a column-capped line is unrecoverable to the
+		// agent: nothing else in the result names the artifact when no window
+		// truncation fired, and on `read` nothing points at the `:raw` selector
+		// that bypasses the cap.
+		const recovery = c.artifactId
+			? `; full output artifact://${c.artifactId}`
+			: c.rawRecovery
+				? "; re-read with :raw for full lines"
+				: "";
+		parts.push(`${describeColumnCap(c)}${dropped}${recovery}`);
 	}
 
 	// Diagnostics

@@ -106,7 +106,7 @@ describe("EvalTool live stdout streaming", () => {
 		);
 
 		expect(result.details?.meta?.truncation).toBeUndefined();
-		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 8 chars");
+		expect(formatOutputNotice(result.details?.meta)).toContain("Some lines truncated to 5 of 8 bytes");
 	});
 });
 
@@ -133,7 +133,7 @@ describe("column truncation recovery (regression: dropped bytes were unrecoverab
 			.get();
 		expect(meta?.limits?.columnTruncated?.artifactId).toBe("42");
 		const notice = formatOutputNotice(meta);
-		expect(notice).toContain("Some lines truncated to 768 chars");
+		expect(notice).toContain("Some lines truncated to 765 of 768 bytes");
 		expect(notice).toContain("2232 bytes dropped");
 		expect(notice).toContain("artifact://42");
 	});
@@ -145,7 +145,7 @@ describe("column truncation recovery (regression: dropped bytes were unrecoverab
 			})
 			.get();
 		const notice = formatOutputNotice(meta);
-		expect(notice).toContain("Some lines truncated to 768 chars");
+		expect(notice).toContain("Some lines truncated to 765 of 768 bytes");
 		expect(notice).not.toContain("artifact://");
 		expect(notice).not.toContain("bytes dropped");
 	});

@@ -50,7 +50,6 @@ import {
 	type TruncationResult,
 	truncateHead,
 	truncateHeadBytes,
-	truncateLine,
 } from "../session/streaming-output";
 import { fileHyperlink, renderCodeCell, renderMarkdownCell, renderStatusLine, tryResolveInternalUrlSync } from "../tui";
 import { CachedOutputBlock, markFramedBlockComponent } from "../tui/output-block";
@@ -86,6 +85,8 @@ import {
 } from "./fetch";
 import { applyListLimit } from "./list-limit";
 import {
+	COLUMN_CAP_ELLIPSIS,
+	COLUMN_CAP_ELLIPSIS_BYTES,
 	formatFullOutputReference,
 	formatStyledTruncationWarning,
 	type OutputMeta,
@@ -254,6 +255,27 @@ function formatTextWithMode(
 }
 
 const BRACKET_CONTEXT_ELLIPSIS = "…";
+
+/**
+ * Cap one display line to `maxBytes` UTF-8 bytes, charging the `…` marker
+ * against the same budget.
+ *
+ * This mirrors the streaming sink (`OutputSink#applyColumnCap`) byte for byte
+ * so `tools.outputMaxColumns` means one thing on both surfaces: `read` used to
+ * spend the budget on UTF-16 code units and append the marker on top, keeping
+ * 1536 bytes of a U+00E9 line where bash kept 764. `truncateHeadBytes` backs
+ * off to the previous UTF-8 boundary, so a multi-byte character is never split.
+ */
+export function truncateLineToBytes(line: string, maxBytes: number): { text: string; wasTruncated: boolean } {
+	// UTF-8 length >= UTF-16 length, so a code-unit count over the budget is
+	// already over it in bytes — skip the encode for lines that cannot fit.
+	if (line.length <= maxBytes && Buffer.byteLength(line, "utf-8") <= maxBytes) {
+		return { text: line, wasTruncated: false };
+	}
+	const headRoom = maxBytes - COLUMN_CAP_ELLIPSIS_BYTES;
+	const kept = headRoom > 0 ? truncateHeadBytes(line, headRoom).text : "";
+	return { text: `${kept}${COLUMN_CAP_ELLIPSIS}`, wasTruncated: true };
+}
 
 function formatLineEntryWithMode(entry: LineEntry, shouldAddHashLines: boolean, shouldAddLineNumbers: boolean): string {
 	if (entry.kind === "ellipsis") return BRACKET_CONTEXT_ELLIPSIS;
@@ -1666,7 +1688,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			if (!rawSelector && maxColumns > 0) {
 				let cloned: string[] | undefined;
 				for (let i = 0; i < collectedLines.length; i++) {
-					const { text, wasTruncated } = truncateLine(collectedLines[i], maxColumns);
+					const { text, wasTruncated } = truncateLineToBytes(collectedLines[i], maxColumns);
 					if (wasTruncated) {
 						if (!cloned) cloned = collectedLines.slice();
 						cloned[i] = text;
@@ -1699,7 +1721,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 						const visibleText = displayLineByNumber.get(lineNumber);
 						if (visibleText !== undefined) return visibleText;
 						if (maxColumns <= 0) return sourceText;
-						const truncated = truncateLine(sourceText, maxColumns);
+						const truncated = truncateLineToBytes(sourceText, maxColumns);
 						if (truncated.wasTruncated) {
 							columnTruncated = maxColumns;
 						}
@@ -2604,7 +2626,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 					if (!rawSelector && maxColumns > 0) {
 						let cloned: string[] | undefined;
 						for (let i = 0; i < collectedLines.length; i++) {
-							const { text, wasTruncated } = truncateLine(collectedLines[i], maxColumns);
+							const { text, wasTruncated } = truncateLineToBytes(collectedLines[i], maxColumns);
 							if (wasTruncated) {
 								if (!cloned) cloned = collectedLines.slice();
 								cloned[i] = text;
@@ -2690,7 +2712,7 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 									const visibleText = displayLineByNumber.get(lineNumber);
 									if (visibleText !== undefined) return visibleText;
 									if (maxColumns <= 0) return sourceText;
-									const truncated = truncateLine(sourceText, maxColumns);
+									const truncated = truncateLineToBytes(sourceText, maxColumns);
 									if (truncated.wasTruncated) {
 										columnTruncated = maxColumns;
 									}
@@ -2837,7 +2859,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 			resultBuilder.truncation(truncationInfo.result, truncationInfo.options);
 		}
 		if (columnTruncated > 0) {
-			resultBuilder.limits({ columnMax: columnTruncated });
+			// `:raw` bypasses the cap and the source file is untouched, so the
+			// full lines are one re-read away — no artifact is needed here.
+			resultBuilder.limits({ column: { max: columnTruncated, unit: "bytes", rawRecovery: true } });
 		}
 		return resultBuilder.done();
 	}
@@ -2975,7 +2999,9 @@ export class ReadTool implements AgentTool<typeof readSchema, ReadToolDetails> {
 				.text(text)
 				.sourcePath(artifact.path)
 				.sourceInternal(url.href);
-			if (read.columnTruncated > 0) resultBuilder.limits({ columnMax: read.columnTruncated });
+			if (read.columnTruncated > 0) {
+				resultBuilder.limits({ column: { max: read.columnTruncated, unit: "bytes", rawRecovery: true } });
+			}
 			return resultBuilder.done();
 		}
 

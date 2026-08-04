@@ -17,6 +17,7 @@ import * as toolTimeouts from "@oh-my-pi/pi-coding-agent/tools/tool-timeouts";
 import { WriteTool } from "@oh-my-pi/pi-coding-agent/tools/write";
 import { unzip } from "@oh-my-pi/pi-coding-agent/utils/zip";
 import { $which, removeSyncWithRetries, Snowflake } from "@oh-my-pi/pi-utils";
+import { DEFAULT_MAX_COLUMN } from "../src/session/streaming-output";
 import { GlobTool } from "../src/tools/glob";
 import { DEFAULT_FILE_LIMIT, GrepTool, MULTI_FILE_PER_FILE_MATCHES } from "../src/tools/grep";
 import { HubTool } from "../src/tools/hub";
@@ -342,7 +343,7 @@ describe("Coding Agent Tools", () => {
 			expect(output).toContain("footer");
 			expect(output).not.toContain(wideLine); // verbatim wide line is gone
 			expect(output).toContain("…"); // ellipsis marker
-			expect(output).toContain("Some lines truncated to 768 chars");
+			expect(output).toContain("Some lines truncated to 765 of 768 bytes");
 		});
 
 		it("returns wide lines verbatim with the :raw selector", async () => {
@@ -354,7 +355,7 @@ describe("Coding Agent Tools", () => {
 			const output = getTextOutput(result);
 
 			expect(output).toContain(wideLine);
-			expect(output).not.toContain("Some lines truncated to 768 chars");
+			expect(output).not.toContain("Some lines truncated");
 		});
 
 		it("should read ipynb files as editable cell text", async () => {
@@ -1713,6 +1714,20 @@ function b() {
 
 			expect(getTextOutput(result)).toContain("Skipped missing paths");
 			expect(result.useless).toBe(true);
+		});
+
+		it("reports its own match-line cap in chars, not in the read/stream byte unit", async () => {
+			// grep caps UTF-16 code units and appends `…` on top; `read` and the
+			// streaming sink cap UTF-8 bytes and charge the marker against the cap.
+			// The notice must not describe one surface with the other's accounting.
+			fs.writeFileSync(path.join(testDir, "wide-match.txt"), `needle ${"z".repeat(2000)}\n`);
+
+			const result = await searchTool.execute("test-call-grep-column-unit", {
+				pattern: "needle",
+				path: testDir,
+			});
+
+			expect(getTextOutput(result)).toContain(`Some lines truncated to ${DEFAULT_MAX_COLUMN} chars`);
 		});
 
 		it("should accept wildcard patterns in paths", async () => {

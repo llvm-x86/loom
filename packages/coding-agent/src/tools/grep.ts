@@ -1530,7 +1530,9 @@ export class GrepTool implements AgentTool<typeof searchSchema, GrepToolDetails>
 				if (linesTruncated) details.linesTruncated = true;
 				const resultBuilder = toolResult(details)
 					.text(output)
-					.limits({ columnMax: linesTruncated ? DEFAULT_MAX_COLUMN : undefined });
+					// `truncateLine` caps UTF-16 code units and appends `…` on top —
+					// grep's own display cap, not the `tools.outputMaxColumns` byte budget.
+					.limits({ column: linesTruncated ? { max: DEFAULT_MAX_COLUMN, unit: "chars" } : undefined });
 				if (truncation.truncated) {
 					resultBuilder.truncation(truncation, { direction: "head" });
 				}
