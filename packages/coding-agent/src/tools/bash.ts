@@ -32,6 +32,7 @@ import { expandInternalUrls, type InternalUrlExpansionOptions } from "./bash-ski
 import { resolveEvalBackends } from "./eval-backends";
 import { invalidateGithubCacheForBashCommand } from "./gh-cache-invalidation";
 import {
+	formatOutputNotice,
 	formatStyledTruncationWarning,
 	type OutputMeta,
 	stripOutputNotice,
@@ -641,8 +642,28 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 		};
 	}
 
-	#extractTextResult(result: AgentToolResult<BashToolDetails>): string {
-		return result.content.find(block => block.type === "text")?.text ?? "";
+	/**
+	 * Flatten a completed bash result into the plain string the async lane
+	 * delivers (job result text, `reportProgress`, and the `ToolError` raised on
+	 * a non-zero exit).
+	 *
+	 * The notice is rendered HERE because the async lane never passes through
+	 * `wrappedExecute`: that wrapper appends `formatOutputNotice(details.meta)`
+	 * to the structured result returned by `execute()`, but a background job
+	 * resolves long after `execute()` returned a "started" result, so its text
+	 * escaped with no `Some lines truncated` line, no byte count and no
+	 * `artifact://` id — while the complete capture sat on disk unnamed. Routing
+	 * the job body back through `wrappedExecute` is not an option: that wrapper
+	 * IS `BashTool.execute`, so calling it would re-run the command.
+	 *
+	 * Only the delivered string is decorated. The structured `finalResult` is
+	 * handed to the foreground auto-background waiter, which returns it from
+	 * `execute()` and therefore still gets its notice from `wrappedExecute` —
+	 * appending here too would print it twice on that lane.
+	 */
+	#renderAsyncDeliveryText(result: AgentToolResult<BashToolDetails>): string {
+		const text = result.content.find(block => block.type === "text")?.text ?? "";
+		return text + formatOutputNotice(result.details?.meta);
 	}
 
 	#startManagedBashJob(options: {
@@ -696,7 +717,7 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 						notices: options.notices ?? [],
 						wallTimeMs,
 					});
-					const finalText = this.#extractTextResult(finalResult);
+					const finalText = this.#renderAsyncDeliveryText(finalResult);
 					latestText = finalText;
 					// Hand the detailed result to the foreground auto-background
 					// waiter (which renders it, footer included) before deciding

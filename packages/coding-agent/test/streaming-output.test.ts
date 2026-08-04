@@ -777,3 +777,76 @@ describe("OutputSink maxColumns (per-line cap)", () => {
 		expect(elided + dropped).toBeLessThan(dumped.totalBytes);
 	});
 });
+
+describe("OutputSink artifact byte-fidelity at the column-cap boundary", () => {
+	test("mirrors the raw chunk when the ellipsis outgrows the remaining budget", async () => {
+		// The cap trips on a chunk with 1 byte of budget left. `#applyColumnCap`
+		// keeps nothing and emits the 3-byte `…` anyway, so the capped chunk is
+		// LARGER than the raw chunk it replaced. A `cappedBytes < rawBytes`
+		// mirror trigger reads false there, skips the artifact write for that
+		// chunk, and lets the deferred backfill copy the ellipsis-bearing buffer
+		// into a capture advertised as the full output.
+		const dir = await createTempDir();
+		const artifactPath = path.join(dir, "boundary.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "art-boundary",
+			// Large enough that nothing spills: the artifact must open because the
+			// column cap dropped bytes, not because the tail buffer overflowed.
+			spillThreshold: 1_000_000,
+			maxColumns: 8,
+		});
+
+		const chunks = ["A".repeat(7), "BB", "C".repeat(2000), "\n"];
+		for (const chunk of chunks) sink.push(chunk);
+		const dumped = await sink.dump();
+
+		const raw = chunks.join("");
+		const artifactText = await Bun.file(artifactPath).text();
+		// Byte-identical to the raw stream: the two boundary bytes survive and
+		// no `…` was ever fabricated on disk.
+		expect(artifactText).toBe(raw);
+		expect(artifactText).not.toContain("…");
+		expect(byteLength(artifactText)).toBe(byteLength(raw));
+		// Lossless, therefore advertised.
+		expect(dumped.artifactId).toBe("art-boundary");
+		// The inline view is still capped — that is the cap doing its job.
+		expect(dumped.output).toContain("…");
+		expect(dumped.output).not.toContain("C".repeat(10));
+		expect(dumped.columnTruncatedLines).toBe(1);
+		// Both boundary bytes are accounted for as dropped, not silently lost.
+		expect(dumped.columnDroppedBytes).toBe(2002);
+	});
+
+	test("withholds artifactId when the pre-open bytes can no longer be reconstructed", async () => {
+		// Belt-and-braces for the deferred backfill. The first sink open throws
+		// (parent directory missing) while the column cap rewrites the retained
+		// buffer; a later chunk retries the open successfully. The retained
+		// buffer now holds `…` instead of the raw bytes, so replaying it would
+		// fabricate content. The sink must skip the replay AND stop naming the
+		// artifact rather than advertise a capture it cannot vouch for.
+		const dir = await createTempDir();
+		const lateDir = path.join(dir, "not-yet");
+		const artifactPath = path.join(lateDir, "late.log");
+		const sink = new OutputSink({
+			artifactPath,
+			artifactId: "art-late",
+			spillThreshold: 1_000_000,
+			maxColumns: 8,
+		});
+
+		sink.push("A".repeat(7));
+		sink.push("BB"); // trips the cap → first open attempt → ENOENT
+		expect(await Bun.file(artifactPath).exists()).toBe(false);
+
+		await fs.mkdir(lateDir, { recursive: true });
+		sink.push("C".repeat(2000)); // retry — this one opens
+		const dumped = await sink.dump();
+
+		const artifactText = await Bun.file(artifactPath).text();
+		expect(dumped.artifactId).toBeUndefined();
+		expect(artifactText).not.toContain("…");
+		expect(artifactText).not.toContain("A");
+		expect(artifactText).toBe("C".repeat(2000));
+	});
+});

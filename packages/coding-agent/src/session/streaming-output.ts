@@ -757,6 +757,17 @@ export class OutputSink {
 	#pendingFileWrites?: string[];
 	#fileReady = false;
 
+	// True once the retained head/tail windows stop reproducing the raw stream
+	// prefix verbatim — the column cap dropped bytes, or the tail window evicted.
+	// Guards the `#createFileSink` backfill: writing capped (`…`-bearing) or
+	// gapped text into a capture advertised as "full output" is a correctness
+	// lie, so the backfill is skipped and the artifact is de-advertised instead.
+	#memoryLossy = false;
+	// False once the bytes on disk can no longer be guaranteed byte-identical to
+	// the raw stream. `dump()` then withholds `artifactId`: an omitted artifact
+	// clause is correct, a lying one is not.
+	#artifactLossless = true;
+
 	readonly #artifactPath?: string;
 	readonly #artifactId?: string;
 	readonly #spillThreshold: number;
@@ -870,16 +881,35 @@ export class OutputSink {
 		// Per-line column cap. State persists across chunks so a mid-line split
 		// still respects the budget. Operates on the sanitized chunk; the cap is
 		// applied before head/tail accounting but after artifact mirroring decides.
+		//
+		// Ground truth for "this chunk lost bytes" is `#columnDroppedBytes`, never
+		// a byte-size comparison: when the cap first trips with <= 2 bytes of
+		// budget left, `#applyColumnCap` keeps nothing and emits the 3-byte `…`
+		// anyway, so the capped chunk is LARGER than the raw one and
+		// `cappedBytes < rawBytes` reads false while real bytes were dropped.
+		const droppedBefore = this.#columnDroppedBytes;
 		const capped = this.#maxColumns > 0 ? this.#applyColumnCap(chunk) : chunk;
-		const cappedBytes = capped === chunk ? rawBytes : Buffer.byteLength(capped, "utf-8");
-		const cappedThisChunk = cappedBytes < rawBytes;
+		const droppedThisChunk = this.#columnDroppedBytes > droppedBefore;
+		// No drop ⇒ `#applyColumnCap` reassembles the chunk verbatim, so its byte
+		// length is already known and re-encoding would be wasted work.
+		const cappedBytes = droppedThisChunk ? Buffer.byteLength(capped, "utf-8") : rawBytes;
 
 		// Mirror RAW chunk to the artifact file so the on-disk record is the full
 		// uncapped stream. Mirror triggers on: in-memory overflow OR this chunk's
 		// column cap dropped bytes (otherwise we'd lose data) OR file already open.
-		if (this.#artifactPath && (this.#file != null || cappedThisChunk || this.#willOverflow(cappedBytes))) {
+		// Opening on the FIRST dropping chunk is what keeps the deferred backfill
+		// honest: every earlier chunk passed the cap untouched, so `#head` +
+		// `#buffer` still hold the verbatim raw prefix when `#createFileSink`
+		// replays them. (`#willOverflow` likewise fires no later than the first
+		// `#pushTail` eviction, so the prefix is ungapped too.)
+		if (this.#artifactPath && (this.#file != null || droppedThisChunk || this.#willOverflow(cappedBytes))) {
 			this.#writeToFile(chunk);
 		}
+
+		// Past this point the retained windows may carry cap markers instead of
+		// the raw bytes, so they are no longer a faithful backfill source for a
+		// sink opened later (e.g. after a failed first open).
+		if (droppedThisChunk) this.#memoryLossy = true;
 
 		if (cappedBytes === 0) return;
 
@@ -982,8 +1012,13 @@ export class OutputSink {
 			return;
 		}
 
-		// Overflow: keep only a tail window in memory.
+		// Overflow: keep only a tail window in memory. The window now has a hole
+		// in it, so it can no longer serve as a backfill source for an artifact
+		// sink opened later. (Normally the sink is already open — `#willOverflow`
+		// fires on the same chunk, one step earlier in `push` — but a failed
+		// first open would otherwise let a gapped buffer reach the capture.)
 		this.#truncated = true;
+		this.#memoryLossy = true;
 
 		// Avoid creating a giant intermediate string when chunk alone dominates.
 		if (dataBytes >= threshold) {
@@ -1098,16 +1133,30 @@ export class OutputSink {
 			this.#file = { path: this.#artifactPath, artifactId: this.#artifactId, sink };
 			this.#fileReady = true;
 
-			// Head-retained bytes precede the rolling tail buffer in the capture.
-			// Route through #emitToSink so they count against the artifact head
-			// budget — a direct sink.write would let them escape the cap.
-			if (this.#head.length > 0) {
-				this.#emitToSink(this.#head);
-			}
+			// Backfill the bytes that streamed before the sink existed. This is
+			// only sound while the retained windows still reproduce the raw
+			// stream prefix verbatim; once the column cap has rewritten them
+			// (`…` markers, dropped line tails) or the tail window has evicted,
+			// replaying them would silently fabricate the "full output" capture.
+			// The mirror trigger in `push` opens the sink on the very first
+			// dropping/evicting chunk, so `#memoryLossy` is normally false here;
+			// it can be true only when an earlier open threw and a later chunk
+			// retried. Then we take the honest loss: skip the prefix and stop
+			// advertising the artifact.
+			if (this.#memoryLossy) {
+				this.#artifactLossless = false;
+			} else {
+				// Head-retained bytes precede the rolling tail buffer in the
+				// capture. Route through #emitToSink so they count against the
+				// artifact head budget — a direct sink.write would escape the cap.
+				if (this.#head.length > 0) {
+					this.#emitToSink(this.#head);
+				}
 
-			// Flush existing buffer to file BEFORE it gets trimmed further.
-			if (this.#buffer.length > 0) {
-				this.#emitToSink(this.#buffer);
+				// Flush existing buffer to file BEFORE it gets trimmed further.
+				if (this.#buffer.length > 0) {
+					this.#emitToSink(this.#buffer);
+				}
 			}
 
 			// Drain any chunks that arrived while the sink was being created.
@@ -1171,6 +1220,9 @@ export class OutputSink {
 		this.#columnEllipsisAdded = false;
 		this.#columnDroppedBytes = 0;
 		this.#columnTruncatedLines = 0;
+		// The replacement is authoritative from here: every counter realigns to
+		// it, so the buffer once again reproduces the stream this sink reports.
+		this.#memoryLossy = false;
 		this.#pendingChunk = "";
 		this.#pendingCarriageReturn = false;
 	}
@@ -1318,7 +1370,10 @@ export class OutputSink {
 			columnDroppedBytes: this.#columnDroppedBytes > 0 ? this.#columnDroppedBytes : undefined,
 			columnTruncatedLines: this.#columnTruncatedLines > 0 ? this.#columnTruncatedLines : undefined,
 			columnMax: this.#columnTruncatedLines > 0 ? this.#maxColumns : undefined,
-			artifactId: this.#file?.artifactId,
+			// Only name the capture when it is byte-identical to the raw stream.
+			// A partial artifact is still on disk for forensics, but advertising
+			// it as "full output" would be a lie the reader cannot detect.
+			artifactId: this.#artifactLossless ? this.#file?.artifactId : undefined,
 		};
 	}
 }
