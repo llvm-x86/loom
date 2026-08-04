@@ -137,6 +137,7 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 // embedders need project-level opt-outs for reminder/prelude prompt injection.
 const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.isolation.mode",
+	"task.isolation.byDefault",
 	"task.isolation.merge",
 	"task.isolation.commits",
 	"task.eager",

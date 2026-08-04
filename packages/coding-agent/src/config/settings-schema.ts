@@ -4127,6 +4127,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.isolation.byDefault": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Isolate Subagents by Default",
+			description:
+				'When enabled and Isolation Mode is not "none", every subagent spawn runs in its own isolated worktree — merged back on completion — unless the caller passes `isolated: false`. Leave off to keep isolation strictly opt-in per spawn.',
+		},
+	},
+
 	"task.isolation.merge": {
 		type: "enum",
 		values: ["patch", "branch"] as const,

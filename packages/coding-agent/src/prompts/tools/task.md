@@ -26,7 +26,11 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
   - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
   - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
+{{#if isolationByDefault}}
+  - `isolated`: Runs in a dedicated worktree and returns patches — **this is the DEFAULT for every item**. Your edits land in that worktree and are merged back into the repo when the item finishes; the worktree is destroyed on completion and the agent cannot be addressed afterward. Pass `isolated: false` for an item that MUST write directly to the live working tree (e.g. it drives a running dev server or edits files another live process is watching).
+{{else}}
   - `isolated`: Run in dedicated worktree, return patches. Destroyed on completion, cannot be addressed afterward.
+{{/if}}
 {{/if}}
 {{else}}
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
@@ -36,7 +40,11 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 - `outputSchema`: Invocation-specific JSON Schema. Overrides the selected agent and parent-session schemas.
 - `schemaMode`: `"permissive"` (default) accepts a retry-exhausted invalid result with a warning; `"strict"` fails it.
 {{#if isolationEnabled}}
+{{#if isolationByDefault}}
+- `isolated`: Runs in a dedicated worktree and returns patches — **this is the DEFAULT**. Your edits land in that worktree and are merged back into the repo when the spawn finishes. Pass `isolated: false` when the subagent MUST write directly to the live working tree.
+{{else}}
 - `isolated`: Run in dedicated worktree, return patches.
+{{/if}}
 {{/if}}
 {{/if}}
 

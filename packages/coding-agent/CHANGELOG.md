@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added `task.isolation.byDefault` (off by default). When it is on and `task.isolation.mode` is not `none`, every subagent spawn runs in its own isolated worktree — merged back through the existing `task.isolation.merge` path — instead of requiring each caller to pass `isolated: true`. An explicit `isolated: false` still escapes the default, an explicit `isolated: true` against mode `none` still fails preflight, and plan-mode spawns are never isolated. The task tool's description tells the model when the default is active.
+
 ### Changed
 
 - Reduced resident memory across subagent fan-outs: a finished subagent's lifecycle reviver no longer captures the run that produced it, so parking actually releases the subagent's conversation, session journal, tool registry and settings snapshot instead of only detaching them.

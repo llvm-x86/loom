@@ -282,7 +282,13 @@ export async function resolveEffectiveSubagentPolicy(
 		fallbackModelPattern: request.session.getModelString?.(),
 	});
 	const isolationMode = request.session.settings.get("task.isolation.mode");
-	const isIsolated = request.isolation?.requested === true;
+	// An explicit `isolated` from the caller always wins — including an explicit
+	// `false`, which is how a spawn escapes `task.isolation.byDefault`. Plan mode
+	// never isolates: its controls are rejected outright above, and its subagents
+	// are read-only, so a worktree would buy nothing.
+	const isIsolated =
+		request.isolation?.requested ??
+		(request.session.settings.get("task.isolation.byDefault") && !planMode && isolationMode !== "none");
 	if (isIsolated && isolationMode === "none") {
 		throw new StructuredSubagentError(
 			"preflight",
