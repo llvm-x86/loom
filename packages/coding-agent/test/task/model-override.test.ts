@@ -101,15 +101,10 @@ afterEach(() => {
 });
 
 describe("task model wire schemas", () => {
-	const variants = [
-		{ isolationEnabled: true, batchEnabled: true },
-		{ isolationEnabled: false, batchEnabled: true },
-		{ isolationEnabled: true, batchEnabled: false },
-		{ isolationEnabled: false, batchEnabled: false },
-	] as const;
+	const variants = [{ batchEnabled: true }, { batchEnabled: false }] as const;
 
 	for (const variant of variants) {
-		const label = `isolation=${variant.isolationEnabled} batch=${variant.batchEnabled}`;
+		const label = `batch=${variant.batchEnabled}`;
 		const schema = () => getTaskSchema(variant);
 
 		it(`accepts a model string and string[] (${label})`, () => {
@@ -139,7 +134,7 @@ describe("task model wire schemas", () => {
 	}
 
 	it("preserves model while stripping unknown keys", () => {
-		const parsed = getTaskSchema({ isolationEnabled: true, batchEnabled: false })({
+		const parsed = getTaskSchema({ batchEnabled: false })({
 			task: "Work.",
 			model: "@smol",
 			bogus: "gone",

@@ -20,21 +20,24 @@
  */
 import * as path from "node:path";
 import type * as natives from "@oh-my-pi/pi-natives";
+import { logger } from "@oh-my-pi/pi-utils";
 import type { ToolSession } from "../tools";
 import { generateCommitMessage } from "../utils/commit-message-generator";
 import * as git from "../utils/git";
 import type { ExecutorOptions } from "./executor";
 import { runSubprocess } from "./executor";
-import type { SingleResult } from "./types";
+import type { IgnoredChangeReport, IsolationCaptureFailure, SingleResult } from "./types";
 import {
 	applyNestedPatches,
 	captureBaseline,
 	captureDeltaPatch,
+	captureIgnoredChanges,
 	cleanupIsolation,
 	cleanupTaskBranches,
 	commitToBranch,
 	ensureIsolation,
 	getRepoRoot,
+	type IgnoredChangeScan,
 	type IsolationHandle,
 	mergeTaskBranches,
 	type NestedRepoPatch,
@@ -127,6 +130,125 @@ async function writeIsolationPatch(
 	return { patchPath, nestedPatches: delta.nestedPatches };
 }
 
+/** Status lines kept in a recovery note; enough to identify the work, not a full diff. */
+const CAPTURE_FAILURE_STATUS_LINES = 200;
+/** Per-file ceiling for copying a diverging ignored file aside. */
+const IGNORED_PRESERVE_MAX_FILE_BYTES = 16 * 1024 * 1024;
+/** Total ceiling for one run's preserved ignored files. */
+const IGNORED_PRESERVE_MAX_TOTAL_BYTES = 64 * 1024 * 1024;
+
+/**
+ * Record everything still recoverable about a run whose changes could not be
+ * captured, and hand back the structured failure.
+ *
+ * The old path threw out of {@link writeIsolationPatch} before
+ * `Bun.write(patchPath)`, and `runIsolatedSubprocess`'s `finally` then deleted
+ * the isolation worktree — a successful subagent's entire change set gone, with
+ * "merge failed" as the only trace. The worktree is kept (see
+ * {@link runIsolatedSubprocess}) and this note names it plus the real cause and
+ * the file list, so a human can finish the merge by hand.
+ */
+async function recordCaptureFailure(
+	err: unknown,
+	isolationDir: string,
+	artifactsDir: string,
+	agentId: string,
+): Promise<IsolationCaptureFailure> {
+	const reason = err instanceof Error ? err.message : String(err);
+	const notePath = path.join(artifactsDir, `${agentId}.capture-failed.txt`);
+	let status = "";
+	try {
+		status = (await git.status(isolationDir, { untrackedFiles: "all" }))
+			.split("\n")
+			.slice(0, CAPTURE_FAILURE_STATUS_LINES)
+			.join("\n");
+	} catch (statusErr) {
+		status = `(could not list changed files: ${statusErr instanceof Error ? statusErr.message : String(statusErr)})`;
+	}
+	try {
+		await Bun.write(
+			notePath,
+			[
+				`Isolated task ${agentId} finished successfully, but its changes could not be captured as a patch.`,
+				"",
+				`Cause: ${reason}`,
+				`Isolation worktree (kept for manual recovery, swept by the isolation GC once this process exits): ${isolationDir}`,
+				"",
+				"git status of the isolation worktree:",
+				status,
+				"",
+			].join("\n"),
+		);
+		return { reason, isolationDir, notePath };
+	} catch (writeErr) {
+		logger.warn("isolation capture-failure note could not be written", {
+			notePath,
+			error: writeErr instanceof Error ? writeErr.message : String(writeErr),
+		});
+		return { reason, isolationDir };
+	}
+}
+
+/**
+ * Compare the isolation copy's ignored files against the parent repo, copy the
+ * diverging ones beside the task artifacts, and return the report the parent
+ * surfaces. `undefined` means "nothing ignored diverged" — the common case, and
+ * the only case that stays silent.
+ */
+async function collectIgnoredChanges(
+	isolationDir: string,
+	repoRoot: string,
+	artifactsDir: string,
+	agentId: string,
+): Promise<IgnoredChangeReport | undefined> {
+	let scan: IgnoredChangeScan;
+	try {
+		scan = await captureIgnoredChanges(isolationDir, repoRoot);
+	} catch (err) {
+		logger.warn("ignored-file scan failed", {
+			isolationDir,
+			error: err instanceof Error ? err.message : String(err),
+		});
+		return { changes: [], unscanned: ["."], notPreserved: [] };
+	}
+	if (scan.changes.length === 0 && scan.unscanned.length === 0) return undefined;
+
+	const preservedDir = path.join(artifactsDir, `${agentId}.ignored`);
+	const notPreserved: string[] = [];
+	let preservedBytes = 0;
+	let preservedCount = 0;
+	for (const change of scan.changes) {
+		if (change.status === "removed") continue;
+		if (
+			change.bytes > IGNORED_PRESERVE_MAX_FILE_BYTES ||
+			preservedBytes + change.bytes > IGNORED_PRESERVE_MAX_TOTAL_BYTES
+		) {
+			notPreserved.push(change.relativePath);
+			continue;
+		}
+		try {
+			await Bun.write(
+				path.join(preservedDir, change.relativePath),
+				Bun.file(path.join(isolationDir, change.relativePath)),
+			);
+			preservedBytes += change.bytes;
+			preservedCount += 1;
+		} catch (err) {
+			logger.warn("diverging ignored file could not be preserved", {
+				relativePath: change.relativePath,
+				error: err instanceof Error ? err.message : String(err),
+			});
+			notPreserved.push(change.relativePath);
+		}
+	}
+	return {
+		changes: scan.changes,
+		unscanned: scan.unscanned,
+		notPreserved,
+		...(preservedCount > 0 ? { preservedDir } : {}),
+	};
+}
+
 /**
  * Run a subagent inside an isolation worktree and capture its changes.
  *
@@ -142,10 +264,14 @@ async function writeIsolationPatch(
  * the caller can still surface the subagent's output; only isolation setup
  * itself routes through {@link IsolatedRunOptions.buildFailureResult}.
  *
- * The isolation handle is always torn down in `finally`.
+ * The isolation handle is torn down in `finally` — EXCEPT when a successful run
+ * could not be captured at all. That worktree holds the only copy of the work,
+ * so it is kept and named in {@link SingleResult.captureFailure}; deleting it
+ * was the difference between a recoverable failure and silent total loss.
  */
 export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<SingleResult> {
 	let handle: IsolationHandle | undefined;
+	let keepIsolationDir = false;
 	try {
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
@@ -156,7 +282,20 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			preloadedExtensionPaths: undefined,
 			preloadedCustomToolPaths: undefined,
 		});
-		if (opts.mergeMode === "branch" && result.exitCode === 0) {
+		if (result.exitCode !== 0) return result;
+
+		// Ignored paths are outside git's view entirely, so this is the only
+		// place their divergence can still be observed — before teardown, and
+		// regardless of which merge mode captured the tracked side.
+		const ignoredChanges = await collectIgnoredChanges(
+			isolationDir,
+			opts.context.repoRoot,
+			opts.artifactsDir,
+			opts.agentId,
+		);
+		const ignored = ignoredChanges ? { ignoredChanges } : {};
+
+		if (opts.mergeMode === "branch") {
 			try {
 				const commitResult = await commitToBranch(
 					isolationDir,
@@ -167,6 +306,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 				);
 				return {
 					...result,
+					...ignored,
 					branchName: commitResult?.branchName,
 					branchBaseSha: commitResult?.baseSha,
 					nestedPatches: commitResult?.nestedPatches,
@@ -185,34 +325,40 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 					);
 					return {
 						...result,
+						...ignored,
 						patchPath: patchResult.patchPath,
 						nestedPatches: patchResult.nestedPatches,
 						error: `Merge failed: ${msg}`,
 					};
 				} catch (patchErr) {
-					const patchMsg = patchErr instanceof Error ? patchErr.message : String(patchErr);
-					return { ...result, error: `Merge failed: ${msg}; patch capture failed: ${patchMsg}` };
+					keepIsolationDir = true;
+					const failure = await recordCaptureFailure(patchErr, isolationDir, opts.artifactsDir, opts.agentId);
+					return {
+						...result,
+						...ignored,
+						captureFailure: failure,
+						error: `Merge failed: ${msg}; patch capture failed: ${failure.reason}`,
+					};
 				}
 			}
 		}
-		if (result.exitCode === 0) {
-			try {
-				const patchResult = await writeIsolationPatch(isolationDir, taskBaseline, opts.artifactsDir, opts.agentId);
-				return {
-					...result,
-					patchPath: patchResult.patchPath,
-					nestedPatches: patchResult.nestedPatches,
-				};
-			} catch (patchErr) {
-				const msg = patchErr instanceof Error ? patchErr.message : String(patchErr);
-				return { ...result, error: `Patch capture failed: ${msg}` };
-			}
+		try {
+			const patchResult = await writeIsolationPatch(isolationDir, taskBaseline, opts.artifactsDir, opts.agentId);
+			return {
+				...result,
+				...ignored,
+				patchPath: patchResult.patchPath,
+				nestedPatches: patchResult.nestedPatches,
+			};
+		} catch (patchErr) {
+			keepIsolationDir = true;
+			const failure = await recordCaptureFailure(patchErr, isolationDir, opts.artifactsDir, opts.agentId);
+			return { ...result, ...ignored, captureFailure: failure, error: `Patch capture failed: ${failure.reason}` };
 		}
-		return result;
 	} catch (err) {
 		return opts.buildFailureResult(err);
 	} finally {
-		if (handle) {
+		if (handle && !keepIsolationDir) {
 			await cleanupIsolation(handle);
 		}
 	}
@@ -239,15 +385,54 @@ export interface IsolationMergeOutcome {
 	mergedBranchForNestedPatches: boolean;
 }
 
+/** Diverging ignored paths listed by name in the summary before it switches to a count. */
+const IGNORED_SUMMARY_MAX_NAMES = 20;
+
 /**
- * Apply changes captured by {@link runIsolatedSubprocess} back to the parent
- * repo: patch apply (patch mode) or cherry-pick + cleanup (branch mode).
- *
- * The caller decides whether to run this at all — eval `agent()` with
- * `apply=False` skips this step and surfaces the patch artifact / branch name
- * instead.
+ * Render the ignored-divergence report as a notification, or `""` when there is
+ * nothing to say. Named paths are the whole point — "some files were not
+ * merged" is the defect, not the fix.
  */
-export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise<IsolationMergeOutcome> {
+function formatIgnoredChanges(report: IgnoredChangeReport | undefined): string {
+	if (!report) return "";
+	const lines: string[] = [];
+	if (report.changes.length > 0) {
+		lines.push(
+			"Gitignored paths changed inside the isolation worktree and were NOT merged (the capture path is git-only):",
+		);
+		for (const change of report.changes.slice(0, IGNORED_SUMMARY_MAX_NAMES)) {
+			lines.push(`- ${change.relativePath} (${change.status})`);
+		}
+		if (report.changes.length > IGNORED_SUMMARY_MAX_NAMES) {
+			lines.push(`- …and ${report.changes.length - IGNORED_SUMMARY_MAX_NAMES} more`);
+		}
+	}
+	if (report.preservedDir) lines.push(`Copies preserved in: ${report.preservedDir}`);
+	if (report.notPreserved.length > 0) lines.push(`Not copied aside: ${report.notPreserved.join(", ")}`);
+	if (report.unscanned.length > 0) {
+		lines.push(`Ignored-path comparison was incomplete under: ${report.unscanned.join(", ")}`);
+	}
+	if (lines.length === 0) return "";
+	return `\n\n<system-notification>${lines.join("\n")}</system-notification>`;
+}
+
+/**
+ * Report a run whose work could not be captured: the real cause, the retained
+ * worktree, and the recovery note. Pre-fix the parent saw "Merge failed" with no
+ * reason and no surviving artifact.
+ */
+function formatCaptureFailure(failure: IsolationCaptureFailure): string {
+	const note = failure.notePath ? `\nRecovery note: ${failure.notePath}` : "";
+	return `\n\n<system-notification>The subagent succeeded but its changes could not be captured: ${failure.reason}\nNothing was applied to the repo. The isolation worktree was KEPT so the work can be recovered by hand: ${failure.isolationDir}${note}</system-notification>`;
+}
+
+/**
+ * Apply the tracked changes captured by {@link runIsolatedSubprocess}: patch
+ * apply (patch mode) or cherry-pick + cleanup (branch mode). Ignored-path
+ * divergence and capture failures are handled by {@link mergeIsolatedChanges}
+ * around it, since neither has anything to apply.
+ */
+async function applyIsolationMerge(opts: IsolationMergeOptions): Promise<IsolationMergeOutcome> {
 	const { result, repoRoot, mergeMode } = opts;
 	try {
 		if (mergeMode === "branch") {
@@ -368,6 +553,31 @@ export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise
 			mergedBranchForNestedPatches: false,
 		};
 	}
+}
+
+/**
+ * Apply changes captured by {@link runIsolatedSubprocess} back to the parent
+ * repo, then report what deliberately did not come back with them.
+ *
+ * The caller decides whether to run this at all — eval `agent()` with
+ * `apply=False` skips this step and surfaces the patch artifact / branch name
+ * instead.
+ */
+export async function mergeIsolatedChanges(opts: IsolationMergeOptions): Promise<IsolationMergeOutcome> {
+	const ignoredSummary = formatIgnoredChanges(opts.result.ignoredChanges);
+	// A run whose changes never became a patch has nothing to apply and must not
+	// be reported as "no changes"; the retained worktree is the recovery path.
+	if (opts.result.captureFailure) {
+		return {
+			summary: `${formatCaptureFailure(opts.result.captureFailure)}${ignoredSummary}`,
+			changesApplied: false,
+			hadAnyChanges: false,
+			mergedBranchForNestedPatches: false,
+		};
+	}
+	const outcome = await applyIsolationMerge(opts);
+	if (!ignoredSummary) return outcome;
+	return { ...outcome, summary: `${outcome.summary}${ignoredSummary}` };
 }
 
 export interface NestedPatchApplyOptions {

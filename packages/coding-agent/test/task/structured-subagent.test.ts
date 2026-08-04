@@ -223,7 +223,7 @@ describe("structured subagent primitive", () => {
 		});
 
 		it("keeps accepting an explicit isolated=false through the task tool schema", () => {
-			const schema = getTaskSchema({ isolationEnabled: true, batchEnabled: false, defaultAgent: "task" });
+			const schema = getTaskSchema({ batchEnabled: false, defaultAgent: "task" });
 			expect(schema({ task: "check", isolated: false })).toEqual({
 				agent: "task",
 				task: "check",

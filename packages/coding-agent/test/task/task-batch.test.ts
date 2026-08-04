@@ -137,7 +137,7 @@ describe("task.batch schema gating", () => {
 		expect(items?.properties?.isolated).toBeDefined();
 	});
 
-	it("hides isolation from the dynamic batch schema in plan mode", async () => {
+	it("stops advertising isolation in plan mode but still accepts the key for preflight to reject", async () => {
 		mockDiscovery();
 		const tool = await TaskTool.create(
 			createSession({
@@ -147,7 +147,11 @@ describe("task.batch schema gating", () => {
 		);
 		const properties = getSchemaProperties(tool);
 		const items = (properties.tasks as { items?: { properties?: Record<string, unknown> } }).items;
-		expect(items?.properties?.isolated).toBeUndefined();
+		// The key survives validation on purpose: arktype used to delete it, which
+		// turned `isolated: true` into a silent no-op here while the eval bridge
+		// threw. Preflight owns the rejection now — see
+		// isolation-merge-integrity.test.ts for the cross-surface proof.
+		expect(items?.properties?.isolated).toBeDefined();
 		expect(tool.description).not.toContain("`isolated`");
 	});
 
