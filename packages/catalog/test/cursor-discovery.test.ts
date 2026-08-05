@@ -10,6 +10,7 @@ import { create, toBinary } from "@bufbuild/protobuf";
 import { fetchCursorUsableModels } from "../src/discovery/cursor";
 import { GetUsableModelsResponseSchema, ModelDetailsSchema } from "../src/discovery/cursor-gen/agent_pb";
 import { resolveProviderModels } from "../src/model-manager";
+import { getBundledModel } from "../src/models";
 import { cursorModelManagerOptions } from "../src/provider-models/special";
 import type { ModelSpec } from "../src/types";
 
@@ -233,5 +234,15 @@ describe("fetchCursorUsableModels", () => {
 				cursorMaxMode: true,
 			}),
 		]);
+	});
+});
+
+describe("bundled cursor/auto model (rate-limit fallback)", () => {
+	it("exposes the literal `auto` wire id cursor-agent uses to keep Composer usable after a rate limit", () => {
+		const model = getBundledModel<"cursor-agent">("cursor", "auto");
+		expect(model.id).toBe("auto");
+		expect(model.provider).toBe("cursor");
+		expect(model.api).toBe("cursor-agent");
+		expect(model.reasoning).toBe(false);
 	});
 });

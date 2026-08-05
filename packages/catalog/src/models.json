@@ -15425,6 +15425,25 @@
 		}
 	},
 	"cursor": {
+		"auto": {
+			"id": "auto",
+			"name": "Composer Auto",
+			"api": "cursor-agent",
+			"provider": "cursor",
+			"baseUrl": "https://api2.cursor.sh",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 200000,
+			"maxTokens": 64000
+		},
 		"claude-4.5-opus-high": {
 			"id": "claude-4.5-opus-high",
 			"name": "Claude 4.5 Opus",
