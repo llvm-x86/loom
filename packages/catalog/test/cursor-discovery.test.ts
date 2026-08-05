@@ -237,12 +237,12 @@ describe("fetchCursorUsableModels", () => {
 	});
 });
 
-describe("bundled cursor/auto model (rate-limit fallback)", () => {
-	it("exposes the literal `auto` wire id cursor-agent uses to keep Composer usable after a rate limit", () => {
-		const model = getBundledModel<"cursor-agent">("cursor", "auto");
-		expect(model.id).toBe("auto");
+describe("bundled cursor/default model (server-verified rate-limit fallback router)", () => {
+	it("exposes the `default` wire id cursor-agent's live catalog names Auto — the literal `auto` id does not exist server-side (confirmed not_found on stream) and must never be bundled", () => {
+		const model = getBundledModel<"cursor-agent">("cursor", "default");
+		expect(model.id).toBe("default");
+		expect(model.name).toBe("Auto");
 		expect(model.provider).toBe("cursor");
 		expect(model.api).toBe("cursor-agent");
-		expect(model.reasoning).toBe(false);
 	});
 });
