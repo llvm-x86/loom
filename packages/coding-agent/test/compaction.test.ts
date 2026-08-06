@@ -11,6 +11,7 @@ import {
 	findCutPoint,
 	getLastAssistantUsage,
 	prepareCompaction,
+	resolveCompactionThresholdMode,
 	resolveThresholdTokens,
 	shouldCompact,
 } from "@oh-my-pi/pi-agent-core/compaction/compaction";
@@ -329,6 +330,58 @@ describe("shouldCompact", () => {
 		};
 
 		expect(shouldCompact(95000, 100000, settings)).toBe(false);
+	});
+});
+
+
+describe("resolveCompactionThresholdMode", () => {
+	it("infers tokens mode from a positive token threshold in auto mode", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdMode: "auto",
+			thresholdTokens: 50_000,
+			thresholdPercent: 90,
+			keepRecentTokens: 20_000,
+		};
+		expect(resolveCompactionThresholdMode(settings)).toBe("tokens");
+		expect(resolveThresholdTokens(200_000, settings)).toBe(50_000);
+	});
+
+	it("honors explicit percent mode even when a token threshold is configured", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdMode: "percent",
+			thresholdTokens: 50_000,
+			thresholdPercent: 80,
+			keepRecentTokens: 20_000,
+		};
+		expect(resolveCompactionThresholdMode(settings)).toBe("percent");
+		expect(resolveThresholdTokens(200_000, settings)).toBe(160_000);
+	});
+
+	it("honors explicit tokens mode even when a percent threshold is configured", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdMode: "tokens",
+			thresholdTokens: 75_000,
+			thresholdPercent: 80,
+			keepRecentTokens: 20_000,
+		};
+		expect(resolveCompactionThresholdMode(settings)).toBe("tokens");
+		expect(resolveThresholdTokens(200_000, settings)).toBe(75_000);
+	});
+
+	it("uses reserve-based threshold in explicit reserve mode", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdMode: "reserve",
+			thresholdTokens: 50_000,
+			thresholdPercent: 80,
+			reserveTokens: 20_000,
+			keepRecentTokens: 20_000,
+		};
+		expect(resolveCompactionThresholdMode(settings)).toBe("reserve");
+		expect(resolveThresholdTokens(100_000, settings)).toBe(80_000);
 	});
 });
 

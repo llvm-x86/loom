@@ -159,9 +159,12 @@ export interface CompactionResult<T = unknown> {
 // Types
 // ============================================================================
 
+export type CompactionThresholdMode = "auto" | "reserve" | "percent" | "tokens";
+
 export interface CompactionSettings {
 	enabled: boolean;
 	strategy?: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	thresholdMode?: CompactionThresholdMode;
 	thresholdPercent?: number;
 	thresholdTokens?: number;
 	midTurnEnabled?: boolean;
@@ -316,30 +319,53 @@ export function compactionContextTokens(providerContextTokens: number, storedCon
 	return Math.max(Math.max(0, providerContextTokens), Math.max(0, storedConversationEstimate));
 }
 
-export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
-	// Fixed token limit takes priority over percentage
-	const thresholdTokens = settings.thresholdTokens;
-	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
-		// Clamp to [1, contextWindow - 1] so there's always room
-		return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+export function resolveCompactionThresholdMode(settings: CompactionSettings): CompactionThresholdMode {
+	const explicit = settings.thresholdMode;
+	if (explicit === "reserve" || explicit === "percent" || explicit === "tokens") {
+		return explicit;
 	}
 
-	// Percentage-based threshold. The default absolute reserve can exceed bundled
-	// small-context windows, or nearly consume a 16k-class window; in those
-	// known-impossible default configurations, fall back to the proportional
-	// reserve so threshold/recovery-band checks stay usable. Explicit valid
-	// configured reserves still define the usable prompt budget. Cap at
-	// contextWindow - 1 (matching the fixed-token clamp above) so the threshold
-	// never reaches the whole window even when the reserve resolves to 0.
-	const thresholdPercent = settings.thresholdPercent;
-	if (typeof thresholdPercent !== "number" || !Number.isFinite(thresholdPercent) || thresholdPercent <= 0) {
-		return Math.max(
-			0,
-			Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)),
-		);
+	const thresholdTokens = settings.thresholdTokens;
+	if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
+		return "tokens";
 	}
-	const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
-	return Math.floor(contextWindow * (clampedThresholdPercent / 100));
+
+	const thresholdPercent = settings.thresholdPercent;
+	if (typeof thresholdPercent === "number" && Number.isFinite(thresholdPercent) && thresholdPercent > 0) {
+		return "percent";
+	}
+
+	return "reserve";
+}
+
+function resolveReserveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
+	return Math.max(
+		0,
+		Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)),
+	);
+}
+
+export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
+	const mode = resolveCompactionThresholdMode(settings);
+
+	if (mode === "tokens") {
+		const thresholdTokens = settings.thresholdTokens;
+		if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
+			return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
+		}
+		return resolveReserveThresholdTokens(contextWindow, settings);
+	}
+
+	if (mode === "percent") {
+		const thresholdPercent = settings.thresholdPercent;
+		if (typeof thresholdPercent === "number" && Number.isFinite(thresholdPercent) && thresholdPercent > 0) {
+			const clampedThresholdPercent = Math.min(99, Math.max(1, thresholdPercent));
+			return Math.floor(contextWindow * (clampedThresholdPercent / 100));
+		}
+		return resolveReserveThresholdTokens(contextWindow, settings);
+	}
+
+	return resolveReserveThresholdTokens(contextWindow, settings);
 }
 
 // ============================================================================

@@ -83,6 +83,14 @@ export type SettingDef =
 // Condition Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
+function compactionThresholdMode(): "auto" | "reserve" | "percent" | "tokens" {
+	try {
+		return Settings.instance.get("compaction.thresholdMode") as "auto" | "reserve" | "percent" | "tokens";
+	} catch {
+		return "auto";
+	}
+}
+
 const CONDITIONS: Record<string, () => boolean> = {
 	hasImageProtocol: () => !!TERMINAL.imageProtocol,
 	advisorEnabled: () => {
@@ -119,6 +127,14 @@ const CONDITIONS: Record<string, () => boolean> = {
 		} catch {
 			return false;
 		}
+	},
+	compactionThresholdPercentVisible: () => {
+		const mode = compactionThresholdMode();
+		return mode === "percent" || mode === "auto";
+	},
+	compactionThresholdTokensVisible: () => {
+		const mode = compactionThresholdMode();
+		return mode === "tokens" || mode === "auto";
 	},
 	planModeEnabled: () => {
 		try {

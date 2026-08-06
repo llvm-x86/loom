@@ -1999,6 +1999,40 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.thresholdMode": {
+		type: "enum",
+		values: ["auto", "reserve", "percent", "tokens"] as const,
+		default: "auto",
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Compaction Threshold Mode",
+			description: "How auto-compact decides when context is full",
+			options: [
+				{
+					value: "auto",
+					label: "Auto",
+					description: "Use token limit when set, else percent when set, else reserve-based default",
+				},
+				{
+					value: "reserve",
+					label: "Reserve-based",
+					description: "Legacy default: context window minus reserve tokens",
+				},
+				{
+					value: "percent",
+					label: "Percentage",
+					description: "Compact when context exceeds a percentage of the model window",
+				},
+				{
+					value: "tokens",
+					label: "Fixed tokens",
+					description: "Compact when context exceeds an absolute token count",
+				},
+			],
+		},
+	},
+
 	"compaction.strategy": {
 		type: "enum",
 		values: ["context-full", "handoff", "shake", "snapcompact", "off"] as const,
@@ -2041,8 +2075,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "context",
 			group: "Compaction",
-			label: "Compaction Threshold",
-			description: "Percent threshold for context maintenance; set to Default to use legacy reserve-based behavior",
+			label: "Compaction Threshold (%)",
+			condition: "compactionThresholdPercentVisible",
+			description: "Percent of the model context window that triggers auto-compact",
 			options: [
 				{ value: "default", label: "Default", description: "Legacy reserve-based threshold" },
 				{ value: "10", label: "10%", description: "Extremely early maintenance" },
@@ -2066,8 +2101,9 @@ export const SETTINGS_SCHEMA = {
 		ui: {
 			tab: "context",
 			group: "Compaction",
-			label: "Compaction Token Limit",
-			description: "Fixed token limit for context maintenance; overrides percentage if set",
+			label: "Compaction Threshold (tokens)",
+			condition: "compactionThresholdTokensVisible",
+			description: "Absolute token count that triggers auto-compact",
 			options: [
 				{ value: "default", label: "Default", description: "Use percentage-based threshold" },
 				{ value: "25000", label: "25K tokens", description: "Quarter of a 200K window" },
@@ -2077,6 +2113,7 @@ export const SETTINGS_SCHEMA = {
 				{ value: "200000", label: "200K tokens", description: "Full standard context window" },
 				{ value: "300000", label: "300K tokens", description: "Large context window" },
 				{ value: "500000", label: "500K tokens", description: "Very large context window" },
+				{ value: "__custom__", label: "Custom...", description: "Enter an exact token count" },
 			],
 		},
 	},
@@ -5281,6 +5318,7 @@ export type Personality = SettingValue<"personality">;
 export interface CompactionSettings {
 	enabled: boolean;
 	strategy: "context-full" | "handoff" | "shake" | "snapcompact" | "off";
+	thresholdMode: "auto" | "reserve" | "percent" | "tokens";
 	thresholdPercent: number;
 	thresholdTokens: number;
 	reserveTokens: number | undefined;

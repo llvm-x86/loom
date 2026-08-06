@@ -50,6 +50,8 @@ import { getSettingDef, getSettingsForTab, type SettingDef } from "./settings-de
 import { SnapcompactShapePreview } from "./snapcompact-shape-preview";
 import { getPreset } from "./status-line/presets";
 
+const COMPACTION_THRESHOLD_TOKENS_CUSTOM = "__custom__";
+
 /**
  * A submenu component for selecting from a list of options.
  */
@@ -409,6 +411,74 @@ export interface SettingsCallbacks {
  * Main tabbed settings selector component.
  * Uses declarative settings definitions from settings-defs.ts.
  */
+
+class CompactionThresholdTokensSubmenu extends Container {
+	constructor(
+		private readonly def: SettingDef & { type: "submenu" },
+		private readonly currentValue: string,
+		private readonly onDone: (value?: string) => void,
+		private readonly onPersist: (path: SettingPath, value: string) => void,
+	) {
+		super();
+		this.#showSelect();
+	}
+
+	#showSelect(): void {
+		this.clear();
+		const options = [...this.def.options];
+		this.addChild(
+			new SelectSubmenu(
+				this.def.label,
+				this.def.description,
+				options,
+				this.currentValue,
+				value => {
+					if (value === COMPACTION_THRESHOLD_TOKENS_CUSTOM) {
+						this.#showCustomInput();
+						return;
+					}
+					this.onPersist(this.def.path, value);
+					this.onDone(value);
+				},
+				() => this.onDone(),
+			),
+		);
+	}
+
+	#showCustomInput(): void {
+		this.clear();
+		const raw = settings.get("compaction.thresholdTokens");
+		const current = typeof raw === "number" && raw > 0 ? String(raw) : "";
+		this.addChild(
+			new TextInputSubmenu(
+				this.def.label,
+				this.def.description,
+				current,
+				value => {
+					const trimmed = value.trim();
+					if (!trimmed) {
+						throw new Error("Enter a positive token count");
+					}
+					const parsed = Number(trimmed);
+					if (!Number.isFinite(parsed) || parsed <= 0) {
+						throw new Error("Token count must be a positive number");
+					}
+					this.onPersist(this.def.path, String(Math.floor(parsed)));
+					this.onDone(String(Math.floor(parsed)));
+				},
+				() => this.#showSelect(),
+			),
+		);
+	}
+
+	handleInput(data: string): void {
+		const child = this.children[0];
+		if (child && "handleInput" in child && typeof child.handleInput === "function") {
+			child.handleInput(data);
+		}
+	}
+}
+
 export class SettingsSelectorComponent implements Component {
 	#tabBar: TabBar;
 	#currentList: SettingsList | null = null;
@@ -828,7 +898,10 @@ export class SettingsSelectorComponent implements Component {
 					label: def.label,
 					description: def.description,
 					currentValue: this.#getSubmenuCurrentValue(def.path, currentValue),
-					submenu: (cv, done) => this.#createSubmenu(def, cv, done),
+					submenu: (cv, done) =>
+						def.path === "compaction.thresholdTokens"
+							? this.#createCompactionThresholdTokensSubmenu(def, cv, done)
+							: this.#createSubmenu(def, cv, done),
 					changed,
 				};
 
@@ -870,8 +943,14 @@ export class SettingsSelectorComponent implements Component {
 		if (path === "compaction.thresholdPercent" && (rawValue === "-1" || rawValue === "")) {
 			return "default";
 		}
-		if (path === "compaction.thresholdTokens" && (rawValue === "-1" || rawValue === "")) {
-			return "default";
+		if (path === "compaction.thresholdTokens") {
+			if (rawValue === "-1" || rawValue === "") {
+				return "default";
+			}
+			const def = getSettingDef(path);
+			if (def?.type === "submenu" && !def.options.some(option => option.value === rawValue)) {
+				return rawValue;
+			}
 		}
 		return rawValue;
 	}
@@ -879,6 +958,37 @@ export class SettingsSelectorComponent implements Component {
 	/**
 	 * Create a submenu for a submenu-type setting.
 	 */
+
+	#createCompactionThresholdTokensSubmenu(
+		def: SettingDef & { type: "submenu" },
+		currentValue: string,
+		done: (value?: string) => void,
+	): Container {
+		return new CompactionThresholdTokensSubmenu(def, currentValue, done, (path, value) => {
+			this.#setSettingValue(path, value);
+			settings.set("compaction.thresholdMode", "tokens" as never);
+			this.callbacks.onChange(path, settings.get(path));
+			this.callbacks.onChange("compaction.thresholdMode", "tokens");
+		});
+	}
+
+	#applyCompactionThresholdModeSideEffects(mode: string): void {
+		if (mode === "tokens") {
+			settings.set("compaction.thresholdPercent", -1 as never);
+			if (settings.get("compaction.thresholdTokens") <= 0) {
+				settings.set("compaction.thresholdTokens", 100_000 as never);
+			}
+		} else if (mode === "percent") {
+			settings.set("compaction.thresholdTokens", -1 as never);
+			if (settings.get("compaction.thresholdPercent") <= 0) {
+				settings.set("compaction.thresholdPercent", 80 as never);
+			}
+		} else if (mode === "reserve") {
+			settings.set("compaction.thresholdPercent", -1 as never);
+			settings.set("compaction.thresholdTokens", -1 as never);
+		}
+	}
+
 	#createSubmenu(
 		def: SettingDef & { type: "submenu" },
 		currentValue: string,
@@ -1041,6 +1151,8 @@ export class SettingsSelectorComponent implements Component {
 		const schemaType = getType(path);
 		if (path === "compaction.thresholdPercent" && value === "default") {
 			settings.set(path, -1 as never);
+		} else if (path === "compaction.thresholdTokens" && value === COMPACTION_THRESHOLD_TOKENS_CUSTOM) {
+			return;
 		} else if (path === "compaction.thresholdTokens" && value === "default") {
 			settings.set(path, -1 as never);
 		} else if (schemaType === "record") {
@@ -1099,6 +1211,9 @@ export class SettingsSelectorComponent implements Component {
 					}
 				} else if (def.type === "enum") {
 					settings.set(path, newValue as never);
+					if (path === "compaction.thresholdMode") {
+						this.#applyCompactionThresholdModeSideEffects(newValue);
+					}
 					this.callbacks.onChange(path, newValue);
 				}
 				// Submenu/text types already persisted the value inside their own
