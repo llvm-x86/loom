@@ -340,8 +340,8 @@ describe("formatUsageBreakdown", () => {
 				metadata: { email: "cursor@example.test" },
 				limits: [
 					{
-						id: "cursor:requests:gpt-4",
-						label: "gpt-4 requests",
+						id: "cursor:models:included",
+						label: "Cursor Models",
 						scope: { provider: "cursor", windowId: "monthly" },
 						window: {
 							id: "monthly",
@@ -364,7 +364,7 @@ describe("formatUsageBreakdown", () => {
 
 		const text = stripVTControlCharacters(formatUsageBreakdown(reports, [], now));
 		expect(text).toContain("Cursor");
-		expect(text).toContain("gpt-4 requests");
+		expect(text).toContain("Cursor Models");
 		expect(text).toContain("150 / 500 requests");
 		expect(text).toContain("30.0% used");
 		expect(text).toContain("resets in 31d");

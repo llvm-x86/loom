@@ -31,14 +31,24 @@ function buildCursorAmount(
 	used: number | undefined,
 	limit: number | undefined,
 	unit: UsageAmount["unit"],
+	options?: {
+		usedFraction?: number;
+		remainingFraction?: number;
+	},
 ): UsageAmount {
 	const safeLimit = limit !== undefined && Number.isFinite(limit) ? limit : undefined;
 	const safeUsed = used !== undefined && Number.isFinite(used) ? used : undefined;
 	const remaining = safeLimit !== undefined && safeUsed !== undefined ? Math.max(0, safeLimit - safeUsed) : undefined;
 	const usedFraction =
-		safeLimit !== undefined && safeUsed !== undefined && safeLimit > 0 ? safeUsed / safeLimit : undefined;
+		options?.usedFraction ??
+		(safeLimit !== undefined && safeUsed !== undefined && safeLimit > 0 ? safeUsed / safeLimit : undefined);
 	const remainingFraction =
-		safeLimit !== undefined && remaining !== undefined && safeLimit > 0 ? remaining / safeLimit : undefined;
+		options?.remainingFraction ??
+		(usedFraction !== undefined
+			? Math.max(0, 1 - usedFraction)
+			: safeLimit !== undefined && remaining !== undefined && safeLimit > 0
+				? remaining / safeLimit
+				: undefined);
 	return {
 		used: safeUsed,
 		limit: safeLimit,
@@ -143,6 +153,102 @@ export function parseCursorUsage(payload: unknown, fetchedAt = Date.now()): Usag
 	};
 }
 
+/** Parses the dashboard-style aggregate quota from `/auth/usage-summary`. */
+export function parseCursorUsageSummary(payload: unknown, fetchedAt = Date.now()): UsageReport | null {
+	if (!isRecord(payload)) return null;
+	const individualUsage = payload.individualUsage;
+	if (!isRecord(individualUsage)) return null;
+	const plan = individualUsage.plan;
+	if (!isRecord(plan) || plan.enabled !== true) return null;
+
+	const breakdown = isRecord(plan.breakdown) ? plan.breakdown : undefined;
+	const used = toNumber(plan.used);
+	const limit = toNumber(breakdown?.total) ?? toNumber(plan.limit);
+	const totalPercentUsed = toNumber(plan.totalPercentUsed);
+	const usedFraction = totalPercentUsed !== undefined ? totalPercentUsed / 100 : undefined;
+	if (used === undefined && usedFraction === undefined) return null;
+
+	const resetsAt = parseTimestamp(payload.billingCycleEnd) ?? deriveResetsAt(payload);
+	const window: UsageWindow = {
+		id: "billing",
+		label: "Billing cycle",
+		...(resetsAt !== undefined ? { resetsAt } : {}),
+	};
+	const amount = buildCursorAmount(used, limit, "requests", { usedFraction });
+	const notes: string[] = [];
+	const autoMessage = payload.autoModelSelectedDisplayMessage;
+	if (typeof autoMessage === "string" && autoMessage.trim()) {
+		notes.push(autoMessage.trim());
+	}
+	const namedMessage = payload.namedModelSelectedDisplayMessage;
+	if (typeof namedMessage === "string" && namedMessage.trim()) {
+		notes.push(namedMessage.trim());
+	}
+
+	const limits: UsageLimit[] = [
+		{
+			id: "cursor:models:included",
+			label: "Cursor Models",
+			scope: {
+				provider: "cursor",
+				windowId: window.id,
+			},
+			window,
+			amount,
+			status: deriveCursorStatus(amount),
+			...(notes.length > 0 ? { notes } : {}),
+		},
+	];
+
+	const onDemand = individualUsage.onDemand;
+	if (isRecord(onDemand) && onDemand.enabled === true) {
+		const onDemandUsed = toNumber(onDemand.used);
+		const onDemandLimit = toNumber(onDemand.limit);
+		if (onDemandUsed !== undefined || onDemandLimit !== undefined) {
+			const onDemandAmount = buildCursorAmount(onDemandUsed, onDemandLimit, "usd");
+			limits.push({
+				id: "cursor:usd:on-demand",
+				label: "On-demand spend",
+				scope: {
+					provider: "cursor",
+					windowId: window.id,
+				},
+				window,
+				amount: onDemandAmount,
+				status: deriveCursorStatus(onDemandAmount),
+			});
+		}
+	}
+
+	const metadata: UsageReport["metadata"] = {};
+	if (typeof payload.membershipType === "string" && payload.membershipType) {
+		metadata.planType = payload.membershipType;
+	}
+
+	return {
+		provider: "cursor",
+		fetchedAt,
+		limits,
+		...(Object.keys(metadata).length > 0 ? { metadata } : {}),
+		raw: payload,
+	};
+}
+
+function attachCursorUsageMetadata(
+	report: UsageReport,
+	credential: UsageFetchParams["credential"],
+): void {
+	const metadata = {
+		...(credential.email ? { email: credential.email } : {}),
+		...(credential.accountId ? { accountId: credential.accountId } : {}),
+		...(credential.projectId ? { projectId: credential.projectId } : {}),
+		...(report.metadata ?? {}),
+	};
+	if (Object.keys(metadata).length > 0) {
+		report.metadata = metadata;
+	}
+}
+
 export const cursorUsageProvider: UsageProvider = {
 	id: "cursor",
 	supports(params: UsageFetchParams): boolean {
@@ -163,7 +269,8 @@ export const cursorUsageProvider: UsageProvider = {
 		if (!token) return null;
 
 		const baseUrl = normalizeCursorBaseUrl(params.baseUrl ?? credential.apiEndpoint);
-		const url = `${baseUrl}/auth/usage`;
+		const summaryUrl = `${baseUrl}/auth/usage-summary`;
+		const usageUrl = `${baseUrl}/auth/usage`;
 
 		const headers: Record<string, string> = {
 			Accept: "application/json",
@@ -171,26 +278,39 @@ export const cursorUsageProvider: UsageProvider = {
 		};
 
 		try {
-			const response = await ctx.fetch(url, {
+			const summaryResponse = await ctx.fetch(summaryUrl, {
+				headers,
+				signal: params.signal,
+			});
+			if (summaryResponse.ok) {
+				const summaryPayload = await summaryResponse.json();
+				const summaryReport = parseCursorUsageSummary(summaryPayload);
+				if (summaryReport) {
+					attachCursorUsageMetadata(summaryReport, credential);
+					return summaryReport;
+				}
+			} else {
+				ctx.logger?.warn("Cursor usage summary request failed", {
+					status: summaryResponse.status,
+					provider: params.provider,
+				});
+			}
+
+			const response = await ctx.fetch(usageUrl, {
 				headers,
 				signal: params.signal,
 			});
 			if (!response.ok) {
 				ctx.logger?.warn("Cursor usage request failed", {
 					status: response.status,
-				provider: params.provider,
+					provider: params.provider,
 				});
 				return null;
 			}
 			const payload = await response.json();
 			const report = parseCursorUsage(payload);
 			if (report) {
-				const metadata = {
-					...(credential.email ? { email: credential.email } : {}),
-					...(credential.accountId ? { accountId: credential.accountId } : {}),
-					...(credential.projectId ? { projectId: credential.projectId } : {}),
-				};
-				if (Object.keys(metadata).length > 0) report.metadata = metadata;
+				attachCursorUsageMetadata(report, credential);
 			}
 			return report;
 		} catch (error) {

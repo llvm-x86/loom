@@ -1,7 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import { type AuthCredentialStore, AuthStorage } from "../src/auth-storage";
 import type { UsageFetchContext, UsageFetchParams } from "../src/usage";
-import { cursorUsageProvider, parseCursorUsage } from "../src/usage/cursor";
+import { cursorUsageProvider, parseCursorUsage, parseCursorUsageSummary } from "../src/usage/cursor";
 
 describe("cursor usage provider", () => {
 	describe("parseCursorUsage", () => {
@@ -158,6 +158,80 @@ describe("cursor usage provider", () => {
 		});
 	});
 
+	describe("parseCursorUsageSummary", () => {
+		it("returns null for non-record payloads", () => {
+			expect(parseCursorUsageSummary(null)).toBeNull();
+			expect(parseCursorUsageSummary(undefined)).toBeNull();
+		});
+
+		it("parses the dashboard aggregate Cursor Models quota", () => {
+			const payload = {
+				billingCycleStart: "2026-08-06T18:06:11.000Z",
+				billingCycleEnd: "2026-09-06T18:06:11.000Z",
+				membershipType: "pro_plus",
+				autoModelSelectedDisplayMessage: "You've used 10% of your included total usage",
+				namedModelSelectedDisplayMessage: "You've used 4% of your included API usage",
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 7000,
+						limit: 7000,
+						remaining: 0,
+						breakdown: { included: 7000, bonus: 2176, total: 9176 },
+						autoPercentUsed: 10.94625,
+						apiPercentUsed: 3.809090909090909,
+						totalPercentUsed: 10.083516483516483,
+					},
+					onDemand: { enabled: false, used: 0, limit: null, remaining: null },
+				},
+			};
+
+			const report = parseCursorUsageSummary(payload);
+			expect(report).not.toBeNull();
+			if (!report) return;
+
+			expect(report.provider).toBe("cursor");
+			expect(report.metadata?.planType).toBe("pro_plus");
+			expect(report.limits).toHaveLength(1);
+
+			const models = report.limits[0];
+			expect(models?.id).toBe("cursor:models:included");
+			expect(models?.label).toBe("Cursor Models");
+			expect(models?.amount.used).toBe(7000);
+			expect(models?.amount.limit).toBe(9176);
+			expect(models?.amount.usedFraction).toBeCloseTo(0.10083516483516483, 8);
+			expect(models?.status).toBe("ok");
+			expect(models?.window?.resetsAt).toBe(Date.parse("2026-09-06T18:06:11.000Z"));
+			expect(models?.notes).toEqual([
+				"You've used 10% of your included total usage",
+				"You've used 4% of your included API usage",
+			]);
+		});
+
+		it("includes on-demand spend when enabled", () => {
+			const payload = {
+				billingCycleEnd: "2026-09-06T18:06:11.000Z",
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 1,
+						limit: 10,
+						totalPercentUsed: 10,
+					},
+					onDemand: { enabled: true, used: 12.5, limit: 50, remaining: 37.5 },
+				},
+			};
+
+			const report = parseCursorUsageSummary(payload);
+			expect(report?.limits).toHaveLength(2);
+			const onDemand = report?.limits.find(limit => limit.id === "cursor:usd:on-demand");
+			expect(onDemand?.label).toBe("On-demand spend");
+			expect(onDemand?.amount.used).toBe(12.5);
+			expect(onDemand?.amount.limit).toBe(50);
+		});
+	});
+
+
 	describe("default registration", () => {
 		it("registers Cursor in AuthStorage's default usage resolver", async () => {
 			const store: AuthCredentialStore = {
@@ -244,7 +318,66 @@ describe("cursor usage provider", () => {
 			expect(cursorUsageProvider.supports?.(params)).toBe(false);
 		});
 
-		it("fetches and parses usage successfully", async () => {
+		it("fetches usage summary first and parses aggregate quota", async () => {
+			const summaryPayload = {
+				billingCycleEnd: "2026-09-06T18:06:11.000Z",
+				membershipType: "pro_plus",
+				autoModelSelectedDisplayMessage: "You've used 10% of your included total usage",
+				individualUsage: {
+					plan: {
+						enabled: true,
+						used: 7000,
+						limit: 7000,
+						breakdown: { included: 7000, bonus: 2176, total: 9176 },
+						totalPercentUsed: 10.083516483516483,
+					},
+					onDemand: { enabled: false, used: 0, limit: null, remaining: null },
+				},
+			};
+
+			const mockFetch = (async (input: string | URL): Promise<Response> => {
+				const urlStr = typeof input === "string" ? input : input.toString();
+				if (urlStr.endsWith("/auth/usage-summary")) {
+					return new Response(JSON.stringify(summaryPayload), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				throw new Error(`unexpected fetch: ${urlStr}`);
+			}) as unknown as typeof fetch;
+
+			const ctx: UsageFetchContext = {
+				fetch: mockFetch,
+			};
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken: "test-token",
+						email: "user@example.com",
+						accountId: "acc_123",
+					},
+				},
+				ctx,
+			);
+
+			expect(report).not.toBeNull();
+			if (!report) return;
+
+			expect(report.provider).toBe("cursor");
+			expect(report.limits).toHaveLength(1);
+			expect(report.limits[0]?.id).toBe("cursor:models:included");
+			expect(report.limits[0]?.label).toBe("Cursor Models");
+			expect(report.metadata).toEqual({
+				email: "user@example.com",
+				accountId: "acc_123",
+				planType: "pro_plus",
+			});
+		});
+
+		it("falls back to legacy usage when summary is unavailable", async () => {
 			const payload = {
 				"gpt-4": {
 					numRequests: 10,
@@ -255,6 +388,9 @@ describe("cursor usage provider", () => {
 
 			const mockFetch = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
 				const urlStr = typeof input === "string" ? input : input.toString();
+				if (urlStr.endsWith("/auth/usage-summary")) {
+					return new Response("missing", { status: 404 });
+				}
 				expect(urlStr).toBe("https://api2.cursor.sh/auth/usage");
 				expect(init?.headers).toBeDefined();
 				const headers = init?.headers as Record<string, string>;
@@ -289,7 +425,65 @@ describe("cursor usage provider", () => {
 
 			expect(report.provider).toBe("cursor");
 			expect(report.limits).toHaveLength(1);
-			expect(report.limits[0].id).toBe("cursor:requests:gpt-4");
+			expect(report.limits[0]?.id).toBe("cursor:requests:gpt-4");
+			expect(report.metadata).toEqual({
+				email: "user@example.com",
+				accountId: "acc_123",
+			});
+		});
+
+		it("falls back to legacy usage when summary payload is unrecognized", async () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 10,
+					maxRequestUsage: 100,
+				},
+				startOfMonth: "2026-07-01T00:00:00.000Z",
+			};
+
+			const mockFetch = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
+				const urlStr = typeof input === "string" ? input : input.toString();
+				if (urlStr.endsWith("/auth/usage-summary")) {
+					return new Response(JSON.stringify({ individualUsage: {} }), {
+						status: 200,
+						headers: { "Content-Type": "application/json" },
+					});
+				}
+				expect(urlStr).toBe("https://api2.cursor.sh/auth/usage");
+				expect(init?.headers).toBeDefined();
+				const headers = init?.headers as Record<string, string>;
+				expect(headers.Accept).toBe("application/json");
+				expect(headers.Authorization).toBe("Bearer test-token");
+
+				return new Response(JSON.stringify(payload), {
+					status: 200,
+					headers: { "Content-Type": "application/json" },
+				});
+			}) as unknown as typeof fetch;
+
+			const ctx: UsageFetchContext = {
+				fetch: mockFetch,
+			};
+
+			const report = await cursorUsageProvider.fetchUsage(
+				{
+					provider: "cursor",
+					credential: {
+						type: "oauth",
+						accessToken: "test-token",
+						email: "user@example.com",
+						accountId: "acc_123",
+					},
+				},
+				ctx,
+			);
+
+			expect(report).not.toBeNull();
+			if (!report) return;
+
+			expect(report.provider).toBe("cursor");
+			expect(report.limits).toHaveLength(1);
+			expect(report.limits[0]?.id).toBe("cursor:requests:gpt-4");
 			expect(report.metadata).toEqual({
 				email: "user@example.com",
 				accountId: "acc_123",

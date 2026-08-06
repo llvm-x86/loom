@@ -83,8 +83,8 @@ describe("CommandController /usage", () => {
 				fetchedAt: now,
 				limits: [
 					{
-						id: "cursor:requests:gpt-4",
-						label: "gpt-4 requests",
+						id: "cursor:models:included",
+						label: "Cursor Models",
 						scope: { provider: "cursor", windowId: "monthly" },
 						window: { id: "monthly", label: "Monthly", resetsAt: now + 86_400_000 },
 						amount: {
@@ -109,7 +109,7 @@ describe("CommandController /usage", () => {
 		expect(firstCall).toBeDefined();
 		const output = renderPresentedBlocks(firstCall?.[0]);
 		expect(output).toContain("Cursor");
-		expect(output).toContain("gpt-4 requests");
+		expect(output).toContain("Cursor Models");
 		expect(output).toContain("70% free");
 		expect(output).toContain("resets in 1d");
 	});

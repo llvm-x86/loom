@@ -229,6 +229,16 @@ const OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS: LazyStreamLimits = {
 	openAIIdleEnvFloorsFirstEvent: true,
 };
 
+/**
+ * Cursor agent turns can run for several minutes with long server-side tool
+ * execution and sparse token output. Widen the lazy watchdog floor so healthy
+ * streams are not aborted as "Provider stream stalled".
+ */
+const CURSOR_LAZY_STREAM_LIMITS: LazyStreamLimits = {
+	defaultIdleTimeoutMs: 600_000,
+	defaultFirstEventTimeoutMs: 300_000,
+};
+
 function forwardStream<TApi extends Api>(
 	target: EventStreamImpl,
 	source: AsyncIterable<AssistantMessageEvent>,
@@ -483,7 +493,7 @@ export const streamOpenAIResponses = createLazyStream(
 	loadOpenAIResponsesProviderModule,
 	PROVIDER_HANDLED_STREAM_TIMEOUTS,
 );
-export const streamCursor = createLazyStream(loadCursorProviderModule);
+export const streamCursor = createLazyStream(loadCursorProviderModule, CURSOR_LAZY_STREAM_LIMITS);
 export const streamDevin = createLazyStream(loadDevinProviderModule);
 export const streamOllama = createLazyStream(loadOllamaProviderModule, OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS);
 

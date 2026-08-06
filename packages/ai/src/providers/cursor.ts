@@ -638,9 +638,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				});
 			}
 
-			h2Request.write(frameConnectMessage(requestBytes));
-			heartbeatTimer = setInterval(sendHeartbeat, 5000);
-			await h2Completion.promise;
+			await stream.trackLocalWork((async () => {
+				h2Request.write(frameConnectMessage(requestBytes));
+				heartbeatTimer = setInterval(sendHeartbeat, 5000);
+				await h2Completion.promise;
+			})());
 
 			endCurrentTextBlock(output, stream, state);
 			endCurrentThinkingBlock(output, stream, state);
