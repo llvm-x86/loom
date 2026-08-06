@@ -27,6 +27,36 @@ function normalizeCursorBaseUrl(baseUrl?: string): string {
 	return baseUrl.replace(/\/+$/, "");
 }
 
+function buildCursorAmount(
+	used: number | undefined,
+	limit: number | undefined,
+	unit: UsageAmount["unit"],
+): UsageAmount {
+	const safeLimit = limit !== undefined && Number.isFinite(limit) ? limit : undefined;
+	const safeUsed = used !== undefined && Number.isFinite(used) ? used : undefined;
+	const remaining = safeLimit !== undefined && safeUsed !== undefined ? Math.max(0, safeLimit - safeUsed) : undefined;
+	const usedFraction =
+		safeLimit !== undefined && safeUsed !== undefined && safeLimit > 0 ? safeUsed / safeLimit : undefined;
+	const remainingFraction =
+		safeLimit !== undefined && remaining !== undefined && safeLimit > 0 ? remaining / safeLimit : undefined;
+	return {
+		used: safeUsed,
+		limit: safeLimit,
+		remaining,
+		usedFraction,
+		remainingFraction,
+		unit,
+	};
+}
+
+function deriveCursorStatus(amount: UsageAmount): UsageStatus {
+	const usedFraction = amount.usedFraction;
+	if (usedFraction === undefined) return "unknown";
+	if (usedFraction >= 1) return "exhausted";
+	if (usedFraction >= 0.9) return "warning";
+	return "ok";
+}
+
 function deriveResetsAt(payload: Record<string, unknown>): number | undefined {
 	const endKeys = ["billingCycleEnd", "endOfMonth", "resetsAt", "nextReset"];
 	for (const key of endKeys) {
@@ -71,52 +101,34 @@ export function parseCursorUsage(payload: unknown, fetchedAt = Date.now()): Usag
 			toNumber(value.amountLimit) ??
 			toNumber(value.usdLimit);
 
-		if (usedVal !== undefined && limitVal !== undefined) {
-			const isUsd =
-				key === "planUsage" ||
-				key.toLowerCase().includes("usd") ||
-				key.toLowerCase().includes("billing") ||
-				key.toLowerCase().includes("stripe");
+		if (usedVal === undefined) continue;
 
-			const unit = isUsd ? "usd" : "requests";
-			const cleanBucket = key.toLowerCase().trim();
-			const limitId = isUsd ? `cursor:usd:${cleanBucket}` : `cursor:requests:${cleanBucket}`;
+		const isUsd =
+			key === "planUsage" ||
+			key.toLowerCase().includes("usd") ||
+			key.toLowerCase().includes("billing") ||
+			key.toLowerCase().includes("stripe");
 
-			const label = isUsd ? `${key} spend` : `${key} requests`;
+		const unit = isUsd ? "usd" : "requests";
+		const cleanBucket = key.toLowerCase().trim();
+		const limitId = isUsd ? `cursor:usd:${cleanBucket}` : `cursor:requests:${cleanBucket}`;
 
-			const amount: UsageAmount = {
-				used: usedVal,
-				limit: limitVal,
-				remaining: Math.max(0, limitVal - usedVal),
-				usedFraction: limitVal > 0 ? usedVal / limitVal : 0,
-				remainingFraction: limitVal > 0 ? Math.max(0, limitVal - usedVal) / limitVal : 0,
-				unit,
-			};
+		const label = isUsd ? `${key} spend` : `${key} requests`;
 
-			const usedFraction = amount.usedFraction;
-			let status: UsageStatus = "unknown";
-			if (usedFraction !== undefined) {
-				if (usedFraction >= 1) {
-					status = "exhausted";
-				} else if (usedFraction >= 0.9) {
-					status = "warning";
-				} else {
-					status = "ok";
-				}
-			}
+		const amount = buildCursorAmount(usedVal, limitVal, unit);
+		const status = deriveCursorStatus(amount);
 
-			limits.push({
-				id: limitId,
-				label,
-				scope: {
-					provider: "cursor",
-					...(window ? { windowId: window.id } : {}),
-				},
-				...(window ? { window } : {}),
-				amount,
-				status,
-			});
-		}
+		limits.push({
+			id: limitId,
+			label,
+			scope: {
+				provider: "cursor",
+				...(window ? { windowId: window.id } : {}),
+			},
+			...(window ? { window } : {}),
+			amount,
+			status,
+		});
 	}
 
 	if (limits.length === 0) {
@@ -166,7 +178,7 @@ export const cursorUsageProvider: UsageProvider = {
 			if (!response.ok) {
 				ctx.logger?.warn("Cursor usage request failed", {
 					status: response.status,
-					provider: params.provider,
+				provider: params.provider,
 				});
 				return null;
 			}

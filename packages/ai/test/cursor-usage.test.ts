@@ -108,6 +108,27 @@ describe("cursor usage provider", () => {
 			}
 		});
 
+		it("parses request buckets when maxRequestUsage is null", () => {
+			const payload = {
+				"gpt-4": {
+					numRequests: 42,
+					maxRequestUsage: null,
+				},
+			};
+
+			const report = parseCursorUsage(payload);
+			expect(report).not.toBeNull();
+			if (!report) return;
+
+			expect(report.limits).toHaveLength(1);
+			const limit = report.limits[0];
+			expect(limit?.id).toBe("cursor:requests:gpt-4");
+			expect(limit?.amount.used).toBe(42);
+			expect(limit?.amount.limit).toBeUndefined();
+			expect(limit?.amount.usedFraction).toBeUndefined();
+			expect(limit?.status).toBe("unknown");
+		});
+
 		it("derives resetsAt from startOfMonth", () => {
 			const payload = {
 				"gpt-4": {

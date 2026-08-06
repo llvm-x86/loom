@@ -145,6 +145,7 @@ import { deterministicUuid } from "../utils/deterministic-id";
 import { AssistantMessageEventStream } from "../utils/event-stream";
 import { connectProxiedSocket, getProxyForProvider, shouldBypassProxy } from "../utils/proxy";
 import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResponseLog } from "../utils/request-debug";
+import { resolveCursorShellTimeoutSeconds } from "./cursor-shell-timeout";
 import { toolWireSchema } from "../utils/schema/wire";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
@@ -1258,7 +1259,7 @@ async function handleExecServerMessage(
 			const normalizedArgs: ShellArgs = { ...args, workingDirectory: args.workingDirectory || process.cwd() };
 			// Match the bridge (`CursorExecHandlers.shell`): map `workingDirectory`
 			// → `cwd`, drop non-positive timeouts.
-			const shellTimeout = args.timeout && args.timeout > 0 ? args.timeout : undefined;
+			const shellTimeout = resolveCursorShellTimeoutSeconds(args);
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,
@@ -1279,7 +1280,7 @@ async function handleExecServerMessage(
 		case "shellStreamArgs": {
 			const args = execMsg.message.value;
 			if (!args.toolCallId) args.toolCallId = crypto.randomUUID();
-			const shellStreamTimeout = args.timeout && args.timeout > 0 ? args.timeout : undefined;
+			const shellStreamTimeout = resolveCursorShellTimeoutSeconds(args);
 			synthesizeCursorExecToolCall(output, stream, state, args.toolCallId, "bash", {
 				command: args.command,
 				cwd: args.workingDirectory || undefined,

@@ -12,6 +12,7 @@ export * from "./providers/anthropic";
 export * from "./providers/anthropic-client";
 export * from "./providers/azure-openai-responses";
 export type * from "./providers/cursor";
+export * from "./providers/cursor-shell-timeout";
 export * from "./providers/gitlab-duo";
 export * from "./providers/gitlab-duo-workflow";
 export type * from "./providers/google";

@@ -48,6 +48,7 @@ import {
 } from "./render-utils";
 import { ToolAbortError, ToolError } from "./tool-errors";
 import { toolResult } from "./tool-result";
+import { normalizeShellTimeoutSeconds } from "@oh-my-pi/pi-ai";
 import { clampTimeout, TOOL_TIMEOUTS } from "./tool-timeouts";
 
 export const BASH_DEFAULT_PREVIEW_LINES = DEFAULT_TERMINAL_PREVIEW_LINES;
@@ -181,7 +182,7 @@ async function saveBashOriginalArtifact(session: ToolSession, originalText: stri
 	}
 }
 
-const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
+const BASH_TIMEOUT_DESCRIPTION = `timeout in seconds; values above ${TOOL_TIMEOUTS.bash.max} are treated as milliseconds (e.g. 15000 = 15s); 0 disables the command deadline; nonzero values are clamped to ${TOOL_TIMEOUTS.bash.min}-${TOOL_TIMEOUTS.bash.max}`;
 
 const bashSchemaBase = type({
 	command: type("string").describe("command to execute"),
@@ -915,8 +916,11 @@ export class BashTool implements AgentTool<typeof bashSchemaBase | typeof bashSc
 
 			// A timeout of 0 is an explicit long-running-command contract: the user
 			// must still cancel the call or job, but OMP does not impose a deadline.
-			const requestedTimeoutSec = rawTimeout;
-			const timeoutDisabled = requestedTimeoutSec === 0;
+			const rawTimeoutInput = rawTimeout;
+			const timeoutDisabled = rawTimeoutInput === 0;
+			const requestedTimeoutSec = timeoutDisabled
+				? 0
+				: (normalizeShellTimeoutSeconds(rawTimeoutInput) ?? rawTimeoutInput);
 			const timeoutSec = timeoutDisabled ? undefined : clampTimeout("bash", requestedTimeoutSec);
 			const timeoutMs = timeoutSec === undefined ? undefined : timeoutSec * 1000;
 			const pendingNotices: string[] = [];
