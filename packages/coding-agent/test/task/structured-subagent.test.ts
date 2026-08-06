@@ -38,6 +38,7 @@ function session(
 		maxDepth?: number;
 		isolationMode?: "none" | "auto" | "worktree" | "rcopy";
 		isolationByDefault?: boolean;
+		isolationRequired?: boolean;
 		cwd?: string;
 	} = {},
 ): ToolSession {
@@ -49,6 +50,7 @@ function session(
 			"task.maxRecursionDepth": options.maxDepth ?? 2,
 			"task.isolation.mode": options.isolationMode ?? "none",
 			"task.isolation.byDefault": options.isolationByDefault ?? false,
+			"task.isolation.required": options.isolationRequired ?? false,
 			"task.enableLsp": true,
 		}),
 		getSessionFile: () => null,
@@ -207,6 +209,46 @@ describe("structured subagent primitive", () => {
 		it("leaves spawns non-isolated when the setting is off", async () => {
 			mockDiscovery();
 			const policy = await resolveEffectiveSubagentPolicy(request({ session: session({ isolationMode: "auto" }) }));
+			expect(policy.isIsolated).toBe(false);
+		});
+	});
+
+	describe("task.isolation.required", () => {
+		it("refuses an explicit isolated=false instead of honouring it", async () => {
+			mockDiscovery();
+			await expect(
+				resolveEffectiveSubagentPolicy(
+					request({
+						session: session({ isolationMode: "auto", isolationRequired: true }),
+						isolation: { requested: false },
+					}),
+				),
+			).rejects.toThrow(/isolated: false. is refused/);
+		});
+
+		it("isolates a spawn that sent no flag even with byDefault off", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({
+					session: session({ isolationMode: "auto", isolationByDefault: false, isolationRequired: true }),
+				}),
+			);
+			expect(policy.isIsolated).toBe(true);
+		});
+
+		it("never blocks a plan-mode spawn, which is read-only and cannot isolate", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ planMode: true, isolationMode: "auto", isolationRequired: true }) }),
+			);
+			expect(policy.isIsolated).toBe(false);
+		});
+
+		it("cannot force isolation on when the backend mode is none", async () => {
+			mockDiscovery();
+			const policy = await resolveEffectiveSubagentPolicy(
+				request({ session: session({ isolationMode: "none", isolationRequired: true }) }),
+			);
 			expect(policy.isIsolated).toBe(false);
 		});
 
@@ -376,6 +418,26 @@ describe("structured subagent primitive", () => {
 			),
 		).rejects.toThrow("Isolated subagent execution requires a git repository");
 		expect(artifactsDirsFromRegistry()).toEqual([]);
+	});
+
+	it("runs in place instead of failing when DEFAULTED isolation cannot be set up", async () => {
+		// A default must never turn a spawn that would otherwise work into an
+		// error. Outside a git repo there is nothing to make a worktree from, so
+		// isolation-by-default degrades; only an explicit request fails loudly
+		// (covered by the test above).
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
+		const ran = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			request({
+				session: session({ isolationMode: "worktree", isolationByDefault: true, isolationRequired: true }),
+			}),
+		);
+
+		expect(ran).toHaveBeenCalled();
+		expect(settled.result.exitCode).toBe(0);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 
 	it("reuses a cached output manager across concurrent allocations and sanitizes artifact ids", async () => {

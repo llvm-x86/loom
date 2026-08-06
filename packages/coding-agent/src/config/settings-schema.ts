@@ -4093,7 +4093,7 @@ export const SETTINGS_SCHEMA = {
 			"block-clone",
 			"rcopy",
 		] as const,
-		default: "none",
+		default: "auto",
 		ui: {
 			tab: "tasks",
 			group: "Isolation",
@@ -4129,13 +4129,25 @@ export const SETTINGS_SCHEMA = {
 
 	"task.isolation.byDefault": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tasks",
 			group: "Isolation",
 			label: "Isolate Subagents by Default",
 			description:
-				'When enabled and Isolation Mode is not "none", every subagent spawn runs in its own isolated worktree — merged back on completion — unless the caller passes `isolated: false`. Leave off to keep isolation strictly opt-in per spawn.',
+				'When enabled and Isolation Mode is not "none", every subagent spawn runs in its own isolated worktree — merged back on completion. Leave off to keep isolation strictly opt-in per spawn.',
+		},
+	},
+
+	"task.isolation.required": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Require Subagent Isolation",
+			description:
+				"Refuse a spawn that explicitly passes `isolated: false`. Two concurrent write-access subagents in one worktree means uncommitted work has no owner — one agent's `git checkout -- .` silently reverts the other's file, with no error until something downstream cannot import it. Turn off only to allow deliberate shared-tree spawns.",
 		},
 	},
 

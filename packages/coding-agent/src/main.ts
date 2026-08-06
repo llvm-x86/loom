@@ -138,6 +138,7 @@ async function checkForNewVersion(currentVersion: string): Promise<string | unde
 const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.isolation.mode",
 	"task.isolation.byDefault",
+	"task.isolation.required",
 	"task.isolation.merge",
 	"task.isolation.commits",
 	"task.eager",

@@ -123,6 +123,14 @@ export interface EffectiveSubagentPolicy {
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
 	isIsolated: boolean;
+	/**
+	 * True only when the CALLER asked for isolation, as opposed to inheriting it
+	 * from `task.isolation.byDefault`/`required`. An explicit request must fail
+	 * loudly when isolation cannot be set up; a default must degrade quietly,
+	 * because a default that turns a working spawn into an error (e.g. in a
+	 * non-git directory) is worse than the sharing it prevents.
+	 */
+	isolationExplicit: boolean;
 	mergeMode: "patch" | "branch";
 	applyChanges: boolean;
 	enableLsp: boolean;
@@ -282,13 +290,31 @@ export async function resolveEffectiveSubagentPolicy(
 		fallbackModelPattern: request.session.getModelString?.(),
 	});
 	const isolationMode = request.session.settings.get("task.isolation.mode");
-	// An explicit `isolated` from the caller always wins — including an explicit
-	// `false`, which is how a spawn escapes `task.isolation.byDefault`. Plan mode
-	// never isolates: its controls are rejected outright above, and its subagents
-	// are read-only, so a worktree would buy nothing.
+	// Plan mode never isolates: its controls are rejected outright above, and its
+	// subagents are read-only, so a worktree would buy nothing.
+	//
+	// Otherwise an explicit `isolated` from the caller wins — EXCEPT that
+	// `task.isolation.required` refuses an explicit opt-out. A shared worktree
+	// plus two concurrent write-access subagents means uncommitted work has no
+	// owner: file-level assignments are a convention, and `git checkout -- .` in
+	// one agent does not respect a convention. That exact pair silently reverted
+	// a sibling agent's uncommitted file, and nothing failed loudly — it surfaced
+	// only when a downstream import broke. A worktree is an enforced boundary, so
+	// the opt-out is a setting the operator flips, not a flag a model can pass.
+	const requireIsolation =
+		request.session.settings.get("task.isolation.required") && !planMode && isolationMode !== "none";
+	if (requireIsolation && request.isolation?.requested === false) {
+		throw new StructuredSubagentError(
+			"preflight",
+			"Subagents must run isolated: task.isolation.required is on, so `isolated: false` is refused. " +
+				"Sharing one worktree between concurrent write-access subagents lets one agent's destructive git " +
+				"command revert another's uncommitted work with no error. Turn off task.isolation.required to allow it.",
+		);
+	}
 	const isIsolated =
-		request.isolation?.requested ??
-		(request.session.settings.get("task.isolation.byDefault") && !planMode && isolationMode !== "none");
+		requireIsolation ||
+		(request.isolation?.requested ??
+			(request.session.settings.get("task.isolation.byDefault") && !planMode && isolationMode !== "none"));
 	if (isIsolated && isolationMode === "none") {
 		throw new StructuredSubagentError(
 			"preflight",
@@ -305,6 +331,7 @@ export async function resolveEffectiveSubagentPolicy(
 		schema,
 		planMode,
 		isIsolated,
+		isolationExplicit: request.isolation?.requested === true,
 		mergeMode: request.isolation?.merge ?? request.session.settings.get("task.isolation.merge"),
 		applyChanges: request.isolation?.apply !== false,
 		enableLsp:
@@ -537,6 +564,9 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	let mergeSummary = "";
 	let requiresRecoveryArtifacts = false;
 	let completedSuccessfully = false;
+	// Mirrors policy.isIsolated until isolation setup degrades it (see below);
+	// the `finally` block needs the ACTUAL outcome, not the intent.
+	let isolated = policy.isIsolated;
 	try {
 		const id = await reserveStructuredSubagentId(request.session, {
 			...request.identity,
@@ -545,16 +575,25 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.planReference = await loadPlanReference(request, policy);
 		let isolationContext: IsolationContext | null = null;
-		if (policy.isIsolated) {
+		if (isolated) {
 			try {
 				isolationContext = await prepareIsolationContext(request.session.cwd);
 			} catch (error) {
-				const message = error instanceof Error ? error.message : String(error);
-				throw new StructuredSubagentError(
-					"isolation",
-					`Isolated subagent execution requires a git repository. ${message}`,
-					{ cause: error },
-				);
+				// An explicit `isolated: true` fails loudly — the caller asked for a
+				// boundary and did not get one. An isolation default must NOT turn a
+				// spawn that would otherwise work into an error: outside a git repo
+				// there is nothing to make a worktree from, so fall back to running
+				// in place rather than making non-repo directories unusable.
+				if (policy.isolationExplicit) {
+					const message = error instanceof Error ? error.message : String(error);
+					throw new StructuredSubagentError(
+						"isolation",
+						`Isolated subagent execution requires a git repository. ${message}`,
+						{ cause: error },
+					);
+				}
+				isolationContext = null;
+				isolated = false;
 			}
 		}
 		const result = !isolationContext
@@ -572,12 +611,12 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				});
 		attachStructuredOutputMetadata(result, policy.schema);
 		requiresRecoveryArtifacts =
-			policy.isIsolated &&
+			isolated &&
 			(result.exitCode !== 0 || result.error !== undefined || result.aborted === true) &&
 			(result.patchPath !== undefined || result.branchName !== undefined || (result.nestedPatches?.length ?? 0) > 0);
 
 		if (
-			policy.isIsolated &&
+			isolated &&
 			isolationContext &&
 			policy.applyChanges &&
 			result.exitCode === 0 &&
@@ -604,7 +643,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				requiresRecoveryArtifacts ||=
 					nestedPatchSummary.includes("<system-notification>") && (result.nestedPatches?.length ?? 0) > 0;
 			}
-		} else if (policy.isIsolated && isolationContext && !policy.applyChanges) {
+		} else if (isolated && isolationContext && !policy.applyChanges) {
 			if (result.branchName)
 				mergeSummary = `\n\nIsolation: changes captured on branch \`${result.branchName}\` (apply=false). Not merged.`;
 			else if (result.patchPath)
@@ -633,7 +672,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	} finally {
 		const shouldRetainArtifacts =
 			(request.retainArtifacts && completedSuccessfully) ||
-			(policy.isIsolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
+			(isolated && (!policy.applyChanges || changesApplied === false || requiresRecoveryArtifacts));
 		const shouldCleanup = lease.temporary && !shouldRetainArtifacts;
 		if (shouldCleanup) {
 			await fs.rm(lease.artifactsDir, { recursive: true, force: true });
