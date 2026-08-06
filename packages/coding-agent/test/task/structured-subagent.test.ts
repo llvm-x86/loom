@@ -10,7 +10,9 @@ import {
 import * as planHandoff from "@oh-my-pi/pi-coding-agent/plan-mode/plan-handoff";
 import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
+import type { IsolationContext } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import * as lockModule from "@oh-my-pi/pi-coding-agent/task/shared-tree-lock";
 import {
 	buildStructuredSubagentRecoveryHint,
 	resolveEffectiveSubagentPolicy,
@@ -39,6 +41,7 @@ function session(
 		isolationMode?: "none" | "auto" | "worktree" | "rcopy";
 		isolationByDefault?: boolean;
 		isolationRequired?: boolean;
+		serializeSharedTree?: boolean;
 		cwd?: string;
 	} = {},
 ): ToolSession {
@@ -51,6 +54,7 @@ function session(
 			"task.isolation.mode": options.isolationMode ?? "none",
 			"task.isolation.byDefault": options.isolationByDefault ?? false,
 			"task.isolation.required": options.isolationRequired ?? false,
+			"task.isolation.serializeSharedTree": options.serializeSharedTree ?? false,
 			"task.enableLsp": true,
 		}),
 		getSessionFile: () => null,
@@ -437,6 +441,126 @@ describe("structured subagent primitive", () => {
 
 		expect(ran).toHaveBeenCalled();
 		expect(settled.result.exitCode).toBe(0);
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	/** Isolation intended, but no repo to build a worktree from ⇒ degraded. */
+	function degradedSession(overrides: Parameters<typeof session>[0] = {}) {
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
+		return session({ isolationMode: "worktree", isolationByDefault: true, serializeSharedTree: true, ...overrides });
+	}
+
+	it("REPORTS that it fell back to the parent's tree instead of degrading silently", async () => {
+		// The original incident was invisible: a sibling's uncommitted file was
+		// reverted and nothing failed — it surfaced only when an import broke.
+		// Whatever the serialisation setting says, the parent is told.
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			request({ session: degradedSession({ serializeSharedTree: false }), retainArtifacts: true }),
+		);
+
+		expect(settled.mergeSummary).toContain("Isolation: UNAVAILABLE");
+		expect(settled.mergeSummary).toContain("wrote directly to the parent's working tree");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("says nothing about isolation when a spawn was never meant to be isolated", async () => {
+		mockDiscovery();
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			request({ session: session({ isolationMode: "none" }), retainArtifacts: true }),
+		);
+
+		expect(settled.mergeSummary).toBe("");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("routes a DEGRADED write-capable spawn through the shared-tree lock", async () => {
+		// Degradation is what makes this reachable: isolation was intended, could
+		// not be set up, and the spawn now writes the parent's tree — the exact
+		// incident isolation exists to prevent. If the boundary cannot hold in
+		// space it holds in time. Lock SEMANTICS live in shared-tree-lock.test.ts;
+		// this pins the wiring — which spawns queue, and on what key.
+		mockDiscovery();
+		const taken = vi.spyOn(lockModule, "withSharedTreeLock");
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			request({ session: degradedSession({ cwd: "/tmp/shared-tree-a/." }), retainArtifacts: true }),
+		);
+
+		expect(taken).toHaveBeenCalledTimes(1);
+		// Keyed by the RESOLVED path so "/x/." and "/x" are the same tree.
+		expect(taken.mock.calls[0]?.[0]).toBe("/tmp/shared-tree-a");
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("never queues a read-only subagent, even when degraded", async () => {
+		// A scout cannot clobber anything, so queueing it would serialise the
+		// most common fan-out for no safety gain.
+		mockDiscovery({ ...AGENT, tools: ["read", "grep", "glob"] });
+		const taken = vi.spyOn(lockModule, "withSharedTreeLock");
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(request({ session: degradedSession(), retainArtifacts: true }));
+
+		expect(taken).not.toHaveBeenCalled();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("never queues a spawn in a session that deliberately runs without isolation", async () => {
+		// mode=none is an opt-in to a shared tree. Serialising it would be a
+		// performance regression for existing fan-outs, not a safety win — the
+		// hazard being fixed is isolation SILENTLY degrading, not isolation off.
+		mockDiscovery();
+		const taken = vi.spyOn(lockModule, "withSharedTreeLock");
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			// Serialisation is ON, so not-degraded is the ONLY reason to skip it.
+			request({
+				session: session({ isolationMode: "none", serializeSharedTree: true }),
+				retainArtifacts: true,
+			}),
+		);
+
+		expect(taken).not.toHaveBeenCalled();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("never queues an ISOLATED spawn — it owns its worktree", async () => {
+		mockDiscovery();
+		const taken = vi.spyOn(lockModule, "withSharedTreeLock");
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockResolvedValue({
+			repoRoot: "/tmp/repo",
+			baseline: undefined,
+		} as unknown as IsolationContext);
+		vi.spyOn(isolationRunner, "runIsolatedSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			request({
+				session: session({ isolationMode: "worktree", isolationByDefault: true }),
+				retainArtifacts: true,
+			}),
+		);
+
+		expect(taken).not.toHaveBeenCalled();
+		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("leaves degraded spawns unserialised when the setting is off", async () => {
+		mockDiscovery();
+		const taken = vi.spyOn(lockModule, "withSharedTreeLock");
+		vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			request({ session: degradedSession({ serializeSharedTree: false }), retainArtifacts: true }),
+		);
+
+		expect(taken).not.toHaveBeenCalled();
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
 	});
 

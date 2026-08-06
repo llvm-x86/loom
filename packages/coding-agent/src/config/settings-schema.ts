@@ -4151,6 +4151,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.isolation.serializeSharedTree": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Serialize Shared-Tree Subagents",
+			description:
+				"When a write-capable subagent cannot be isolated and falls back to running directly in the parent's working tree — outside a git repository there is nothing to make a worktree from — run those spawns one at a time instead of concurrently. Enforces in time the boundary isolation would have enforced in space. Off by default because it changes scheduling: a fan-out in a non-repo directory stops running in parallel. The fallback is always reported in the spawn's result either way. Read-only agents never queue.",
+		},
+	},
+
 	"task.isolation.merge": {
 		type: "enum",
 		values: ["patch", "branch"] as const,

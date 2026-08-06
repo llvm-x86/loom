@@ -31,11 +31,13 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import { withSharedTreeLock } from "./shared-tree-lock";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
 	type AgentDefinition,
 	type AgentProgress,
 	canSpawnAtDepth,
+	isReadOnlyAgent,
 	type SingleResult,
 	type StructuredSubagentOutput,
 } from "./types";
@@ -575,6 +577,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		const baseOptions = buildExecutorOptions(request, policy, lease, id);
 		baseOptions.planReference = await loadPlanReference(request, policy);
 		let isolationContext: IsolationContext | null = null;
+		let isolationDegraded = false;
 		if (isolated) {
 			try {
 				isolationContext = await prepareIsolationContext(request.session.cwd);
@@ -594,10 +597,26 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 				}
 				isolationContext = null;
 				isolated = false;
+				isolationDegraded = true;
 			}
 		}
+		// Only a DEGRADED spawn queues: isolation was intended here, could not be
+		// set up (no git repo to make a worktree from), and the spawn now writes
+		// straight into the parent's tree — silently restoring the hazard
+		// isolation exists to prevent. A session that deliberately runs with
+		// isolation off has opted into a shared tree and keeps its parallelism;
+		// serialising it would be a performance regression, not a safety win.
+		// Read-only agents cannot clobber anything and never queue.
+		const sharesParentTree =
+			isolationDegraded &&
+			!isReadOnlyAgent(policy.effectiveAgent) &&
+			!policy.planMode &&
+			request.session.settings.get("task.isolation.serializeSharedTree");
+		const runInParentTree = async () => await runSubprocess(baseOptions);
 		const result = !isolationContext
-			? await runSubprocess(baseOptions)
+			? sharesParentTree
+				? await withSharedTreeLock(path.resolve(request.session.cwd), runInParentTree)
+				: await runInParentTree()
 			: await runIsolatedSubprocess({
 					baseOptions,
 					context: isolationContext,
@@ -651,6 +670,16 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			else if ((result.nestedPatches?.length ?? 0) > 0)
 				mergeSummary = `\n\nIsolation: changes captured for ${result.nestedPatches?.length} nested ${(result.nestedPatches?.length ?? 0) === 1 ? "repository" : "repositories"} (apply=false). Not applied.`;
 			else mergeSummary = "\n\nIsolation: no changes captured.";
+		}
+		if (isolationDegraded) {
+			// The failure this closes is not the sharing, it is the SILENCE: the
+			// original incident surfaced only when a sibling noticed a function
+			// it had written was gone. Say plainly that the boundary is absent.
+			mergeSummary +=
+				"\n\nIsolation: UNAVAILABLE here (no git repository to build a worktree from) — this subagent wrote" +
+				" directly to the parent's working tree. Concurrent write-capable subagents in one tree can revert each" +
+				" other's uncommitted work with no error; run them one at a time, or set" +
+				" `task.isolation.serializeSharedTree` to have loom do it.";
 		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;
