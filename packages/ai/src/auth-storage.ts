@@ -642,6 +642,10 @@ const USAGE_REPORT_CACHE_KEY_VERSION_OVERRIDES: Partial<Record<Provider, number>
 	// otherwise an org-less credential could replay another org's cached pool
 	// (incl. the 24h last-good fallback) via the old bare email/account key.
 	anthropic: 2,
+	// v2: usage now comes from `/auth/usage-summary` ("Cursor Models" billing
+	// cycle) instead of legacy `/auth/usage` per-model buckets. Busts disk
+	// cache entries that still hold `gpt-4 requests (Monthly)` snapshots.
+	cursor: 2,
 };
 const DEFAULT_OAUTH_REFRESH_TIMEOUT_MS = 10_000;
 /**

@@ -432,16 +432,9 @@ describe("cursor usage provider", () => {
 			});
 		});
 
-		it("falls back to legacy usage when summary payload is unrecognized", async () => {
-			const payload = {
-				"gpt-4": {
-					numRequests: 10,
-					maxRequestUsage: 100,
-				},
-				startOfMonth: "2026-07-01T00:00:00.000Z",
-			};
-
-			const mockFetch = (async (input: string | URL, init?: RequestInit): Promise<Response> => {
+		it("returns null when summary payload is unrecognized instead of legacy buckets", async () => {
+			let legacyCalled = false;
+			const mockFetch = (async (input: string | URL): Promise<Response> => {
 				const urlStr = typeof input === "string" ? input : input.toString();
 				if (urlStr.endsWith("/auth/usage-summary")) {
 					return new Response(JSON.stringify({ individualUsage: {} }), {
@@ -449,16 +442,8 @@ describe("cursor usage provider", () => {
 						headers: { "Content-Type": "application/json" },
 					});
 				}
-				expect(urlStr).toBe("https://api2.cursor.sh/auth/usage");
-				expect(init?.headers).toBeDefined();
-				const headers = init?.headers as Record<string, string>;
-				expect(headers.Accept).toBe("application/json");
-				expect(headers.Authorization).toBe("Bearer test-token");
-
-				return new Response(JSON.stringify(payload), {
-					status: 200,
-					headers: { "Content-Type": "application/json" },
-				});
+				legacyCalled = true;
+				return new Response("{}", { status: 500 });
 			}) as unknown as typeof fetch;
 
 			const ctx: UsageFetchContext = {
@@ -478,16 +463,8 @@ describe("cursor usage provider", () => {
 				ctx,
 			);
 
-			expect(report).not.toBeNull();
-			if (!report) return;
-
-			expect(report.provider).toBe("cursor");
-			expect(report.limits).toHaveLength(1);
-			expect(report.limits[0]?.id).toBe("cursor:requests:gpt-4");
-			expect(report.metadata).toEqual({
-				email: "user@example.com",
-				accountId: "acc_123",
-			});
+			expect(report).toBeNull();
+			expect(legacyCalled).toBe(false);
 		});
 
 		it("returns null on non-2xx response", async () => {

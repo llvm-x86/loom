@@ -289,12 +289,20 @@ export const cursorUsageProvider: UsageProvider = {
 					attachCursorUsageMetadata(summaryReport, credential);
 					return summaryReport;
 				}
-			} else {
-				ctx.logger?.warn("Cursor usage summary request failed", {
-					status: summaryResponse.status,
+				// Summary is the dashboard source of truth. A 200 with an
+				// unrecognized payload should not fall back to legacy per-model
+				// buckets (e.g. "gpt-4 requests (Monthly)") — that format is
+				// misleading once the summary endpoint exists.
+				ctx.logger?.warn("Cursor usage summary payload was not recognized", {
 					provider: params.provider,
 				});
+				return null;
 			}
+
+			ctx.logger?.warn("Cursor usage summary request failed", {
+				status: summaryResponse.status,
+				provider: params.provider,
+			});
 
 			const response = await ctx.fetch(usageUrl, {
 				headers,
