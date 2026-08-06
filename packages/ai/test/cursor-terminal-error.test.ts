@@ -18,7 +18,8 @@ type Scenario =
 	| { kind: "connect-error-after-turn" }
 	| { kind: "grpc-trailer-after-turn" }
 	| { kind: "end-before-turn" }
-	| { kind: "hang-after-turn" };
+	| { kind: "hang-after-turn" }
+	| { kind: "connect-error-then-h2-reset" };
 
 let server: http2.Http2Server | undefined;
 const sessions = new Set<http2.Http2Session>();
@@ -121,6 +122,15 @@ async function startServer(): Promise<string> {
 			return;
 		}
 
+		if (scenario.kind === "connect-error-then-h2-reset") {
+			stream.write(connectEndErrorFrame("resource_exhausted", "rate limited"));
+			stream.on("error", () => {});
+			queueMicrotask(() => {
+				stream.close(http2.constants.NGHTTP2_INTERNAL_ERROR);
+			});
+			return;
+		}
+
 		if (scenario.kind === "hang-after-turn") {
 			return;
 		}
@@ -211,6 +221,16 @@ describe("Cursor terminal lifecycle after turnEnded", () => {
 		expect(eventTypes).not.toContain("done");
 		expect(result.stopReason).toBe("error");
 		expect(result.errorMessage).toContain("Connect error unavailable: post-turn connect failure");
+	});
+
+	it("prefers CONNECT end-stream errors over a trailing NGHTTP2 reset", async () => {
+		scenario = { kind: "connect-error-then-h2-reset" };
+		const baseUrl = await startServer();
+		const { eventTypes, result } = await collectStream(makeModel(baseUrl));
+		expect(eventTypes[0]).toBe("start");
+		expect(eventTypes.at(-1)).toBe("error");
+		expect(result.errorMessage).toContain("Connect error resource_exhausted: rate limited");
+		expect(result.errorMessage).not.toContain("NGHTTP2_INTERNAL_ERROR");
 	});
 
 	it("surfaces nonzero gRPC trailers that arrive after turnEnded", async () => {

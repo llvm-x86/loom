@@ -23,11 +23,16 @@ describe("mapH2TransportError", () => {
 		expect(mapH2TransportError(raw, BASE_URL)).toBeInstanceOf(ProviderResponseError);
 	});
 
-	it("passes through an HTTP/2 error whose message is unrelated to ALPN", () => {
+	it("rewrites NGHTTP2_INTERNAL_ERROR into an actionable Cursor disconnect error", () => {
 		const raw = Object.assign(new Error("Stream closed with error code NGHTTP2_INTERNAL_ERROR"), {
 			code: "ERR_HTTP2_ERROR",
 		});
-		expect(mapH2TransportError(raw, BASE_URL)).toBe(raw);
+		const mapped = mapH2TransportError(raw, BASE_URL);
+		expect(mapped).toBeInstanceOf(ProviderResponseError);
+		const err = mapped as ProviderResponseError;
+		expect(err.provider).toBe("cursor");
+		expect(err.message).toContain("NGHTTP2_INTERNAL_ERROR");
+		expect(err.cause).toBe(raw);
 	});
 
 	it("passes through a non-HTTP/2 error even when it mentions h2", () => {

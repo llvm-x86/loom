@@ -102,6 +102,7 @@ import {
 	WriteShellStdinResultSchema,
 	WriteSuccessSchema,
 } from "@oh-my-pi/pi-catalog/discovery/cursor-gen/agent_pb";
+import { CURSOR_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/discovery/cursor";
 import { calculateCost } from "@oh-my-pi/pi-catalog/models";
 import {
 	$env,
@@ -147,7 +148,7 @@ import { createRequestDebugSession, isRequestDebugEnabled, type RequestDebugResp
 import { toolWireSchema } from "../utils/schema/wire";
 
 export const CURSOR_API_URL = "https://api2.cursor.sh";
-export const CURSOR_CLIENT_VERSION = "cli-2026.01.09-231024f";
+export { CURSOR_CLIENT_VERSION };
 
 const CURSOR_PROXY_TUNNEL_TIMEOUT_MS = 30_000;
 
@@ -235,6 +236,14 @@ export function mapH2TransportError(error: unknown, baseUrl: string): unknown {
 				"This host serves the run RPC over HTTP/2 only, and the TLS handshake did not negotiate " +
 				"h2 via ALPN — typically an ALPN-stripping TLS-intercepting proxy (e.g. Zscaler). " +
 				"Front the provider with a local HTTP/2 bridge and set providers.cursor.baseUrl to it.",
+			{ provider: "cursor", kind: "runtime", cause: error },
+		);
+	}
+	if (code === "ERR_HTTP2_ERROR" && /NGHTTP2_INTERNAL_ERROR/i.test(message)) {
+		return new AIError.ProviderResponseError(
+			"Cursor closed the HTTP/2 stream unexpectedly (NGHTTP2_INTERNAL_ERROR). " +
+				"This often follows a long tool-heavy turn or a server-side disconnect. Retry the message; " +
+				"if it keeps happening, try a shorter turn or switch models.",
 			{ provider: "cursor", kind: "runtime", cause: error },
 		);
 	}
@@ -383,15 +392,23 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		let h2Settled = false;
 		let sawTurnEnded = false;
 		let endStreamError: Error | null = null;
+		const stopHeartbeat = (): void => {
+			if (!heartbeatTimer) {
+				return;
+			}
+			clearInterval(heartbeatTimer);
+			heartbeatTimer = null;
+		};
 		const settleH2 = (error?: unknown): void => {
 			if (h2Settled) return;
 			h2Settled = true;
-			if (error !== undefined) {
-				h2Completion.reject(error);
-				return;
-			}
+			stopHeartbeat();
 			if (endStreamError) {
 				h2Completion.reject(endStreamError);
+				return;
+			}
+			if (error !== undefined) {
+				h2Completion.reject(error);
 				return;
 			}
 			if (!sawTurnEnded) {
@@ -531,6 +548,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 						const endError = parseConnectEndStream(messageBytes);
 						if (endError) {
 							endStreamError = endError;
+							stopHeartbeat();
 							h2Request?.close();
 						}
 						continue;
@@ -568,14 +586,19 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			});
 
 			const sendHeartbeat = () => {
-				if (!h2Request || h2Request.closed) {
+				if (!h2Request || h2Request.closed || h2Request.destroyed || h2Settled) {
+					stopHeartbeat();
 					return;
 				}
 				const heartbeatMessage = create(AgentClientMessageSchema, {
 					message: { case: "clientHeartbeat", value: create(ClientHeartbeatSchema, {}) },
 				});
 				const heartbeatBytes = toBinary(AgentClientMessageSchema, heartbeatMessage);
-				h2Request.write(frameConnectMessage(heartbeatBytes));
+				try {
+					h2Request.write(frameConnectMessage(heartbeatBytes));
+				} catch {
+					stopHeartbeat();
+				}
 			};
 
 			const closeDebugLog = async (): Promise<void> => {
@@ -655,10 +678,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 		} finally {
 			const log = await debugResponseLogPromise;
 			await log?.close();
-			if (heartbeatTimer) {
-				clearInterval(heartbeatTimer);
-				heartbeatTimer = null;
-			}
+			stopHeartbeat();
 			h2Request?.close();
 			h2Client?.close();
 		}
