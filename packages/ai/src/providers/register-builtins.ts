@@ -237,6 +237,9 @@ const OPENAI_IDLE_FLOORED_LAZY_STREAM_LIMITS: LazyStreamLimits = {
 const CURSOR_LAZY_STREAM_LIMITS: LazyStreamLimits = {
 	defaultIdleTimeoutMs: 600_000,
 	defaultFirstEventTimeoutMs: 300_000,
+	// Floor first-event against the widened idle budget so PI_STREAM_FIRST_EVENT_TIMEOUT_MS
+	// cannot undercut Cursor's long connect / cold-start window (mirrors Ollama).
+	openAIIdleEnvFloorsFirstEvent: true,
 };
 
 function forwardStream<TApi extends Api>(

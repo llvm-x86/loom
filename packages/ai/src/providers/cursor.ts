@@ -429,6 +429,11 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
 			}
 
+			let state: BlockState;
+			// Cover gRPC request build, proxy/H2 connect, and the full turn before the
+			// first non-start AssistantMessageEvent. The lazy wrapper ignores `start` for
+			// first-event progress, so local work must begin before any network I/O.
+			await stream.trackLocalWork((async () => {
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
 			conversationBlobStores.set(conversationId, blobStore);
@@ -490,7 +495,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const resolvedMcpToolCallIds = new Set<string>();
 			const usageState: UsageState = { sawTokenDelta: false };
 
-			const state: BlockState = {
+			state = {
 				get currentTextBlock() {
 					return currentTextBlock;
 				},
@@ -638,7 +643,6 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				});
 			}
 
-			await stream.trackLocalWork((async () => {
 				h2Request.write(frameConnectMessage(requestBytes));
 				heartbeatTimer = setInterval(sendHeartbeat, 5000);
 				await h2Completion.promise;
