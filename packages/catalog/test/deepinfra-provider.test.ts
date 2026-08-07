@@ -48,6 +48,7 @@ describe("DeepInfra provider support", () => {
 		expect(bundled.map(model => model.id).sort()).toEqual([
 			"deepseek-ai/DeepSeek-V3",
 			"deepseek-ai/DeepSeek-V4-Flash",
+			"deepseek-ai/DeepSeek-V4-Flash-0731",
 			"deepseek-ai/DeepSeek-V4-Pro",
 		]);
 

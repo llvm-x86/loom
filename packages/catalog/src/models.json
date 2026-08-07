@@ -36550,8 +36550,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 131072,
-			"maxTokens": 16384
+			"contextWindow": 163840,
+			"maxTokens": 163840
 		},
 		"deepseek-ai/DeepSeek-V4-Flash": {
 			"id": "deepseek-ai/DeepSeek-V4-Flash",
@@ -36569,8 +36569,40 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 16384,
+			"contextWindow": 1048576,
+			"maxTokens": 1048576,
+			"compat": {
+				"supportsToolChoice": false,
+				"maxTokensField": "max_tokens",
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				]
+			}
+		},
+		"deepseek-ai/DeepSeek-V4-Flash-0731": {
+			"id": "deepseek-ai/DeepSeek-V4-Flash-0731",
+			"name": "DeepSeek V4 Flash (0731)",
+			"api": "openai-completions",
+			"provider": "deepinfra",
+			"baseUrl": "https://api.deepinfra.com/v1/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1048576,
+			"maxTokens": 1048576,
 			"compat": {
 				"supportsToolChoice": false,
 				"maxTokensField": "max_tokens",
@@ -36601,8 +36633,8 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 1000000,
-			"maxTokens": 16384,
+			"contextWindow": 1048576,
+			"maxTokens": 1048576,
 			"compat": {
 				"supportsToolChoice": false,
 				"maxTokensField": "max_tokens",
