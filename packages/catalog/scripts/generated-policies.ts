@@ -14,7 +14,7 @@ import {
 	parseKnownModel,
 	semverEqual,
 } from "../src/identity/classify";
-import { isMimoModelIdOrName } from "../src/identity/family";
+import { isDeepseekModelIdOrName, isMimoModelIdOrName } from "../src/identity/family";
 import { getLongestModelLikeIdSegment } from "../src/identity/id";
 import { buildModelReferenceIndex, resolveModelReference } from "../src/identity/reference";
 import { resolveModelThinking } from "../src/model-thinking";
@@ -268,6 +268,19 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 		model.compat = {
 			...(model.compat ?? {}),
 			supportsForcedToolChoice: false,
+		};
+	}
+	if (
+		model.api === "openai-completions" &&
+		(model.provider === "makora" || model.provider === "deepinfra") &&
+		isDeepseekModelIdOrName(model.id)
+	) {
+		model.compat = {
+			...(model.compat ?? {}),
+			supportsToolChoice: false,
+			maxTokensField: "max_tokens",
+			reasoningContentField: "reasoning_content",
+			requiresReasoningContentForToolCalls: true,
 		};
 	}
 	if (

@@ -17,6 +17,7 @@ import {
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepseekModelManagerOptions,
+	deepinfraModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -26,6 +27,7 @@ import {
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
+	makoraModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
@@ -128,6 +130,13 @@ export const CATALOG_PROVIDERS = [
 		catalogDiscovery: { label: "DeepSeek" },
 	},
 	{
+		id: "deepinfra",
+		defaultModel: "deepseek-ai/DeepSeek-V3",
+		envVars: ["DEEPINFRA_TOKEN", "DEEPINFRA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => deepinfraModelManagerOptions(config),
+		catalogDiscovery: { label: "DeepInfra" },
+	},
+	{
 		id: "devin",
 		defaultModel: "swe-1-6",
 		envVars: ["DEVIN_API_KEY"],
@@ -227,6 +236,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["LM_STUDIO_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => lmStudioModelManagerOptions(config),
 		allowUnauthenticated: true,
+	},
+	{
+		id: "makora",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
+		envVars: ["MAKORA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => makoraModelManagerOptions(config),
+		catalogDiscovery: { label: "Makora" },
 	},
 	{
 		id: "minimax",

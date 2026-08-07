@@ -23,6 +23,7 @@ const gemini = m("google", "google-generative-ai", "gemini-3-flash");
 const vertexGemini = m("google-vertex", "google-vertex", "gemini-3-flash");
 const fireworks = m("fireworks", "openai-completions", "qwen3");
 const fireworksOpenAI = m("fireworks", "openai-completions", "gpt-oss-120b");
+const deepinfra = m("deepinfra", "openai-completions", "deepseek-ai/DeepSeek-V4-Flash");
 const orOpenAI = m("openrouter", "openai-responses", "openai/gpt-5.5");
 const orGoogle = m("openrouter", "openai-completions", "google/gemini-3-flash");
 const orAnthropic = m("openrouter", "openai-completions", "anthropic/claude-opus-4-6");
@@ -45,6 +46,7 @@ describe("serviceTierFamily", () => {
 		expect(serviceTierFamily(vertexGemini)).toBe("google");
 		expect(serviceTierFamily(fireworks)).toBeUndefined();
 		expect(serviceTierFamily(fireworksOpenAI)).toBeUndefined();
+		expect(serviceTierFamily(deepinfra)).toBeUndefined();
 	});
 
 	it("classifies OpenAI-compatible custom providers by api", () => {
@@ -72,6 +74,7 @@ describe("resolveModelServiceTier", () => {
 		expect(resolveModelServiceTier(tiers, customCodex)).toBe("priority");
 		expect(resolveModelServiceTier(tiers, fireworks)).toBeUndefined(); // no family
 		expect(resolveModelServiceTier(tiers, fireworksOpenAI)).toBeUndefined(); // dedicated provider tier
+		expect(resolveModelServiceTier(tiers, deepinfra)).toBeUndefined(); // dedicated provider tier
 		expect(resolveModelServiceTier(undefined, openai)).toBeUndefined();
 		expect(resolveModelServiceTier({ google: "priority" }, openai)).toBeUndefined();
 	});
@@ -108,6 +111,13 @@ describe("shouldSendServiceTier", () => {
 		expect(shouldSendServiceTier("priority", "anthropic")).toBe(false);
 	});
 
+	it("sends flex/priority on DeepInfra, rejects scale", () => {
+		expect(shouldSendServiceTier("priority", "deepinfra")).toBe(true);
+		expect(shouldSendServiceTier("flex", "deepinfra")).toBe(true);
+		expect(shouldSendServiceTier("scale", "deepinfra")).toBe(false);
+		expect(shouldSendServiceTier("default", "deepinfra")).toBe(false);
+	});
+
 	it("returns false for unset tiers", () => {
 		expect(shouldSendServiceTier(undefined, "openai")).toBe(false);
 		expect(shouldSendServiceTier(null, "openai")).toBe(false);
@@ -121,6 +131,7 @@ describe("realizesPriorityServiceTier", () => {
 		expect(realizesPriorityServiceTier("priority", gemini)).toBe(true);
 		expect(realizesPriorityServiceTier("priority", vertexGemini)).toBe(true);
 		expect(realizesPriorityServiceTier("priority", fireworks)).toBe(true);
+		expect(realizesPriorityServiceTier("priority", deepinfra)).toBe(true);
 		expect(realizesPriorityServiceTier("priority", orOpenAI)).toBe(true);
 		expect(realizesPriorityServiceTier("priority", orGoogle)).toBe(true);
 		expect(realizesPriorityServiceTier("priority", customCodex)).toBe(true);

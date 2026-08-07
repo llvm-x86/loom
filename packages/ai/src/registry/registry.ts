@@ -10,6 +10,7 @@ import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
+import { deepinfraProvider } from "./deepinfra";
 import { devinProvider } from "./devin";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
@@ -28,6 +29,7 @@ import { kimiCodeProvider } from "./kimi-code";
 import { litellmProvider } from "./litellm";
 import { llamaCppProvider } from "./llama-cpp";
 import { lmStudioProvider } from "./lm-studio";
+import { makoraProvider } from "./makora";
 import { minimaxProvider } from "./minimax";
 import { minimaxCodeProvider } from "./minimax-code";
 import { minimaxCodeCnProvider } from "./minimax-code-cn";
@@ -105,6 +107,7 @@ const ALL = [
 	xiaomiTokenPlanCnProvider,
 	firepassProvider,
 	deepseekProvider,
+	deepinfraProvider,
 	moonshotProvider,
 	cerebrasProvider,
 	basetenProvider,
@@ -133,6 +136,7 @@ const ALL = [
 	ollamaProvider,
 	ollamaCloudProvider,
 	lmStudioProvider,
+	makoraProvider,
 	llamaCppProvider,
 	vllmProvider,
 	openaiProvider,

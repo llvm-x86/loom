@@ -110,6 +110,32 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isFastModeActive()).toBe(false);
 	});
 
+	it("enables a session-only priority override for DeepInfra models", async () => {
+		const session = await createSessionForModel(
+			buildModel({
+				id: "deepseek-ai/DeepSeek-V4-Flash",
+				name: "DeepSeek V4 Flash",
+				api: "openai-completions",
+				provider: "deepinfra",
+				baseUrl: "https://api.deepinfra.com/v1/openai",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 1_048_576,
+				maxTokens: 16_384,
+			}),
+		);
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({}); // no family-map entry
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(true);
+		// In-session only: the persisted setting is untouched by /fast.
+		expect(session.settings.get("providers.deepinfraTier")).toBe("standard");
+		expect(session.setFastMode(false)).toBe(true);
+		expect(session.isFastModeEnabled()).toBe(false);
+		expect(session.isFastModeActive()).toBe(false);
+	});
+
 	it("clears only the current model's family when disabled", async () => {
 		const session = await createSession("anthropic", "claude-sonnet-4-5");
 		session.setFastMode(true);

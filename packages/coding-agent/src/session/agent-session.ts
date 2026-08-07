@@ -7156,6 +7156,13 @@ export class AgentSession {
 	}
 
 	#serviceTierByFamily: ServiceTierByFamily = {};
+	/**
+	 * Session-scoped `/fast` override for DeepInfra: `"priority"` or `"off"` once
+	 * toggled in-session, `undefined` to defer to the persisted Providers ›
+	 * DeepInfra Tier setting. In-memory only — never written to settings or
+	 * session history.
+	 */
+	#deepinfraFastMode: "priority" | "off" | undefined = undefined;
 
 	/** Live per-family service tiers (OpenAI / Anthropic / Google). */
 	get serviceTierByFamily(): ServiceTierByFamily {
@@ -10652,16 +10659,22 @@ export class AgentSession {
 
 	/**
 	 * True when the currently selected model's family is set to `priority` — the
-	 * `/fast` on/off state for the active model. Returns false when no model is
-	 * selected or the model exposes no service-tier family (e.g. Fireworks, which
-	 * has its own Providers › Fireworks Tier toggle).
+	 * `/fast` on/off state for the active model. DeepInfra also reports true while
+	 * its session `/fast` override (or the persisted Providers › DeepInfra Tier
+	 * setting) resolves to `priority`. Returns false when no model is selected or
+	 * the model exposes no service-tier family (e.g. Fireworks, which has its own
+	 * Providers › Fireworks Tier toggle).
 	 *
 	 * For "is priority actually applied to the next request?" use
 	 * {@link isFastModeActive} instead.
 	 */
 	isFastModeEnabled(): boolean {
 		const family = this.model ? serviceTierFamily(this.model) : undefined;
-		return family ? this.#serviceTierByFamily[family] === "priority" : false;
+		if (family) return this.#serviceTierByFamily[family] === "priority";
+		if (this.model?.provider === "deepinfra") {
+			return this.#effectiveServiceTier(this.model) === "priority";
+		}
+		return false;
 	}
 
 	/**
@@ -10679,10 +10692,20 @@ export class AgentSession {
 	 * Effective wire service-tier for a request to `model`. Fireworks models take
 	 * the Priority serving path only when the Providers › Fireworks Tier setting
 	 * is `"priority"` (and never for `-fast` variants, whose Fast serving path is
-	 * mutually exclusive with Priority). Every other model resolves the live
-	 * per-family tier map down to the entry for its family.
+	 * mutually exclusive with Priority). DeepInfra models take the Providers ›
+	 * DeepInfra Tier setting (priority or flex) verbatim. Every other model
+	 * resolves the live per-family tier map down to the entry for its family.
 	 */
 	#effectiveServiceTier(model: Model | undefined = this.model): ServiceTier | undefined {
+		if (model?.provider === "deepinfra") {
+			// Session `/fast` override wins while set; otherwise the persisted
+			// Providers › DeepInfra Tier setting (priority or flex) applies.
+			if (this.#deepinfraFastMode !== undefined) {
+				return this.#deepinfraFastMode === "priority" ? "priority" : undefined;
+			}
+			const tier = this.settings.get("providers.deepinfraTier");
+			return tier === "priority" || tier === "flex" ? tier : undefined;
+		}
 		if (model?.provider === "fireworks") {
 			return this.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"
@@ -10719,22 +10742,28 @@ export class AgentSession {
 
 	/**
 	 * `/fast on|off` targets the family of the currently selected model: it sets
-	 * (or clears) that family's `priority` tier. Returns `false` when the model
-	 * has no service-tier family, so callers can report that fast mode is
+	 * (or clears) that family's `priority` tier. DeepInfra models instead get a
+	 * session-scoped `/fast` override (`priority`/`off`) that never writes to the
+	 * persisted `providers.deepinfraTier` setting. Returns `false` when the model
+	 * has no service-tier control, so callers can report that fast mode is
 	 * unavailable instead of claiming success.
 	 */
 	setFastMode(enabled: boolean): boolean {
 		const family = this.model ? serviceTierFamily(this.model) : undefined;
-		if (!family) {
-			this.emitNotice("info", "The current model has no service-tier control for /fast to toggle.", "priority");
-			return false;
-		}
-		if (!enabled) {
-			if (this.#serviceTierByFamily[family] === "priority") this.setServiceTierFamily(family, undefined);
+		if (family) {
+			if (!enabled) {
+				if (this.#serviceTierByFamily[family] === "priority") this.setServiceTierFamily(family, undefined);
+				return true;
+			}
+			this.setServiceTierFamily(family, "priority");
 			return true;
 		}
-		this.setServiceTierFamily(family, "priority");
-		return true;
+		if (this.model?.provider === "deepinfra") {
+			this.#deepinfraFastMode = enabled ? "priority" : "off";
+			return true;
+		}
+		this.emitNotice("info", "The current model has no service-tier control for /fast to toggle.", "priority");
+		return false;
 	}
 
 	toggleFastMode(): boolean {

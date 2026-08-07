@@ -429,11 +429,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				throw new AIError.MissingApiKeyError(undefined, "Cursor API key (access token) is required");
 			}
 
-			let state: BlockState;
 			// Cover gRPC request build, proxy/H2 connect, and the full turn before the
 			// first non-start AssistantMessageEvent. The lazy wrapper ignores `start` for
 			// first-event progress, so local work must begin before any network I/O.
-			await stream.trackLocalWork((async () => {
+			const state = await stream.trackLocalWork((async () => {
 			const conversationId = options?.conversationId ?? options?.sessionId ?? crypto.randomUUID();
 			const blobStore = conversationBlobStores.get(conversationId) ?? new Map<string, Uint8Array>();
 			conversationBlobStores.set(conversationId, blobStore);
@@ -495,7 +494,7 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const resolvedMcpToolCallIds = new Set<string>();
 			const usageState: UsageState = { sawTokenDelta: false };
 
-			state = {
+			const state: BlockState = {
 				get currentTextBlock() {
 					return currentTextBlock;
 				},
@@ -646,6 +645,8 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 				h2Request.write(frameConnectMessage(requestBytes));
 				heartbeatTimer = setInterval(sendHeartbeat, 5000);
 				await h2Completion.promise;
+
+				return state;
 			})());
 
 			endCurrentTextBlock(output, stream, state);
@@ -686,8 +687,10 @@ export const streamCursor: StreamFunction<"cursor-agent"> = (
 			const log = await debugResponseLogPromise;
 			await log?.close();
 			stopHeartbeat();
-			h2Request?.close();
-			h2Client?.close();
+			// Assigned inside the trackLocalWork IIFE, so TS's flow analysis can't see
+			// them as possibly-set here; cast back to the declared nullable union.
+			(h2Request as http2.ClientHttp2Stream | null)?.close();
+			(h2Client as http2.ClientHttp2Session | null)?.close();
 		}
 	})();
 

@@ -40,6 +40,8 @@ import {
 	mapModelsDevToModels,
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
+	MAKORA_STATIC_MODELS,
+	DEEPINFRA_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
 } from "../src/provider-models/openai-compat";
 import type { Api, ModelSpec } from "../src/types";
@@ -526,6 +528,12 @@ async function generateModels() {
 	// Sakana is authoritative and stale seed IDs must stay out.
 	if (!authoritativeCatalogProviders.has("sakana")) {
 		allModels.push(...SAKANA_FUGU_STATIC_MODELS);
+	}
+	if (!authoritativeCatalogProviders.has("makora")) {
+		allModels.push(...MAKORA_STATIC_MODELS);
+	}
+	if (!authoritativeCatalogProviders.has("deepinfra")) {
+		allModels.push(...DEEPINFRA_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the

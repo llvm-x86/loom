@@ -37,10 +37,12 @@ export const KNOWN_HOSTS = {
 	deepseekDirect: { providers: ["deepseek"], urlMarkers: ["api.deepseek.com"] },
 	/** Any DeepSeek-operated host (first-party API, web-chat fronts). Wider than `deepseekDirect` on purpose. */
 	deepseekFamily: { providers: ["deepseek"], urlMarkers: ["deepseek.com"] },
+	deepinfra: { providers: ["deepinfra"], urlMarkers: ["api.deepinfra.com"] },
 	cerebras: { providers: ["cerebras"], urlMarkers: ["cerebras.ai"] },
 	zai: { providers: ["zai"], urlMarkers: ["api.z.ai"] },
 	zhipu: { providers: ["zhipu-coding-plan"], urlMarkers: ["open.bigmodel.cn"] },
 	kilo: { providers: ["kilo"], urlMarkers: ["api.kilo.ai"] },
+	makora: { providers: ["makora"], urlMarkers: ["inference.makora.com"] },
 	alibabaDashscope: { providers: ["alibaba-coding-plan"], urlMarkers: ["dashscope"] },
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
