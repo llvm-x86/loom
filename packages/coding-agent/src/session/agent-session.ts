@@ -10679,10 +10679,15 @@ export class AgentSession {
 	 * Effective wire service-tier for a request to `model`. Fireworks models take
 	 * the Priority serving path only when the Providers › Fireworks Tier setting
 	 * is `"priority"` (and never for `-fast` variants, whose Fast serving path is
-	 * mutually exclusive with Priority). Every other model resolves the live
-	 * per-family tier map down to the entry for its family.
+	 * mutually exclusive with Priority). DeepInfra models take the Providers ›
+	 * DeepInfra Tier setting (priority or flex) verbatim. Every other model
+	 * resolves the live per-family tier map down to the entry for its family.
 	 */
 	#effectiveServiceTier(model: Model | undefined = this.model): ServiceTier | undefined {
+		if (model?.provider === "deepinfra") {
+			const tier = this.settings.get("providers.deepinfraTier");
+			return tier === "priority" || tier === "flex" ? tier : undefined;
+		}
 		if (model?.provider === "fireworks") {
 			return this.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"

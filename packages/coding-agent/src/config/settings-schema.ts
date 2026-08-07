@@ -4738,6 +4738,31 @@ export const SETTINGS_SCHEMA = {
 			],
 		},
 	},
+	"providers.deepinfraTier": {
+		type: "enum",
+		values: ["standard", "priority", "flex"] as const,
+		default: "standard",
+		ui: {
+			tab: "providers",
+			group: "DeepInfra",
+			label: "DeepInfra Tier",
+			description:
+				'Serving path for DeepInfra requests. Priority sends `service_tier: "priority"` (1.5x price, skips the public queue, prioritizes GPU allocation); Flex sends `service_tier: "flex"` (20% discount, best-effort, may queue). Standard omits the field and uses real-time scheduling.',
+			options: [
+				{ value: "standard", label: "Standard", description: "Default real-time serving path (no service_tier)" },
+				{
+					value: "priority",
+					label: "Priority",
+					description: "Priority serving path: 1.5x price, skips the public queue, prioritized GPU allocation",
+				},
+				{
+					value: "flex",
+					label: "Flex",
+					description: "Flex serving path: 20% discount, best-effort, may wait up to 10 minutes under load",
+				},
+			],
+		},
+	},
 	"providers.tts": {
 		type: "enum",
 		values: ["auto", "local", "xai"] as const,

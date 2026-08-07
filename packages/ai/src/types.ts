@@ -142,7 +142,7 @@ function isOpenAIServiceTierApi(api: Api | undefined): boolean {
 }
 
 function hasDedicatedServiceTierControl(provider: Provider | undefined): boolean {
-	return provider === "fireworks";
+	return provider === "fireworks" || provider === "deepinfra";
 }
 
 function isOpenAIServiceTierModel(model: ServiceTierModel): boolean {
@@ -194,8 +194,10 @@ export function resolveModelServiceTier(
  * True when the tier should be sent on the wire as the provider's service-tier
  * request field. OpenAI / OpenAI-Codex accept `flex`/`scale`/`priority`; Google
  * (Gemini API + Vertex) and OpenRouter accept `flex`/`priority`; Fireworks
- * Serverless realizes only its Priority serving path. Anthropic is absent — it
- * realizes `priority` via `speed: "fast"`, not a service-tier field.
+ * Serverless realizes only its Priority serving path; DeepInfra accepts both
+ * `priority` (1.5x premium) and `flex` (20% off) via its service-tier field.
+ * Anthropic is absent — it realizes `priority` via `speed: "fast"`, not a
+ * service-tier field.
  */
 export function shouldSendServiceTier(
 	serviceTier: ServiceTier | null | undefined,
@@ -209,7 +211,7 @@ export function shouldSendServiceTier(
 	if (typeof target !== "string" && target && isOpenAIServiceTierModel(target)) {
 		return serviceTier === "flex" || serviceTier === "scale" || serviceTier === "priority";
 	}
-	if (provider === "google") {
+	if (provider === "google" || provider === "deepinfra") {
 		return serviceTier === "flex" || serviceTier === "priority";
 	}
 	// Vertex realizes only priority (via header); flex has no documented control.
