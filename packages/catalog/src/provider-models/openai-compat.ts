@@ -2997,6 +2997,88 @@ export function makoraModelManagerOptions(
 	};
 }
 
+
+// ---------------------------------------------------------------------------
+// 14.65 DeepInfra
+// ---------------------------------------------------------------------------
+
+const DEEPINFRA_DEFAULT_BASE_URL = "https://api.deepinfra.com/v1/openai";
+const DEEPINFRA_DEEPSEEK_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.High, Effort.Max],
+};
+
+function createDeepInfraStaticModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxTokens: number,
+	reasoning: boolean,
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "deepinfra",
+		baseUrl: DEEPINFRA_DEFAULT_BASE_URL,
+		reasoning,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens,
+		...(reasoning ? { thinking: { ...DEEPINFRA_DEEPSEEK_THINKING } } : {}),
+	};
+}
+
+export const DEEPINFRA_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V3", "DeepSeek V3", 131_072, 16_384, false),
+	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V4-Flash", "DeepSeek V4 Flash", 1_000_000, 16_384, true),
+	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V4-Pro", "DeepSeek V4 Pro", 1_000_000, 16_384, true),
+];
+
+const DEEPINFRA_STATIC_MODEL_BY_ID = new Map(DEEPINFRA_STATIC_MODELS.map(model => [model.id, model] as const));
+
+export interface DeepInfraModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function deepinfraModelManagerOptions(
+	config?: DeepInfraModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? DEEPINFRA_DEFAULT_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("deepinfra");
+	return {
+		providerId: "deepinfra",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "deepinfra",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id) ?? DEEPINFRA_STATIC_MODEL_BY_ID.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						const reasoning = reference?.reasoning ?? isDeepseekModelIdOrName(defaults.id);
+						return {
+							...model,
+							reasoning,
+							...(reasoning
+								? {
+										thinking: reference?.thinking ?? { ...DEEPINFRA_DEEPSEEK_THINKING },
+									}
+								: {}),
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
 // ---------------------------------------------------------------------------
 // 15. Together
 // ---------------------------------------------------------------------------

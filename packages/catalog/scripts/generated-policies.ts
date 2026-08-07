@@ -272,7 +272,7 @@ function applyGeneratedModelPolicy(model: ModelSpec<Api>): void {
 	}
 	if (
 		model.api === "openai-completions" &&
-		model.provider === "makora" &&
+		(model.provider === "makora" || model.provider === "deepinfra") &&
 		isDeepseekModelIdOrName(model.id)
 	) {
 		model.compat = {

@@ -10,6 +10,7 @@ import { cloudflareAiGatewayProvider } from "./cloudflare-ai-gateway";
 import { coreWeaveProvider } from "./coreweave";
 import { cursorProvider } from "./cursor";
 import { deepseekProvider } from "./deepseek";
+import { deepinfraProvider } from "./deepinfra";
 import { devinProvider } from "./devin";
 import { firepassProvider } from "./firepass";
 import { fireworksProvider } from "./fireworks";
@@ -106,6 +107,7 @@ const ALL = [
 	xiaomiTokenPlanCnProvider,
 	firepassProvider,
 	deepseekProvider,
+	deepinfraProvider,
 	moonshotProvider,
 	cerebrasProvider,
 	basetenProvider,

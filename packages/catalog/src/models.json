@@ -36533,6 +36533,91 @@
 			}
 		}
 	},
+	"deepinfra": {
+		"deepseek-ai/DeepSeek-V3": {
+			"id": "deepseek-ai/DeepSeek-V3",
+			"name": "DeepSeek V3",
+			"api": "openai-completions",
+			"provider": "deepinfra",
+			"baseUrl": "https://api.deepinfra.com/v1/openai",
+			"reasoning": false,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 131072,
+			"maxTokens": 16384
+		},
+		"deepseek-ai/DeepSeek-V4-Flash": {
+			"id": "deepseek-ai/DeepSeek-V4-Flash",
+			"name": "DeepSeek V4 Flash",
+			"api": "openai-completions",
+			"provider": "deepinfra",
+			"baseUrl": "https://api.deepinfra.com/v1/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 16384,
+			"compat": {
+				"supportsToolChoice": false,
+				"maxTokensField": "max_tokens",
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				]
+			}
+		},
+		"deepseek-ai/DeepSeek-V4-Pro": {
+			"id": "deepseek-ai/DeepSeek-V4-Pro",
+			"name": "DeepSeek V4 Pro",
+			"api": "openai-completions",
+			"provider": "deepinfra",
+			"baseUrl": "https://api.deepinfra.com/v1/openai",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 16384,
+			"compat": {
+				"supportsToolChoice": false,
+				"maxTokensField": "max_tokens",
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				]
+			}
+		}
+	},
 	"minimax": {
 		"MiniMax-M2": {
 			"id": "MiniMax-M2",

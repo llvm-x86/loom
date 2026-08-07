@@ -17,6 +17,7 @@ import {
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
 	deepseekModelManagerOptions,
+	deepinfraModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -127,6 +128,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["DEEPSEEK_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => deepseekModelManagerOptions(config),
 		catalogDiscovery: { label: "DeepSeek" },
+	},
+	{
+		id: "deepinfra",
+		defaultModel: "deepseek-ai/DeepSeek-V3",
+		envVars: ["DEEPINFRA_TOKEN", "DEEPINFRA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => deepinfraModelManagerOptions(config),
+		catalogDiscovery: { label: "DeepInfra" },
 	},
 	{
 		id: "devin",
