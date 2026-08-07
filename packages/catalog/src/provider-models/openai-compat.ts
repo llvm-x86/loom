@@ -12,6 +12,7 @@ import {
 	isKimiK3ModelId,
 	isKimiModelId,
 	isReasoningGlmModelId,
+	isDeepseekModelIdOrName,
 } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
@@ -2908,6 +2909,86 @@ export function basetenModelManagerOptions(
 							maxTokens,
 							...(thinking ? { thinking } : {}),
 							...(supportsTools === false ? { supportsTools } : {}),
+						};
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+
+// ---------------------------------------------------------------------------
+// 14.6 Makora
+// ---------------------------------------------------------------------------
+
+const MAKORA_DEFAULT_BASE_URL = "https://inference.makora.com/v1";
+const MAKORA_DEEPSEEK_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.High, Effort.Max],
+};
+
+function createMakoraStaticModel(
+	id: string,
+	name: string,
+	contextWindow: number,
+	maxTokens: number,
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "makora",
+		baseUrl: MAKORA_DEFAULT_BASE_URL,
+		reasoning: true,
+		input: ["text"],
+		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+		contextWindow,
+		maxTokens,
+		thinking: { ...MAKORA_DEEPSEEK_THINKING },
+	};
+}
+
+export const MAKORA_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createMakoraStaticModel("deepseek-ai/DeepSeek-V4-Flash", "DeepSeek V4 Flash", 1_000_000, 384_000),
+	createMakoraStaticModel("deepseek-ai/DeepSeek-V4-Pro", "DeepSeek V4 Pro", 1_000_000, 384_000),
+];
+
+const MAKORA_STATIC_MODEL_BY_ID = new Map(MAKORA_STATIC_MODELS.map(model => [model.id, model] as const));
+
+export interface MakoraModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function makoraModelManagerOptions(
+	config?: MakoraModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? MAKORA_DEFAULT_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("makora");
+	return {
+		providerId: "makora",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "makora",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id) ?? MAKORA_STATIC_MODEL_BY_ID.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						const reasoning = reference?.reasoning ?? isDeepseekModelIdOrName(defaults.id);
+						return {
+							...model,
+							reasoning,
+							...(reasoning
+								? {
+										thinking: reference?.thinking ?? { ...MAKORA_DEEPSEEK_THINKING },
+									}
+								: {}),
 						};
 					},
 					fetch: config?.fetch,

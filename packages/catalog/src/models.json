@@ -36467,6 +36467,72 @@
 			}
 		}
 	},
+	"makora": {
+		"deepseek-ai/DeepSeek-V4-Flash": {
+			"id": "deepseek-ai/DeepSeek-V4-Flash",
+			"name": "DeepSeek V4 Flash",
+			"api": "openai-completions",
+			"provider": "makora",
+			"baseUrl": "https://inference.makora.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"compat": {
+				"supportsToolChoice": false,
+				"maxTokensField": "max_tokens",
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				]
+			}
+		},
+		"deepseek-ai/DeepSeek-V4-Pro": {
+			"id": "deepseek-ai/DeepSeek-V4-Pro",
+			"name": "DeepSeek V4 Pro",
+			"api": "openai-completions",
+			"provider": "makora",
+			"baseUrl": "https://inference.makora.com/v1",
+			"reasoning": true,
+			"input": [
+				"text"
+			],
+			"cost": {
+				"input": 0,
+				"output": 0,
+				"cacheRead": 0,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"compat": {
+				"supportsToolChoice": false,
+				"maxTokensField": "max_tokens",
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"high",
+					"max"
+				]
+			}
+		}
+	},
 	"minimax": {
 		"MiniMax-M2": {
 			"id": "MiniMax-M2",

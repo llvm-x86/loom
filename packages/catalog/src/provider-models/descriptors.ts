@@ -26,6 +26,7 @@ import {
 	kimiCodeModelManagerOptions,
 	litellmModelManagerOptions,
 	lmStudioModelManagerOptions,
+	makoraModelManagerOptions,
 	mistralModelManagerOptions,
 	moonshotModelManagerOptions,
 	nanoGptModelManagerOptions,
@@ -227,6 +228,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["LM_STUDIO_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => lmStudioModelManagerOptions(config),
 		allowUnauthenticated: true,
+	},
+	{
+		id: "makora",
+		defaultModel: "deepseek-ai/DeepSeek-V4-Flash",
+		envVars: ["MAKORA_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => makoraModelManagerOptions(config),
+		catalogDiscovery: { label: "Makora" },
 	},
 	{
 		id: "minimax",
