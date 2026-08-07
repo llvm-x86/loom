@@ -6,6 +6,7 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { deepinfraModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { Model } from "@oh-my-pi/pi-catalog";
 
 const ORIGINAL_ENV = {
 	DEEPINFRA_TOKEN: Bun.env.DEEPINFRA_TOKEN,
@@ -57,7 +58,9 @@ describe("DeepInfra provider support", () => {
 		expect(v3?.baseUrl).toBe("https://api.deepinfra.com/v1/openai");
 		expect(v3?.reasoning).toBe(false);
 
-		const flash = bundled.find(model => model.id === "deepseek-ai/DeepSeek-V4-Flash");
+		const flash = bundled.find(model => model.id === "deepseek-ai/DeepSeek-V4-Flash") as
+			| Model<"openai-completions">
+			| undefined;
 		expect(flash?.reasoning).toBe(true);
 		expect(flash?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
 		expect(flash?.compat?.requiresReasoningContentForToolCalls).toBe(true);

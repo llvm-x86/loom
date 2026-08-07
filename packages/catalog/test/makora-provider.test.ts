@@ -6,6 +6,7 @@ import { getBundledModels } from "@oh-my-pi/pi-catalog/models";
 import { DEFAULT_MODEL_PER_PROVIDER, PROVIDER_DESCRIPTORS } from "@oh-my-pi/pi-catalog/provider-models/descriptors";
 import { makoraModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/openai-compat";
 import type { FetchImpl } from "@oh-my-pi/pi-catalog/types";
+import type { Model } from "@oh-my-pi/pi-catalog";
 
 const ORIGINAL_ENV = {
 	MAKORA_API_KEY: Bun.env.MAKORA_API_KEY,
@@ -43,7 +44,9 @@ describe("Makora provider support", () => {
 			"deepseek-ai/DeepSeek-V4-Flash",
 			"deepseek-ai/DeepSeek-V4-Pro",
 		]);
-		const flash = bundled.find(model => model.id === "deepseek-ai/DeepSeek-V4-Flash");
+		const flash = bundled.find(model => model.id === "deepseek-ai/DeepSeek-V4-Flash") as
+			| Model<"openai-completions">
+			| undefined;
 		expect(flash?.api).toBe("openai-completions");
 		expect(flash?.baseUrl).toBe("https://inference.makora.com/v1");
 		expect(flash?.reasoning).toBe(true);
