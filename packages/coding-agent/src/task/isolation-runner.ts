@@ -42,6 +42,7 @@ import {
 	mergeTaskBranches,
 	type NestedRepoPatch,
 	type WorktreeBaseline,
+	type BuildArtifactLinkMode,
 } from "./worktree";
 
 type IsoBackendKind = natives.IsoBackendKind;
@@ -102,6 +103,8 @@ export interface IsolatedRunOptions {
 	preferredBackend: IsoBackendKind | undefined;
 	/** Stable id used as the isolation worktree namespace and as the branch suffix. */
 	agentId: string;
+	/** How gitignored build outputs are inherited from the parent checkout. */
+	linkBuildArtifacts?: BuildArtifactLinkMode;
 	/** Merge mode driving how changes are captured ("branch" commits, "patch" diffs). */
 	mergeMode: "patch" | "branch";
 	/** Output dir for `${agentId}.patch` artifacts (patch mode and branch-mode commit failures). */
@@ -200,10 +203,11 @@ async function collectIgnoredChanges(
 	repoRoot: string,
 	artifactsDir: string,
 	agentId: string,
+	linkedArtifacts?: readonly string[],
 ): Promise<IgnoredChangeReport | undefined> {
 	let scan: IgnoredChangeScan;
 	try {
-		scan = await captureIgnoredChanges(isolationDir, repoRoot);
+		scan = await captureIgnoredChanges(isolationDir, repoRoot, { skipLinkedArtifacts: linkedArtifacts });
 	} catch (err) {
 		logger.warn("ignored-file scan failed", {
 			isolationDir,
@@ -274,7 +278,9 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 	let keepIsolationDir = false;
 	try {
 		const taskBaseline = structuredClone(opts.context.baseline);
-		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend);
+		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend, {
+			linkBuildArtifacts: opts.linkBuildArtifacts,
+		});
 		const isolationDir = handle.mergedDir;
 		const result = await runSubprocess({
 			...opts.baseOptions,
@@ -292,6 +298,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 			opts.context.repoRoot,
 			opts.artifactsDir,
 			opts.agentId,
+			handle.linkedArtifacts,
 		);
 		const ignored = ignoredChanges ? { ignoredChanges } : {};
 

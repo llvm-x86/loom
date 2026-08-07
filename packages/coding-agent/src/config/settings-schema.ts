@@ -4130,7 +4130,7 @@ export const SETTINGS_SCHEMA = {
 			"block-clone",
 			"rcopy",
 		] as const,
-		default: "none",
+		default: "auto",
 		ui: {
 			tab: "tasks",
 			group: "Isolation",
@@ -4166,13 +4166,63 @@ export const SETTINGS_SCHEMA = {
 
 	"task.isolation.byDefault": {
 		type: "boolean",
-		default: false,
+		default: true,
 		ui: {
 			tab: "tasks",
 			group: "Isolation",
 			label: "Isolate Subagents by Default",
 			description:
-				'When enabled and Isolation Mode is not "none", every subagent spawn runs in its own isolated worktree — merged back on completion — unless the caller passes `isolated: false`. Leave off to keep isolation strictly opt-in per spawn.',
+				'When enabled and Isolation Mode is not "none", every subagent spawn runs in its own isolated worktree — merged back on completion. Leave off to keep isolation strictly opt-in per spawn.',
+		},
+	},
+
+	"task.isolation.required": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Require Subagent Isolation",
+			description:
+				"Refuse a spawn that explicitly passes `isolated: false`. Two concurrent write-access subagents in one worktree means uncommitted work has no owner — one agent's `git checkout -- .` silently reverts the other's file, with no error until something downstream cannot import it. Turn off only to allow deliberate shared-tree spawns.",
+		},
+	},
+
+	"task.isolation.linkBuildArtifacts": {
+		type: "enum",
+		values: ["off", "readonly", "full"] as const,
+		default: "readonly",
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Link Parent Build Artifacts",
+			description:
+				'How an isolated worktree inherits gitignored build outputs from the parent checkout. "readonly" (default) copies only small generated binaries (.node addons, tool-views.generated.js) so tests can run without sharing mutable stores. "full" additionally symlinks node_modules and target per the manual worktree recipe — opt-in only; bun install in a linked worktree mutates the parent. "off" leaves the worktree bare.',
+			options: [
+				{ value: "off", label: "Off", description: "No inheritance — subagent must install its own toolchain" },
+				{
+					value: "readonly",
+					label: "Read-only",
+					description: "Copy generated native addons and tool views only (~few MB, no shared mutation risk)",
+				},
+				{
+					value: "full",
+					label: "Full",
+					description: "Also symlink node_modules and target from the parent (fast, shared-writer hazard)",
+				},
+			],
+		},
+	},
+
+	"task.isolation.serializeSharedTree": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Serialize Shared-Tree Subagents",
+			description:
+				"When a write-capable subagent cannot be isolated and falls back to running directly in the parent's working tree — outside a git repository there is nothing to make a worktree from — run those spawns one at a time instead of concurrently. Enforces in time the boundary isolation would have enforced in space. Off by default because it changes scheduling: a fan-out in a non-repo directory stops running in parallel. The fallback is always reported in the spawn's result either way. Read-only agents never queue.",
 		},
 	},
 
