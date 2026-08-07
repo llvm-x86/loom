@@ -3031,16 +3031,16 @@ function createDeepInfraStaticModel(
 }
 
 export const DEEPINFRA_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
-	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V3", "DeepSeek V3", 163_840, 163_840, false),
-	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V4-Flash", "DeepSeek V4 Flash", 1_048_576, 1_048_576, true),
+	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V3", "DeepSeek V3", 163_840, 16_384, false),
+	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V4-Flash", "DeepSeek V4 Flash", 1_048_576, 16_384, true),
 	createDeepInfraStaticModel(
 		"deepseek-ai/DeepSeek-V4-Flash-0731",
 		"DeepSeek V4 Flash (0731)",
 		1_048_576,
-		1_048_576,
+		16_384,
 		true,
 	),
-	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V4-Pro", "DeepSeek V4 Pro", 1_048_576, 1_048_576, true),
+	createDeepInfraStaticModel("deepseek-ai/DeepSeek-V4-Pro", "DeepSeek V4 Pro", 1_048_576, 16_384, true),
 ];
 
 const DEEPINFRA_STATIC_MODEL_BY_ID = new Map(DEEPINFRA_STATIC_MODELS.map(model => [model.id, model] as const));

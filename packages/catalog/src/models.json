@@ -36551,7 +36551,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 163840,
-			"maxTokens": 163840
+			"maxTokens": 16384
 		},
 		"deepseek-ai/DeepSeek-V4-Flash": {
 			"id": "deepseek-ai/DeepSeek-V4-Flash",
@@ -36570,7 +36570,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 1048576,
+			"maxTokens": 16384,
 			"compat": {
 				"supportsToolChoice": false,
 				"maxTokensField": "max_tokens",
@@ -36602,7 +36602,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 1048576,
+			"maxTokens": 16384,
 			"compat": {
 				"supportsToolChoice": false,
 				"maxTokensField": "max_tokens",
@@ -36634,7 +36634,7 @@
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
-			"maxTokens": 1048576,
+			"maxTokens": 16384,
 			"compat": {
 				"supportsToolChoice": false,
 				"maxTokensField": "max_tokens",

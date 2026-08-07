@@ -61,6 +61,10 @@ describe("DeepInfra provider support", () => {
 		expect(flash?.reasoning).toBe(true);
 		expect(flash?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
 		expect(flash?.compat?.requiresReasoningContentForToolCalls).toBe(true);
+		// 1M context, but per-response max output is the separate 16K DeepInfra cap.
+		expect(flash?.contextWindow).toBe(1_048_576);
+		expect(flash?.maxTokens).toBe(16_384);
+		expect(flash?.maxTokens).not.toBe(flash?.contextWindow);
 
 		const provider = getOAuthProviders().find(item => item.id === "deepinfra");
 		expect(provider?.name).toBe("DeepInfra");
