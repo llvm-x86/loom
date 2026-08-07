@@ -89,7 +89,7 @@ describe("/fast targets the current model's service-tier family", () => {
 		expect(session.isFastModeActive()).toBe(true);
 	});
 
-	it("leaves Fireworks models on the dedicated Fireworks tier control", async () => {
+	it("enables a session-only priority override for Fireworks models", async () => {
 		const session = await createSessionForModel(
 			buildModel({
 				id: "gpt-oss-120b",
@@ -104,8 +104,33 @@ describe("/fast targets the current model's service-tier family", () => {
 				maxTokens: 64_000,
 			}),
 		);
+		expect(session.setFastMode(true)).toBe(true);
+		expect(session.serviceTierByFamily).toEqual({}); // no family-map entry
+		expect(session.isFastModeEnabled()).toBe(true);
+		expect(session.isFastModeActive()).toBe(true);
+		// In-session only: the persisted setting is untouched by /fast.
+		expect(session.settings.get("providers.fireworksTier")).toBe("standard");
+		expect(session.setFastMode(false)).toBe(true);
+		expect(session.isFastModeEnabled()).toBe(false);
+		expect(session.isFastModeActive()).toBe(false);
+	});
+
+	it("keeps /fast unavailable for Fireworks -fast variants", async () => {
+		const session = await createSessionForModel(
+			buildModel({
+				id: "kimi-k2.6-fast",
+				name: "Kimi K2.6 Fast",
+				api: "openai-completions",
+				provider: "fireworks",
+				baseUrl: "https://api.fireworks.ai/inference/v1",
+				reasoning: true,
+				input: ["text"],
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+				contextWindow: 128_000,
+				maxTokens: 64_000,
+			}),
+		);
 		expect(session.setFastMode(true)).toBe(false);
-		expect(session.serviceTierByFamily).toEqual({});
 		expect(session.isFastModeEnabled()).toBe(false);
 		expect(session.isFastModeActive()).toBe(false);
 	});
