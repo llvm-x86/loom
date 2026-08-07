@@ -4151,6 +4151,32 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.isolation.linkBuildArtifacts": {
+		type: "enum",
+		values: ["off", "readonly", "full"] as const,
+		default: "readonly",
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Link Parent Build Artifacts",
+			description:
+				'How an isolated worktree inherits gitignored build outputs from the parent checkout. "readonly" (default) copies only small generated binaries (.node addons, tool-views.generated.js) so tests can run without sharing mutable stores. "full" additionally symlinks node_modules and target per the manual worktree recipe — opt-in only; bun install in a linked worktree mutates the parent. "off" leaves the worktree bare.',
+			options: [
+				{ value: "off", label: "Off", description: "No inheritance — subagent must install its own toolchain" },
+				{
+					value: "readonly",
+					label: "Read-only",
+					description: "Copy generated native addons and tool views only (~few MB, no shared mutation risk)",
+				},
+				{
+					value: "full",
+					label: "Full",
+					description: "Also symlink node_modules and target from the parent (fast, shared-writer hazard)",
+				},
+			],
+		},
+	},
+
 	"task.isolation.serializeSharedTree": {
 		type: "boolean",
 		default: false,

@@ -139,6 +139,7 @@ const HOST_DEFAULTED_SETTING_PATHS: SettingPath[] = [
 	"task.isolation.mode",
 	"task.isolation.byDefault",
 	"task.isolation.required",
+	"task.isolation.linkBuildArtifacts",
 	"task.isolation.serializeSharedTree",
 	"task.isolation.merge",
 	"task.isolation.commits",

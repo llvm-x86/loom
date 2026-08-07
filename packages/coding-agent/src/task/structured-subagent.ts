@@ -627,6 +627,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 					description: trimToUndefined(request.identity?.label),
 					buildCommitMessage: makeIsolationCommitMessage(request.session),
 					buildFailureResult: buildFailureResult(request, policy, id, Date.now()),
+					linkBuildArtifacts: request.session.settings.get("task.isolation.linkBuildArtifacts"),
 				});
 		attachStructuredOutputMetadata(result, policy.schema);
 		requiresRecoveryArtifacts =

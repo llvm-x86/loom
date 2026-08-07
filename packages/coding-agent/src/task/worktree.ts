@@ -7,7 +7,14 @@ import { getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils"
 import * as git from "../utils/git";
 import * as jj from "../utils/jj";
 import { mapWithConcurrencyLimit } from "./parallel";
+import {
+	type BuildArtifactLinkMode,
+	linkParentBuildArtifacts,
+	shouldSkipLinkedIgnoredEntry,
+} from "./link-build-artifacts";
 import { sweepOrphanedWorkspacesOnce, TASK_ISOLATION_OWNER_FILE } from "./worktree-gc";
+
+export type { BuildArtifactLinkMode } from "./link-build-artifacts";
 
 const { IsoBackendKind } = natives;
 
@@ -404,7 +411,11 @@ async function compareIgnoredDirectory(
  * edit under an ignored build directory is the one case knowingly traded away.
  * Whatever the budget or an I/O error cut short is listed in `unscanned`.
  */
-export async function captureIgnoredChanges(isolationDir: string, repoRoot: string): Promise<IgnoredChangeScan> {
+export async function captureIgnoredChanges(
+	isolationDir: string,
+	repoRoot: string,
+	options?: { skipLinkedArtifacts?: readonly string[] },
+): Promise<IgnoredChangeScan> {
 	const scan: IgnoredChangeScan = { changes: [], unscanned: [] };
 	const budget: IgnoredScanBudget = { entries: 0, compareBytes: 0 };
 	let entries: string[];
@@ -420,6 +431,9 @@ export async function captureIgnoredChanges(isolationDir: string, repoRoot: stri
 		return scan;
 	}
 	for (const entry of entries) {
+		if (shouldSkipLinkedIgnoredEntry(entry, options?.skipLinkedArtifacts ?? [])) {
+			continue;
+		}
 		if (entry.endsWith("/")) {
 			await compareIgnoredDirectory(entry.slice(0, -1), isolationDir, repoRoot, budget, scan);
 			continue;
@@ -648,6 +662,8 @@ export interface IsolationHandle {
 	fellBack: boolean;
 	/** Optional reason associated with `fellBack`. */
 	fallbackReason: string | null;
+	/** Repo-root-relative paths inherited from the parent checkout at spawn. */
+	linkedArtifacts?: readonly string[];
 }
 
 /**
@@ -674,10 +690,15 @@ export function getTaskIsolationSegment(repoRoot: string, id: string): string {
 	return `${TASK_ISOLATION_DIR_PREFIX}${digest}`;
 }
 
+export interface EnsureIsolationOptions {
+	linkBuildArtifacts?: BuildArtifactLinkMode;
+}
+
 export async function ensureIsolation(
 	baseCwd: string,
 	id: string,
 	preferred?: IsoBackendKind,
+	options?: EnsureIsolationOptions,
 ): Promise<IsolationHandle> {
 	const repoRoot = await getRepoRoot(baseCwd);
 	const repository = await git.repo.resolve(repoRoot);
@@ -700,6 +721,15 @@ export async function ensureIsolation(
 			// parallel task branches. Detaching gives each isolation a private,
 			// frozen repo that still borrows the source object DB via alternates.
 			await git.detachGitDir(mergedDir, sourceCommonDir);
+			const linkMode = options?.linkBuildArtifacts ?? "readonly";
+			const { linked: linkedArtifacts, warnings: linkWarnings } = await linkParentBuildArtifacts(
+				repoRoot,
+				mergedDir,
+				linkMode,
+			);
+			for (const warning of linkWarnings) {
+				logger.warn("isolation build-artifact link skipped path", { baseDir, warning });
+			}
 			// Mark ownership so the GC can distinguish a live task's
 			// isolation from a crashed process's leftover. Best-effort: a
 			// failed write must never break task spawn.
@@ -720,6 +750,7 @@ export async function ensureIsolation(
 				backend: candidate,
 				fellBack: candidate !== resolution.kind || resolution.fellBack,
 				fallbackReason,
+				linkedArtifacts: linkedArtifacts.length > 0 ? linkedArtifacts : undefined,
 			};
 		} catch (err) {
 			await fs.rm(baseDir, { recursive: true, force: true });
