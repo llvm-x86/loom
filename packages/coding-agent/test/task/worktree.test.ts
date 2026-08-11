@@ -399,6 +399,46 @@ describe("worktree isolation helpers", () => {
 				expect(delta.rootPatch).not.toContain("preexisting.txt");
 			});
 
+			it("skips a nested checkout whose gitdir pointer is dead", async () => {
+				// Regression: a deleted primary/bare repo leaves its linked-worktree
+				// checkouts with a `.git` pointer FILE whose `gitdir:` target no
+				// longer exists. `discoverNestedRepos` used to classify any `.git`
+				// entry as a repo, so captureBaseline then ran git inside the dead
+				// checkout and every isolated spawn died with git's opaque
+				// `fatal: not a git repository: <dead path>`. The baseline must
+				// ignore the dead checkout instead.
+				const { repo: parent } = await createGitRepo();
+				const dead = path.join(parent, "dead-worktree");
+				await fs.mkdir(dead, { recursive: true });
+				await fs.writeFile(
+					path.join(dead, ".git"),
+					"gitdir: /nonexistent/primary/.git/worktrees/dead-worktree\n",
+				);
+				await fs.writeFile(path.join(dead, "orphaned.txt"), "stale checkout content\n");
+
+				const baseline = await captureBaseline(parent);
+
+				expect(baseline.nested.map(n => n.relativePath)).not.toContain("dead-worktree");
+			});
+
+			it("keeps a nested repo whose gitdir pointer is live", async () => {
+				// Guard that the dead-pointer skip did not break the legitimate
+				// nested-repo path: a real nested checkout inside the parent repo
+				// is still captured as part of the baseline.
+				const { repo: parent } = await createGitRepo();
+				const nested = path.join(parent, "live-worktree");
+				await fs.mkdir(nested, { recursive: true });
+				await runGit(nested, ["init", "-q", "-b", "main"]);
+				await fs.writeFile(path.join(nested, "tracked.txt"), "nested work\n");
+
+				const baseline = await captureBaseline(parent);
+				const rels = baseline.nested.map(n => n.relativePath);
+
+				expect(rels).toContain("live-worktree");
+				expect(baseline.nested.find(n => n.relativePath === "live-worktree")?.baseline.untracked).toContain(
+					"tracked.txt",
+				);
+			});
 			// Regression for #4438: cherry-picking a range where an intermediate
 			// commit becomes empty (redundant with HEAD, or 3-way merged to HEAD)
 			// used to abort the whole range and mark the branch failed, dropping

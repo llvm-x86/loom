@@ -81,12 +81,30 @@ async function discoverNestedRepos(repoRoot: string): Promise<string[]> {
 			if (!entry.isDirectory()) continue;
 			const full = path.join(dir, entry.name);
 			const rel = path.relative(repoRoot, full);
-			// Check if this directory is itself a git repo
-			const gitDir = path.join(full, ".git");
+			// Check if this directory is itself a git repo. A `.git` FILE is a
+			// linked-worktree pointer; the checkout is usable only while its
+			// `gitdir:` target exists. Deleting the primary/bare repo leaves a
+			// dead pointer behind, and any git command run inside then dies with
+			// an opaque `fatal: not a git repository: <dead path>` — which would
+			// abort the entire isolation baseline for a repo that is not even
+			// part of the parent's change surface. Treat dead pointers as absent.
 			let hasGit = false;
 			try {
-				await fs.access(gitDir);
-				hasGit = true;
+				const gitEntry = path.join(full, ".git");
+				const isPointerFile = (await fs.stat(gitEntry)).isFile();
+				if (isPointerFile) {
+					const pointer = (await fs.readFile(gitEntry, "utf8")).trim();
+					const match = /^gitdir:\s*(.+)$/.exec(pointer);
+					const target = match ? path.resolve(dir, match[1].trim()) : "";
+					if (target) {
+						try {
+							await fs.access(target);
+							hasGit = true;
+						} catch {}
+					}
+				} else {
+					hasGit = true;
+				}
 			} catch {}
 			if (hasGit && !submodulePaths.has(rel)) {
 				result.push(rel);
@@ -176,11 +194,23 @@ async function writeSyntheticTree(repoDir: string, baseTreeish: string, patches:
 
 export async function captureBaseline(repoRoot: string): Promise<WorktreeBaseline> {
 	const [root, nestedPaths] = await Promise.all([captureRepoBaseline(repoRoot), discoverNestedRepos(repoRoot)]);
-	const nested = await Promise.all(
-		nestedPaths.map(async relativePath => ({
-			relativePath,
-			baseline: await captureRepoBaseline(path.join(repoRoot, relativePath)),
-		})),
+	// A nested checkout that cannot be read — dead worktree pointer, lost
+	// permissions, vanished gitdir — must not abort the whole fan-out. Its
+	// changes are not part of the parent repo's change surface, so dropping it
+	// from the baseline is lossless; surface a warning instead of failing every
+	// isolated spawn in the batch.
+	const nested: WorktreeBaseline["nested"] = [];
+	await Promise.all(
+		nestedPaths.map(async relativePath => {
+			try {
+				nested.push({ relativePath, baseline: await captureRepoBaseline(path.join(repoRoot, relativePath)) });
+			} catch (err) {
+				logger.warn("isolation baseline skipped unreadable nested repo", {
+					relativePath,
+					error: errorMessage(err),
+				});
+			}
+		}),
 	);
 	return { root, nested };
 }
