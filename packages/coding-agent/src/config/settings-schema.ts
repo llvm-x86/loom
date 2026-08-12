@@ -4258,6 +4258,19 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.isolation.nonRepo": {
+		type: "enum",
+		values: ["workdir", "error"] as const,
+		default: "workdir",
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Isolation Outside A Repo",
+			description:
+				'What an isolated spawn does when its working directory is not a git repository (e.g. a session rooted in ~/workspace). "workdir" runs it in a disposable, owner-marked scratch directory it can clone into — nothing is merged back, and the scratch GC sweeps it. "error" refuses the spawn instead.',
+		},
+	},
+
 	"task.isolation.byDefault": {
 		type: "boolean",
 		default: true,

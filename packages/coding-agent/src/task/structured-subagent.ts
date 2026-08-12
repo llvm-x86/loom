@@ -31,6 +31,7 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import { ensureScratchDir } from "./scratch";
 import { withSharedTreeLock } from "./shared-tree-lock";
 import { resolveSpawnPolicy } from "./spawn-policy";
 import {
@@ -41,7 +42,7 @@ import {
 	type SingleResult,
 	type StructuredSubagentOutput,
 } from "./types";
-import { type NestedRepoPatch, parseIsolationMode } from "./worktree";
+import { type NestedRepoPatch, NoIsolationRepoError, parseIsolationMode } from "./worktree";
 
 /** Validation behavior requested for an effective output schema. */
 export type StructuredSubagentSchemaMode = "permissive" | "strict";
@@ -607,28 +608,44 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		baseOptions.planReference = await loadPlanReference(request, policy);
 		let isolationContext: IsolationContext | null = null;
 		let isolationDegraded = false;
+		let isolationWorkdir: string | undefined;
 		if (isolated) {
 			try {
 				isolationContext = await prepareIsolationContext(spawnCwd, {
 					configuredRoot: request.session.settings.get("task.isolation.repoRoot"),
 				});
 			} catch (error) {
-				// An explicit `isolated: true` fails loudly — the caller asked for a
-				// boundary and did not get one. An isolation default must NOT turn a
-				// spawn that would otherwise work into an error: outside a git repo
-				// there is nothing to make a worktree from, so fall back to running
-				// in place rather than making non-repo directories unusable.
-				if (policy.isolationExplicit) {
+				// No checkout to cut a worktree from — and specifically that, not a
+				// worktree setup failure inside a real repo, which must still
+				// surface. A session rooted in a container directory (~/workspace)
+				// is a legitimate place to spawn from: the subagent is there to
+				// clone what it needs. Give it a disposable working directory of
+				// its own (owner-marked, swept by the scratch GC) so it is still
+				// isolated, instead of refusing it or letting it litter the
+				// parent's directory.
+				isolationWorkdir =
+					error instanceof NoIsolationRepoError &&
+					request.session.settings.get("task.isolation.nonRepo") === "workdir"
+						? await ensureScratchDir(spawnCwd, id, "task")
+						: undefined;
+				if (isolationWorkdir) {
+					baseOptions.workdir = isolationWorkdir;
+				} else if (policy.isolationExplicit) {
+					// An explicit `isolated: true` fails loudly — the caller asked for
+					// a boundary and did not get one. An isolation DEFAULT must not
+					// turn a spawn that would otherwise work into an error, so it
+					// falls through to running in place.
 					const message = error instanceof Error ? error.message : String(error);
 					throw new StructuredSubagentError(
 						"isolation",
 						`Isolated subagent execution requires a git repository. ${message}`,
 						{ cause: error },
 					);
+				} else {
+					isolated = false;
+					isolationDegraded = true;
 				}
 				isolationContext = null;
-				isolated = false;
-				isolationDegraded = true;
 			}
 		}
 		// Only a DEGRADED spawn queues: isolation was intended here, could not be
@@ -708,10 +725,19 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			// original incident surfaced only when a sibling noticed a function
 			// it had written was gone. Say plainly that the boundary is absent.
 			mergeSummary +=
-				"\n\nIsolation: UNAVAILABLE here (no git repository to build a worktree from) — this subagent wrote" +
+				"\n\nIsolation: UNAVAILABLE here (no isolated working tree could be built) — this subagent wrote" +
 				" directly to the parent's working tree. Concurrent write-capable subagents in one tree can revert each" +
 				" other's uncommitted work with no error; run them one at a time, or set" +
 				" `task.isolation.serializeSharedTree` to have loom do it.";
+		}
+		if (isolationWorkdir) {
+			// Say where it ran and what that implies: a caller who assumed a merge
+			// would otherwise go looking for changes that were never captured.
+			mergeSummary +=
+				`\n\nIsolation: \`${spawnCwd}\` is not a git repository, so this subagent ran in a disposable working` +
+				` directory (\`${isolationWorkdir}\`) instead of a worktree. Nothing is merged back — whatever it` +
+				" produced had to be pushed to a remote or returned in its output. The directory is owned by this run" +
+				" and swept by the scratch GC.";
 		}
 
 		completedSuccessfully = result.exitCode === 0 && !result.error && !result.aborted;

@@ -364,6 +364,13 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 export interface ExecutorOptions {
 	cwd: string;
 	worktree?: string;
+	/**
+	 * Disposable working directory for a spawn whose `cwd` is not a checkout:
+	 * the process runs here instead, and this IS its scratch dir (owned,
+	 * GC'd). Unlike `worktree` there is no baseline and nothing is merged
+	 * back — there is no repo to merge into.
+	 */
+	workdir?: string;
 	agent: AgentDefinition;
 	task: string;
 	assignment?: string;
@@ -2235,6 +2242,7 @@ interface SubagentSystemPromptArgs {
 	planReference: string;
 	planReferencePath: string;
 	worktree: string;
+	workdir: string;
 	scratch: string;
 	outputSchema: unknown;
 	outputSchemaOverridesAgent: boolean;
@@ -2255,6 +2263,7 @@ function buildSubagentSystemPrompt(args: SubagentSystemPromptArgs): (defaultProm
 			planReference: args.planReference,
 			planReferencePath: args.planReferencePath,
 			worktree: args.worktree,
+			workdir: args.workdir,
 			scratch: args.scratch,
 			outputSchema: args.outputSchema,
 			outputSchemaOverridesAgent: args.outputSchemaOverridesAgent,
@@ -2320,6 +2329,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 		index,
 		id,
 		worktree,
+		workdir,
 		modelOverride,
 		thinkingLevel,
 		outputSchema,
@@ -2372,7 +2382,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	// prompt can name a path that already exists (a dir that must be created
 	// by the agent does not get used). Best-effort: undefined degrades to no
 	// scratch block and no tool-env redirect, never a failed spawn.
-	const scratchDir = await ensureScratchDir(cwd, id, "task");
+	// A non-repo isolated spawn already owns a scratch dir and RUNS in it, so
+	// reuse it rather than minting a second one for the same spawn.
+	const scratchDir = workdir ?? (await ensureScratchDir(cwd, id, "task"));
 	const toolEnv = buildScratchToolEnv(scratchDir, subagentSettings.get("scratch.tmpdirRedirect") ?? true);
 	const maxRecursionDepth = settings.get("task.maxRecursionDepth") ?? 2;
 	const maxRuntimeMs = Math.max(
@@ -2648,7 +2660,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				}
 			}
 
-			const effectiveCwd = worktree ?? cwd;
+			const effectiveCwd = worktree ?? workdir ?? cwd;
 			const sessionManager = sessionFile
 				? await awaitAbortable(
 						SessionManager.open(sessionFile, undefined, undefined, {
@@ -2710,7 +2722,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 			// (`buildSubagentSystemPrompt`); `sessionManager` and the
 			// launch-latency probe are supplied per session, never stored.
 			const sessionTemplate: SubagentSessionTemplate = {
-				cwd: worktree ?? cwd,
+				cwd: worktree ?? workdir ?? cwd,
 				authStorage,
 				modelRegistry,
 				settings: subagentSettings,
@@ -2742,7 +2754,11 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					planReference: options.planReference?.content ?? "",
 					planReferencePath: options.planReference?.path ?? "",
 					worktree: worktree ?? "",
-					scratch: scratchDir ?? "",
+					workdir: workdir ?? "",
+					// One path, one description: for a non-repo isolated spawn the
+					// workdir IS the scratch dir, and the Working Directory block
+					// already tells it the dir is disposable and GC'd.
+					scratch: workdir ? "" : (scratchDir ?? ""),
 					outputSchema: normalizedOutputSchema,
 					outputSchemaOverridesAgent: options.outputSchemaOverridesAgent === true,
 					ircEnabled,
@@ -2971,7 +2987,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 					aborted,
 					abortKind: monitor.abortKind(),
 					keepAlive: options.keepAlive !== false,
-					isolated: worktree !== undefined,
+					isolated: worktree !== undefined || workdir !== undefined,
 					agentIdleTtlMs,
 					reviveSession,
 				});

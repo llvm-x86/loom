@@ -12,6 +12,7 @@ import * as discoveryModule from "@oh-my-pi/pi-coding-agent/task/discovery";
 import * as executorModule from "@oh-my-pi/pi-coding-agent/task/executor";
 import type { IsolationContext } from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
 import * as isolationRunner from "@oh-my-pi/pi-coding-agent/task/isolation-runner";
+import * as scratchModule from "@oh-my-pi/pi-coding-agent/task/scratch";
 import * as lockModule from "@oh-my-pi/pi-coding-agent/task/shared-tree-lock";
 import {
 	buildStructuredSubagentRecoveryHint,
@@ -21,6 +22,7 @@ import {
 	type StructuredSubagentRequest,
 } from "@oh-my-pi/pi-coding-agent/task/structured-subagent";
 import { type AgentDefinition, getTaskSchema, type SingleResult } from "@oh-my-pi/pi-coding-agent/task/types";
+import { NoIsolationRepoError } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools";
 import { $ } from "bun";
 
@@ -44,6 +46,7 @@ function session(
 		serializeSharedTree?: boolean;
 		cwd?: string;
 		repoRoot?: string;
+		nonRepo?: "workdir" | "error";
 	} = {},
 ): ToolSession {
 	return {
@@ -57,6 +60,7 @@ function session(
 			"task.isolation.required": options.isolationRequired ?? false,
 			"task.isolation.serializeSharedTree": options.serializeSharedTree ?? false,
 			"task.isolation.repoRoot": options.repoRoot ?? "",
+			"task.isolation.nonRepo": options.nonRepo ?? "workdir",
 			"task.enableLsp": true,
 		}),
 		getSessionFile: () => null,
@@ -475,7 +479,68 @@ describe("structured subagent primitive", () => {
 		).rejects.toThrow("Spawn cwd is not an existing directory");
 	});
 
-	/** Isolation intended, but no repo to build a worktree from ⇒ degraded. */
+	it("isolates a non-repo spawn in a disposable workdir instead of refusing it", async () => {
+		// A session rooted in a container directory (~/workspace) is a legitimate
+		// place to spawn from: the subagent is there to clone what it needs.
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(
+			new NoIsolationRepoError("not a checkout"),
+		);
+		const workdir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-workdir-"));
+		vi.spyOn(scratchModule, "ensureScratchDir").mockResolvedValue(workdir);
+		const ran = vi.spyOn(executorModule, "runSubprocess").mockResolvedValue(result());
+
+		const settled = await runStructuredSubagent(
+			request({
+				session: session({ isolationMode: "worktree" }),
+				isolation: { requested: true },
+				retainArtifacts: true,
+			}),
+		);
+
+		expect(ran.mock.calls[0]?.[0].workdir).toBe(workdir);
+		expect(settled.mergeSummary).toContain(workdir);
+		expect(settled.mergeSummary).toContain("Nothing is merged back");
+		// Not the degraded path: it never touched the parent's directory.
+		expect(settled.mergeSummary).not.toContain("UNAVAILABLE here");
+		await fs.rm(workdir, { recursive: true, force: true });
+	});
+
+	it("refuses an explicitly isolated non-repo spawn when task.isolation.nonRepo is error", async () => {
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(
+			new NoIsolationRepoError("not a checkout"),
+		);
+		const scratch = vi.spyOn(scratchModule, "ensureScratchDir");
+
+		await expect(
+			runStructuredSubagent(
+				request({
+					session: session({ isolationMode: "worktree", nonRepo: "error" }),
+					isolation: { requested: true },
+				}),
+			),
+		).rejects.toThrow("Isolated subagent execution requires a git repository");
+		expect(scratch).not.toHaveBeenCalled();
+	});
+
+	it("keeps a worktree setup failure inside a real repo an error, never a workdir", async () => {
+		// Only the absence of a checkout earns a disposable workdir. A repo that
+		// exists but whose worktree could not be built is a real failure: handing
+		// it an empty directory would hide it behind a subagent that "worked".
+		mockDiscovery();
+		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("worktree add failed"));
+		const scratch = vi.spyOn(scratchModule, "ensureScratchDir");
+
+		await expect(
+			runStructuredSubagent(
+				request({ session: session({ isolationMode: "worktree" }), isolation: { requested: true } }),
+			),
+		).rejects.toThrow("worktree add failed");
+		expect(scratch).not.toHaveBeenCalled();
+	});
+
+	/** Isolation intended, but its setup failed ⇒ runs in the parent's tree. */
 	function degradedSession(overrides: Parameters<typeof session>[0] = {}) {
 		vi.spyOn(isolationRunner, "prepareIsolationContext").mockRejectedValue(new Error("not a repository"));
 		return session({ isolationMode: "worktree", isolationByDefault: true, serializeSharedTree: true, ...overrides });

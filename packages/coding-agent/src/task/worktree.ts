@@ -6,12 +6,12 @@ import * as natives from "@oh-my-pi/pi-natives";
 import { getWorktreeDir, isEnoent, logger, Snowflake } from "@oh-my-pi/pi-utils";
 import * as git from "../utils/git";
 import * as jj from "../utils/jj";
-import { mapWithConcurrencyLimit } from "./parallel";
 import {
 	type BuildArtifactLinkMode,
 	linkParentBuildArtifacts,
 	shouldSkipLinkedIgnoredEntry,
 } from "./link-build-artifacts";
+import { mapWithConcurrencyLimit } from "./parallel";
 import { sweepOrphanedWorkspacesOnce, TASK_ISOLATION_OWNER_FILE } from "./worktree-gc";
 
 export type { BuildArtifactLinkMode } from "./link-build-artifacts";
@@ -78,6 +78,17 @@ async function findChildRepos(dir: string): Promise<string[]> {
 	return [...new Set(results.filter((root): root is string => !!root))].sort();
 }
 
+/**
+ * There is no checkout to isolate against at all — as opposed to a checkout
+ * that exists but whose isolation setup failed, or a misconfigured
+ * `task.isolation.repoRoot`. Callers use this to distinguish "this directory
+ * is a container, give the spawn its own disposable workdir" from a genuine
+ * failure that must surface.
+ */
+export class NoIsolationRepoError extends Error {
+	override readonly name = "NoIsolationRepoError";
+}
+
 export async function getRepoRoot(cwd: string, options: RepoRootOptions = {}): Promise<string> {
 	// Pure-jj check runs first so a jj workspace nested under an unrelated
 	// outer Git checkout is rejected at its own root rather than silently
@@ -126,11 +137,11 @@ export async function getRepoRoot(cwd: string, options: RepoRootOptions = {}): P
 	if (children.length > 1) {
 		const sample = children.slice(0, REPO_CANDIDATE_SAMPLE).map(p => path.basename(p));
 		const more = children.length > sample.length ? `, +${children.length - sample.length} more` : "";
-		throw new Error(
+		throw new NoIsolationRepoError(
 			`Git repository not found for isolated task execution: ${cwd} is not a checkout, but contains ${children.length} of them (${sample.join(", ")}${more}). Isolation will not guess which one this spawn is for — pass \`cwd\` on the spawn (e.g. cwd: ${JSON.stringify(children[0])}), or set \`task.isolation.repoRoot\`.`,
 		);
 	}
-	throw new Error(
+	throw new NoIsolationRepoError(
 		`Git repository not found for isolated task execution (cwd: ${cwd}). Start the session inside a checkout, pass \`cwd\` on the spawn, or set \`task.isolation.repoRoot\`.`,
 	);
 }

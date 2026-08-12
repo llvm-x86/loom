@@ -12,6 +12,7 @@ import {
 	getGitNoIndexNullPath,
 	getRepoRoot,
 	mergeTaskBranches,
+	NoIsolationRepoError,
 	parseIsolationMode,
 } from "@oh-my-pi/pi-coding-agent/task/worktree";
 import * as git from "@oh-my-pi/pi-coding-agent/utils/git";
@@ -422,10 +423,7 @@ describe("worktree isolation helpers", () => {
 				const { repo: parent } = await createGitRepo();
 				const dead = path.join(parent, "dead-worktree");
 				await fs.mkdir(dead, { recursive: true });
-				await fs.writeFile(
-					path.join(dead, ".git"),
-					"gitdir: /nonexistent/primary/.git/worktrees/dead-worktree\n",
-				);
+				await fs.writeFile(path.join(dead, ".git"), "gitdir: /nonexistent/primary/.git/worktrees/dead-worktree\n");
 				await fs.writeFile(path.join(dead, "orphaned.txt"), "stale checkout content\n");
 
 				const baseline = await captureBaseline(parent);
@@ -577,6 +575,9 @@ describe("getRepoRoot", () => {
 		tempDirs.push(dir);
 		await expect(getRepoRoot(dir)).rejects.toThrow("Git repository not found for isolated task execution");
 		await expect(getRepoRoot(dir)).rejects.toThrow(/task\.isolation\.repoRoot/);
+		// Typed, because the caller routes on it: only "there is no checkout"
+		// earns a disposable workdir; a setup failure must still surface.
+		await expect(getRepoRoot(dir)).rejects.toBeInstanceOf(NoIsolationRepoError);
 	});
 
 	it("resolves the only child checkout when cwd is a container directory", async () => {
@@ -594,6 +595,7 @@ describe("getRepoRoot", () => {
 		await initRepoAt(path.join(container, "beta"));
 		await expect(getRepoRoot(container)).rejects.toThrow(/contains 2 of them \(alpha, beta\)/);
 		await expect(getRepoRoot(container)).rejects.toThrow(/pass `cwd` on the spawn/);
+		await expect(getRepoRoot(container)).rejects.toBeInstanceOf(NoIsolationRepoError);
 	});
 
 	it("uses configuredRoot when cwd is not a checkout", async () => {

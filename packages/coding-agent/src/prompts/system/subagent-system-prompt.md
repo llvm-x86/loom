@@ -32,6 +32,13 @@ You are working in an isolated working tree at `{{worktree}}` for this sub-task.
 You NEVER modify files outside this tree or in the original repository.
 {{/if}}
 
+{{#if workdir}}
+# Working Directory
+You are running in a disposable working directory at `{{workdir}}`. The session's directory is NOT a git checkout, so there is no repository to isolate against and nothing is merged back for you.
+Clone whatever repositories you need HERE (`gh repo clone`, `git clone`) and work inside those clones.
+You NEVER create files, clones, or worktrees outside this directory. Anything that must survive MUST be pushed to a remote or returned in your final output — this directory is owned by your run and garbage-collected after it.
+{{/if}}
+
 {{#if scratch}}
 # Scratch Space
 Disposable files (repro scripts, fixtures, cookie jars, temp JSON, downloaded archives) go in `{{scratch}}` — it is owned by this task and garbage-collected. Your tools also see it as `$OMP_RUN_SCRATCH`.
