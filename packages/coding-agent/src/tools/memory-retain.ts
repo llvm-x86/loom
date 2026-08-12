@@ -28,7 +28,8 @@ export class MemoryRetainTool implements AgentTool<typeof memoryRetainSchema> {
 
 	static createIf(session: ToolSession): MemoryRetainTool | null {
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		// Mnemopi sessions request writes through the single `memory` tool.
+		if (backend !== "hindsight") return null;
 		return new MemoryRetainTool(session);
 	}
 

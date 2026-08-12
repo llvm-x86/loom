@@ -567,7 +567,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 			MINIMAX_PROVIDER_OR_ID_PATTERN.test(provider) || MINIMAX_PROVIDER_OR_ID_PATTERN.test(spec.id),
 		emptyLengthFinishIsContextError: provider === "ollama",
 		usesOpenAIToolCallIdLimit: provider === "openai",
-		promptCacheSessionHeader: isGrok ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader: isGrok
+			? "x-grok-conv-id"
+			: provider === "fireworks"
+				? "x-session-affinity"
+				: undefined,
 		dropThinkingWhenReasoningEffort: provider === "fireworks",
 	};
 
@@ -701,7 +705,12 @@ export function buildOpenAIResponsesCompat(spec: OpenAIResponsesSpecLike): Resol
 			MINIMAX_PROVIDER_OR_ID_PATTERN.test(spec.provider) || (id ? MINIMAX_PROVIDER_OR_ID_PATTERN.test(id) : false),
 		emptyLengthFinishIsContextError: spec.provider === "ollama",
 		usesOpenAIToolCallIdLimit: spec.provider === "openai",
-		promptCacheSessionHeader: spec.provider === "xai-oauth" ? "x-grok-conv-id" : undefined,
+		promptCacheSessionHeader:
+			spec.provider === "fireworks"
+				? "x-session-affinity"
+				: spec.provider === "xai-oauth"
+					? "x-grok-conv-id"
+					: undefined,
 		streamIdleTimeoutMs: isLocalServingBackend
 			? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
 			: spec.compat?.streamIdleTimeoutMs,

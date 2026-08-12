@@ -1,11 +1,11 @@
-import { rm } from "node:fs/promises";
+import { cp, mkdir, rm } from "node:fs/promises";
 import * as path from "node:path";
 import { type ApiKeyResolver, completeSimple } from "@oh-my-pi/pi-ai";
 import { hostMatchesUrl } from "@oh-my-pi/pi-catalog/hosts";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
 import type * as MnemopiDiagnoseNs from "@oh-my-pi/pi-mnemopi/diagnose";
 import type { DiagnosticSummary } from "@oh-my-pi/pi-mnemopi/diagnose";
-import { logger } from "@oh-my-pi/pi-utils";
+import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
 import type { ModelRegistry } from "../config/model-registry";
 import { resolveRoleSelection } from "../config/model-resolver";
 import type {
@@ -38,6 +38,7 @@ import {
 	requireMnemopiCore,
 	setMnemopiSessionState,
 } from "./state";
+import { readTreeWriteLog } from "./tree";
 
 // `/diagnose` is the only user of this subpath; load it lazily alongside the
 // loaders in ./state to keep mnemopi off the CLI startup module graph.
@@ -156,7 +157,9 @@ export const mnemopiBackend: MemoryBackend = {
 		const { targets, owned } = createStatsTargets(agentDir, session);
 		try {
 			if (targets.length === 0) return undefined;
-			return renderMnemopiStats(targets);
+			const config = session ? loadMnemopiConfig(session.settings, agentDir) : undefined;
+			const treeSection = config ? renderTreeStatsSection(config, targets) : "";
+			return `${renderMnemopiStats(targets)}${treeSection}`;
 		} finally {
 			for (const memory of owned) memory.close();
 		}
@@ -263,6 +266,12 @@ export const mnemopiBackend: MemoryBackend = {
 			veracity: "user",
 			memoryType: "fact",
 		});
+		if (id) {
+			primary.markTreeChange();
+			void primary.renderMemoryTree().catch((error: unknown) => {
+				logger.warn("Mnemopi: tree render after memory save failed.", { error: String(error) });
+			});
+		}
 		return {
 			backend: "mnemopi",
 			stored: id ? 1 : 0,
@@ -270,10 +279,81 @@ export const mnemopiBackend: MemoryBackend = {
 			message: id ? undefined : "Mnemopi did not return a stored memory id.",
 		};
 	},
-
 	async preCompactionContext(messages, _settings, session): Promise<string | undefined> {
 		const state = getMnemopiSessionState(session);
 		return await state?.recallForCompaction(messages);
+	},
+
+	/** Reconcile now: materialise the banks into the tree (`/memory apply|reconcile`). */
+	async apply(agentDir, _cwd, session): Promise<string | undefined> {
+		let state = getMnemopiSessionState(session);
+		if (!state && session) {
+			const config = await loadMnemopiConfigWithProviders(
+				session.settings,
+				agentDir,
+				session.modelRegistry,
+				session.sessionId,
+			);
+			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
+			state = new MnemopiSessionState({ sessionId: session.sessionId, config, session });
+			setMnemopiSessionState(session, state);
+		}
+		if (!state) return undefined;
+		await state.renderMemoryTree();
+		const treeRoot = state.config.treeRoot;
+		const { targets, owned } = createStatsTargets(agentDir, session);
+		try {
+			const history = targets.map(target => {
+				const last = readTreeWriteLog(target.memory, 1)[0];
+				return last
+					? `- ${target.bank}: last pass wrote ${last.written}, adopted ${last.adopted}, gc ${last.gc} at ${last.at.slice(0, 19)}Z`
+					: `- ${target.bank}: no reconcile recorded yet`;
+			});
+			return [`Memory tree reconciled at \`${treeRoot}\`.`, ...history].join("\n");
+		} finally {
+			for (const memory of owned) memory.close();
+		}
+	},
+
+	/** Bundle tree + bank files into a timestamped backup artifact (`/memory backup`). */
+	async backup(agentDir, _cwd, session): Promise<string | undefined> {
+		const state = getMnemopiSessionState(session);
+		const config = state?.config ?? (session ? loadMnemopiConfig(session.settings, agentDir) : undefined);
+		if (!config) return undefined;
+		await loadMnemopiCore();
+		const backupsDir = path.join(getMemoriesDir(agentDir), "backups");
+		await mkdir(backupsDir, { recursive: true });
+		const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+		const base = path.join(backupsDir, `memory-${stamp}`);
+		const tarPath = `${base}.tar.gz`;
+		let tarred = false;
+		try {
+			const child = Bun.spawn([
+				"tar",
+				"czf",
+				tarPath,
+				"-C",
+				path.dirname(config.treeRoot),
+				path.basename(config.treeRoot),
+			]);
+			tarred = (await child.exited) === 0;
+		} catch {
+			tarred = false;
+		}
+		if (!tarred) {
+			await rm(tarPath, { force: true }).catch(() => {});
+			return `Backup failed: could not tar the tree at ${config.treeRoot}.`;
+		}
+		let copied = 0;
+		for (const dbPath of getMnemopiScopedDbPaths(config)) {
+			try {
+				await cp(dbPath, `${base}-${path.basename(dbPath)}`);
+				copied += 1;
+			} catch {
+				// missing/locked sidecar; best-effort
+			}
+		}
+		return `${tarPath} (+ ${copied} sqlite snapshot${copied === 1 ? "" : "s"})`;
 	},
 };
 
@@ -348,6 +428,23 @@ function renderMnemopiStats(targets: readonly MnemopiStatsTarget[]): string {
 			`| ${escapeMarkdownTableCell(target.bank)} | ${statCount(stats.beam.working_memory)} | ${statCount(
 				stats.beam.episodic_memory,
 			)} | ${stats.beam.triples.total} | ${escapeMarkdownTableCell(stats.last_memory ?? "never")} | ${escapeMarkdownTableCell(shortenPath(stats.database))} |`,
+		);
+	}
+	return lines.join("\n");
+}
+
+function renderTreeStatsSection(config: MnemopiBackendConfig, targets: readonly MnemopiStatsTarget[]): string {
+	const lines = [
+		"",
+		"## Memory Tree",
+		`- root: \`${config.treeRoot}\` (enabled: ${config.treeEnabled}, entry cap ${config.treeEntryRows}, archive GC ${config.treeArchiveGcDays}d, dedupe ${config.treeDedupe})`,
+	];
+	for (const target of targets) {
+		const last = readTreeWriteLog(target.memory, 1)[0];
+		lines.push(
+			last
+				? `- ${target.bank}: last reconcile ${last.at.slice(0, 19)}Z — ${last.leaves} leaf(ren), wrote ${last.written}, adopted ${last.adopted}, gc ${last.gc}`
+				: `- ${target.bank}: no reconcile recorded yet`,
 		);
 	}
 	return lines.join("\n");

@@ -90,6 +90,51 @@ If the requested memory role is not configured, memory model resolution falls ba
 
 Additional tuning knobs (concurrency, lease durations, token budgets) are available in config for advanced use.
 
+## Mnemopi memory tree
+
+Under `memory.backend: mnemopi` (the default), long-term memory is rendered as a
+**background-maintained file tree** the agent reads with its normal file tools:
+
+```text
+<treeRoot>/
+  MEMORY.md                      entry point: subtree rollup
+  <subtree>/MEMORY.md            entry point: leaf headers for the subtree
+  <subtree>/<slug>.md            leaf (YAML-lite header + ≤4KB body)
+  archive/<subtree>/<slug>.md    leaves whose bank row is archived
+```
+
+The mnemopi SQLite bank is the source of truth; every file under the tree is a
+pure projection of it. Working agents never write tree files: they read the
+index → subtree entry points → leaf bodies with `read`/`glob`/`grep`, and
+request changes through the single `memory` tool:
+
+| Action    | Effect                                                        |
+| --------- | ------------------------------------------------------------- |
+| `add`     | Record one fact (optionally under a `target` subtree)         |
+| `replace` | Update the content of the memory matching a substring         |
+| `remove`  | Delete the memory matching a substring                        |
+| `restore` | Bring an archived memory back to the active tree              |
+
+The tool mutates the bank and schedules a render; the background reconcile pass
+writes the leaf + entry points. Renders are idempotent. External hand-edits to a
+leaf whose file mtime is newer than its bank row are adopted back into the bank
+(body wins, metadata stays background-owned); stale leaves are removed; archived
+rows render under `archive/`. Deleting the whole tree is safe — the next pass
+re-materialises it.
+
+Tool surfaces under mnemopi: `recall`/`retain`/`reflect` gate on
+`memory.backend: hindsight`, and `memory_edit` is inert — the `memory` tool is
+the single write channel for the tree backend. Turn retentions and
+consolidations still feed the bank and drive re-renders automatically.
+
+## Configuration
+
+| Setting                                | Default | Description                                                            |
+| -------------------------------------- | ------- | ---------------------------------------------------------------------- |
+| `mnemopi.treeEnabled`                  | `true`  | Render the bank as the file tree on retain/consolidate passes          |
+| `mnemopi.treeRoot`                     | *derived* | Root of the memory tree (`<memories>/tree` when unset)               |
+| `mnemopi.treeLeafCharCap`              | `4096`  | Per-leaf body cap in characters (min 512)                              |
+
 ## Key files
 
 - `packages/coding-agent/src/memories/index.ts` — pipeline orchestration, injection, clear/enqueue entry points (the `/memory` command routes here via `packages/coding-agent/src/memory-backend/local-backend.ts`)

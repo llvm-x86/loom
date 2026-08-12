@@ -25,7 +25,9 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 
 	static createIf(session: ToolSession): MemoryRecallTool | null {
 		const backend = session.settings.get("memory.backend");
-		if (backend !== "hindsight" && backend !== "mnemopi") return null;
+		// Mnemopi sessions read the background-maintained memory tree with
+		// native file tools; recall remains for the Hindsight backend.
+		if (backend !== "hindsight") return null;
 		return new MemoryRecallTool(session);
 	}
 

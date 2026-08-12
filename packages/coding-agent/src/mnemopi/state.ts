@@ -18,6 +18,7 @@ import { extractMessages } from "../hindsight/transcript";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import type { MnemopiBackendConfig, MnemopiScoping } from "./config";
 import { mnemopiEmbedClient } from "./embed-client";
+import { findMemoryIdByNormalizedContent, renderMemoryTree, restoreMemoryRow } from "./tree";
 
 // The mnemopi package pulls the embeddings stack; keep it off the CLI startup
 // module graph by loading it lazily at the async boundaries that need it.
@@ -224,8 +225,10 @@ export function planMemoryBatch(
 		if (!target) return { ok: false, failedIndex: index, reason: `memory ${item.id} was not found` };
 		if (target.store === "fact")
 			return { ok: false, failedIndex: index, reason: `memory ${item.id} is a read-only fact` };
-		if ((item.op === "update" || item.op === "forget" || item.op === "replace" || item.op === "remove") &&
-			target.store !== "working")
+		if (
+			(item.op === "update" || item.op === "forget" || item.op === "replace" || item.op === "remove") &&
+			target.store !== "working"
+		)
 			return { ok: false, failedIndex: index, reason: `memory ${item.id} was not found in a working store` };
 		if (!pending.has(item.id)) pending.set(item.id, target.content);
 		const current = pending.get(item.id) ?? target.content;
@@ -318,6 +321,8 @@ export class MnemopiSessionState {
 	lastRetainedTurn: number;
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
+	/** Set by the memory tool; the next turn-start prompt nudges verification. */
+	treeChangePending = false;
 	unsubscribe?: () => void;
 
 	constructor(options: MnemopiSessionStateOptions) {
@@ -519,8 +524,97 @@ export class MnemopiSessionState {
 		}
 	}
 
+	/**
+	 * The single agent-facing write funnel (memory tool + backend save):
+	 * dedupes repeated fact writes against the bank and restores archived
+	 * rows re-linked by a new memory's `connections`. The bank row is the
+	 * ledger entry; the tree materialises it on the next reconcile pass.
+	 */
 	rememberScoped(memory: MnemopiRememberInput, options: MnemopiRememberOptions = {}): string | undefined {
-		return this.rememberInScope(memory, options);
+		const content = typeof memory === "string" ? memory : memory.content;
+		if (this.config.treeDedupe && typeof content === "string") {
+			const existing = findMemoryIdByNormalizedContent(this.scoped.retain.memory, content);
+			if (existing !== undefined) {
+				// The bank already holds this fact (whitespace/case-insensitive
+				// match); keep the canonical row and leaf — the add is a no-op,
+				// unless the row is archived, in which case re-adding revives it.
+				const archived = this.scoped.retain.memory.db
+					.prepare(
+						"SELECT id FROM working_memory WHERE id = ? AND (valid_until IS NOT NULL OR superseded_by IS NOT NULL)",
+					)
+					.get(existing);
+				if (archived) this.restoreScopedMemory(existing);
+				return existing;
+			}
+		}
+		const id = this.rememberInScope(memory, options);
+		if (id !== undefined) this.restoreRelinkedArchived(options.metadata);
+		return id;
+	}
+
+	/** A new memory's `connections` can revive archived siblings (re-link restore). */
+	private restoreRelinkedArchived(metadata: { connections?: unknown } | null | undefined): void {
+		if (!metadata || !Array.isArray(metadata.connections)) return;
+		for (const linked of metadata.connections) {
+			if (typeof linked !== "string" || linked.trim() === "") continue;
+			this.restoreScopedMemory(linked.trim());
+		}
+	}
+
+	/**
+	 * Render every scoped bank into the background-maintained memory tree
+	 * (`mnemopi.treeRoot`). Files are the agent-readable projection; the bank
+	 * is the source of truth. Non-throwing — a render failure must never break
+	 * the agent loop. Aliased subagent states defer to their parent: they share
+	 * the same banks, and concurrent renders would clobber entry points.
+	 */
+	async renderMemoryTree(): Promise<void> {
+		if (!this.config.treeEnabled || this.aliasOf) return;
+		const seen = new Set<string>();
+		const scoped: MnemopiScopedMemory[] = [this.scoped.retain, ...this.scoped.recall];
+		if (this.scoped.global) scoped.push(this.scoped.global);
+		for (const entry of scoped) {
+			if (seen.has(entry.bank)) continue;
+			seen.add(entry.bank);
+			try {
+				await renderMemoryTree({
+					memory: entry.memory,
+					bank: entry.bank,
+					treeRoot: this.config.treeRoot,
+					leafCharCap: this.config.treeLeafCharCap,
+					entryRows: this.config.treeEntryRows,
+					archiveGcDays: this.config.treeArchiveGcDays,
+				});
+			} catch (error) {
+				if (this.config.debug) {
+					logger.debug("Mnemopi: memory tree render failed", { bank: entry.bank, error: String(error) });
+				}
+			}
+		}
+		this.treeChangePending = false;
+	}
+
+	/** Flag a pending tree change; the next turn-start prompt nudges the agent to verify. */
+	markTreeChange(): void {
+		this.treeChangePending = true;
+	}
+
+	/**
+	 * Undo archival for a memory id across every scoped bank. Restored rows
+	 * render back under the active tree on the next reconcile pass.
+	 */
+	restoreScopedMemory(id: string): boolean {
+		const targets = dedupeScopedTargets([
+			this.scoped.retain,
+			...this.scoped.recall,
+			...(this.scoped.global ? [this.scoped.global] : []),
+		]);
+		for (const target of targets) {
+			const row = target.memory.get(id);
+			if (!row) continue;
+			return restoreMemoryRow(target.memory, id);
+		}
+		return false;
 	}
 
 	async recallForContext(query: string): Promise<string | undefined> {
@@ -530,18 +624,28 @@ export class MnemopiSessionState {
 	}
 
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
-		if (!this.config.autoRecall || this.hasRecalledForFirstTurn) return undefined;
-		const latestPrompt = promptText.trim();
-		if (!latestPrompt) return undefined;
-		const history = extractMessages(this.session.sessionManager);
-		const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
-		const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
-		const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
-		const context = await this.recallForContext(truncated);
-		this.hasRecalledForFirstTurn = true;
-		if (!context) return undefined;
-		this.lastRecallSnippet = context;
-		return context;
+		const parts: string[] = [];
+		if (this.config.autoRecall && !this.hasRecalledForFirstTurn) {
+			const latestPrompt = promptText.trim();
+			if (latestPrompt) {
+				const history = extractMessages(this.session.sessionManager);
+				const queryMessages = [...history, { role: "user" as const, content: latestPrompt }];
+				const query = composeRecallQuery(latestPrompt, queryMessages, this.config.recallContextTurns);
+				const truncated = truncateRecallQuery(query, latestPrompt, this.config.recallMaxQueryChars);
+				const context = await this.recallForContext(truncated);
+				this.hasRecalledForFirstTurn = true;
+				if (context) {
+					this.lastRecallSnippet = context;
+					parts.push(context);
+				}
+			}
+		}
+		if (this.treeChangePending) {
+			parts.push(
+				`Memory: a change you requested awaits materialisation. Read \`${this.config.treeRoot}/MEMORY.md\` to verify the leaf landed.`,
+			);
+		}
+		return parts.length > 0 ? parts.join("\n\n") : undefined;
 	}
 
 	async recallForCompaction(messages: AgentMessage[]): Promise<string | undefined> {
@@ -598,6 +702,11 @@ export class MnemopiSessionState {
 			embedText,
 			veracity: "unknown",
 			memoryType: "episode",
+		});
+		// The background memory system owns the file tree: schedule a reconcile
+		// pass so this retention reaches the agent-readable projection.
+		void this.renderMemoryTree().catch((error: unknown) => {
+			logger.warn("Mnemopi: memory tree render after retain failed.", { error: String(error) });
 		});
 	}
 
@@ -669,6 +778,8 @@ export class MnemopiSessionState {
 				memory.sleep(false);
 			}
 		}
+		// Reconcile the agent-readable file tree now that the banks changed.
+		await this.renderMemoryTree();
 	}
 
 	/**
