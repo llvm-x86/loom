@@ -32,6 +32,9 @@ export interface MnemopiBackendConfig {
 	recallContextTurns: number;
 	recallMaxQueryChars: number;
 	injectionTokenLimit: number;
+	treeEnabled: boolean;
+	treeRoot: string;
+	treeLeafCharCap: number;
 	debug: boolean;
 	providerOptions: MnemopiProviderOptions;
 	llmMode: MnemopiLlmMode;
@@ -78,6 +81,9 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		recallContextTurns: Math.max(1, Math.floor(settings.get("mnemopi.recallContextTurns"))),
 		recallMaxQueryChars: Math.max(256, Math.floor(settings.get("mnemopi.recallMaxQueryChars"))),
 		injectionTokenLimit: Math.max(256, Math.floor(settings.get("mnemopi.injectionTokenLimit"))),
+		treeEnabled: settings.get("mnemopi.treeEnabled"),
+		treeRoot: settings.get("mnemopi.treeRoot") ?? path.join(getMemoriesDir(agentDir), "tree"),
+		treeLeafCharCap: Math.max(512, Math.floor(settings.get("mnemopi.treeLeafCharCap"))),
 		debug: settings.get("mnemopi.debug"),
 		providerOptions: {
 			noEmbeddings: settings.get("mnemopi.noEmbeddings"),

@@ -2713,6 +2713,30 @@ export const SETTINGS_SCHEMA = {
 			condition: "mnemopiActive",
 		},
 	},
+	"mnemopi.treeEnabled": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Background Memory Tree",
+			description:
+				"Render the memory bank into an agent-readable file tree (leaves + MEMORY.md entry points) written only by the background memory system. Agents read it with normal file tools and request changes through the single `memory` tool.",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.treeRoot": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Memory Tree Root",
+			description: "Directory where the background writes the memory tree (default: <agent memories>/tree)",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.treeLeafCharCap": { type: "number", default: 4096 },
 	"mnemopi.noEmbeddings": {
 		type: "boolean",
 		default: false,
