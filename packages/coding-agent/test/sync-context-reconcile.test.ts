@@ -1,5 +1,5 @@
 import { describe, expect, it } from "bun:test";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import * as path from "node:path";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core";
@@ -52,6 +52,30 @@ describe("sync-context repo memory-tree reconcile", () => {
 				"never-opened-repo",
 			);
 			expect(rendered).toBe(false);
+		} finally {
+			await root.remove();
+		}
+	});
+
+	it("skips non-slug repos (path traversal / junk never render)", async () => {
+		const root = await TempDir.create("@sync-context-reconcile-");
+		try {
+			const dbDir = path.join(root.path(), "mnemopi");
+			const bank = "llvm-x86-agent-chat";
+			const dbPath = path.join(dbDir, "banks", bank, "mnemopi.db");
+			const memory = new Mnemopi({ dbPath, bank, sessionId: "reject-test", noEmbeddings: true });
+			memory.remember("row that must never render", { source: "test", scope: "bank" });
+			memory.close();
+
+			const treeRoot = path.join(root.path(), "tree");
+			for (const junk of ["../..", "..", ".", "a/b", "a.b", "with space", "a".repeat(200)]) {
+				expect(await reconcileRepoMemoryTree(treeRoot, dbDir, junk)).toBe(false);
+			}
+			expect(await reconcileRepoMemoryTree(treeRoot, dbDir, bank)).toBe(true);
+			expect(existsSync(path.join(treeRoot, bank, "MEMORY.md"))).toBe(true);
+			// The junk slugs must not have escaped the tree root or written files.
+			const direct = readdirSync(path.join(treeRoot));
+			expect(direct.filter(name => name !== bank).length).toBe(0);
 		} finally {
 			await root.remove();
 		}

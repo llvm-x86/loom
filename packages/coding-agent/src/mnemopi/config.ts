@@ -282,8 +282,7 @@ function bankOnlyHasCwd(dbPath: string, cwd: string): boolean {
 		}
 	}
 }
-
-function sanitizeBankName(value: string | undefined): string | undefined {
+export function sanitizeBankName(value: string | undefined): string | undefined {
 	const raw = value?.trim();
 	if (!raw) return undefined;
 	const sanitized = raw.replace(/[^a-zA-Z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");

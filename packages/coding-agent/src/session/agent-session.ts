@@ -255,6 +255,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
+import { sanitizeBankName } from "../mnemopi/config";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
 import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
@@ -2337,8 +2338,8 @@ export class AgentSession {
 		// transcript touched no checkout.
 		const bankRepo = Bun.env.LOOM_MNEMOPI_BANK_REPO?.trim();
 		if (bankRepo) {
-			const slug = bankRepo.replaceAll("/", "-");
-			if (!repos.includes(slug)) repos.push(slug);
+			const slug = sanitizeBankName(bankRepo);
+			if (slug && !repos.includes(slug)) repos.push(slug);
 		}
 		const record: ContextSyncSpoolRequest = {
 			sessionId: this.sessionId,

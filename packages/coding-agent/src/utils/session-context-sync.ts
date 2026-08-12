@@ -18,6 +18,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
 import { resolveDefaultRepoMemoized } from "../tools/gh";
+import { sanitizeBankName } from "../mnemopi/config";
 import { expandTilde } from "../tools/path-utils";
 import {
 	type ContextActivityEvent,
@@ -239,8 +240,8 @@ async function resolveTouchedSlugs(
 		try {
 			const repo = await resolveRepo(dir);
 			if (repo) {
-				const slug = repo.replaceAll("/", "-");
-				if (!bySlug.has(slug)) bySlug.set(slug, dir);
+				const slug = sanitizeBankName(repo);
+				if (slug && !bySlug.has(slug)) bySlug.set(slug, dir);
 			}
 		} catch {
 			// Not a checkout / no remote — skip.
@@ -966,7 +967,10 @@ export async function detectTouchedRepos(
 	const resolveRepo = deps.resolveRepo ?? (cwd => resolveDefaultRepoMemoized(cwd));
 	try {
 		const repo = await resolveRepo(session.cwd);
-		if (repo) return [repo.replaceAll("/", "-")];
+		if (repo) {
+			const slug = sanitizeBankName(repo);
+			if (slug) return [slug];
+		}
 	} catch {
 		// Not a checkout — fall through to multi-repo detection.
 	}

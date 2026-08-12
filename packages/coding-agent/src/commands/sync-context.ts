@@ -46,7 +46,7 @@ import {
 	type SessionContextSyncSession,
 } from "../utils/session-context-sync";
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
-import { loadMnemopiConfig } from "../mnemopi/config";
+import { loadMnemopiConfig, sanitizeBankName } from "../mnemopi/config";
 import { loadMnemopi, loadMnemopiCore } from "../mnemopi/state";
 import { renderMemoryTree } from "../mnemopi/tree";
 
@@ -61,6 +61,15 @@ interface SyncContextSummary {
 }
 
 const VALID_REASONS: readonly SessionContextSyncReason[] = ["compaction", "shutdown", "idle"];
+
+/**
+ * A memory-bank slug is what sanitizeBankName emits (and what every producer
+ * — detectTouchedRepos, resolveTouchedSlugs, the env bank-repo spool entry —
+ * now writes into spool/close-pass repos): letters/digits/_/- only, 1-64
+ * chars. Anything else is either a traversal attempt ("..", "../x") or junk
+ * that could name a path segment outside the tree root when joined.
+ */
+const BANK_SLUG_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /** Fixed session identity on every ledger-repair event (frozen wire shape). */
 const REPAIR_SESSION_LABEL = "ledger-repair";
@@ -223,8 +232,9 @@ async function runRepairMode(target: string, dryRun: boolean, activityId: string
  * repo slugs are GitHub `owner-repo` strings — identical to the repo-keyed
  * bank id (`mnemopi.bankRepo` / `LOOM_MNEMOPI_BANK_REPO`), so the bank name
  * IS the slug. Lanes that ran without a repo key used cwd-derived banks and
- * rendered in-process; here a missing bank file is simply skipped. Purely a
- * read of the bank plus file writes — never mutates the sqlite, never embeds.
+ * rendered in-process; here a missing bank file is simply skipped. The
+ * render reads bank rows and writes the tree projection (plus the tree
+ * write-log row) — it never touches working-memory rows or embeddings.
  */
 async function reconcileRepoMemoryTrees(settings: Settings, repos: readonly string[]): Promise<void> {
 	const config = loadMnemopiConfig(settings, getAgentDir());
@@ -254,6 +264,9 @@ export async function reconcileRepoMemoryTree(
 	repo: string,
 	opts: { leafCharCap?: number; entryRows?: number; archiveGcDays?: number } = {},
 ): Promise<boolean> {
+	// Defensive: the slug doubles as a path segment below `<treeRoot>` and
+	// the bank name. Only canonical slugs may render — junk is skipped.
+	if (!BANK_SLUG_RE.test(repo)) return false;
 	await loadMnemopi();
 	const { BankManager, Mnemopi } = await loadMnemopiCore();
 	const dbPath = new BankManager(dbDir).getBankDbPath(repo);
@@ -311,14 +324,26 @@ export default class SyncContext extends Command {
 			await runRepairMode(flags.repair, flags["dry-run"] === true, flags["activity-id"]);
 			return;
 		}
-		// Spool-record repos (env-keyed banks like LOOM_MNEMOPI_BANK_REPO)
-		// that a resumed session's own git-based repo detection cannot see.
-		// Merged with `event.repos` in the close pass so every bank the
-		// closed session touched gets its tree rendered.
-		const spoolRepos = (flags.repos ?? "")
+		// Fold every producer's slug form into the canonical bank id
+		// (sanitizeBankName output): dotted/slashed remotes normalize to
+		// `owner-repo`, whitespace collapses, and traversal/junk slugs that
+		// sanitize to nothing are rejected outright — the worker's forged-
+		// record defense. Dedupe (a repo can appear in both the resume event
+		// repos and the spool repos).
+		const rawRepos = (flags.repos ?? "")
 			.split(",")
 			.map(repo => repo.trim())
 			.filter(Boolean);
+		const spoolRepos = [
+			...new Set(
+				rawRepos.map(repo => sanitizeBankName(repo)).filter((repo): repo is string => Boolean(repo)),
+			),
+		];
+		if (rawRepos.length > 0 && spoolRepos.length === 0) {
+			throw new CliUsageError(
+				`sync-context --repos contains no valid repo slugs (allowed: 1-64 chars of [A-Za-z0-9_-]): ${JSON.stringify(flags.repos)}`,
+			);
+		}
 
 		const reason: SessionContextSyncReason = (VALID_REASONS as readonly string[]).includes(flags.reason ?? "")
 			? (flags.reason as SessionContextSyncReason)
