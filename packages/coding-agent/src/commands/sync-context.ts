@@ -285,6 +285,13 @@ export default class SyncContext extends Command {
 		repair: Flags.string({
 			description: "LLM-free on-disk ledger repair: a repo slug, or 'all' for every ledger in the directory",
 		}),
+		repos: Flags.string({
+			description:
+				"Comma-separated repo slugs to include in the close pass — from the shutdown " +
+				"spool record, whose repos include env-keyed memory banks (LOOM_MNEMOPI_BANK_REPO) " +
+				"that the resumed session's own git-based repo detection cannot see",
+			default: "",
+		}),
 		"dry-run": Flags.boolean({
 			description: "With --repair: compute and validate only; write nothing",
 		}),
@@ -307,6 +314,15 @@ export default class SyncContext extends Command {
 			: "shutdown";
 
 		const summary: SyncContextSummary = { ok: false, repos: [], tokens_in: 0, tokens_out: 0 };
+
+		// Spool-record repos (env-keyed banks like LOOM_MNEMOPI_BANK_REPO)
+		// that the resumed session's own repo detection cannot see. Merged
+		// with `event.repos` later so the close pass renders every bank the
+		// closed session touched.
+		const spoolRepos = (flags.repos ?? "")
+			.split(",")
+			.map(repo => repo.trim())
+			.filter(Boolean);
 		let dispose: (() => Promise<void>) | undefined;
 		try {
 			const sessionManager = await SessionManager.open(flags.resume);
@@ -352,6 +368,9 @@ export default class SyncContext extends Command {
 					}
 				},
 			});
+			for (const repo of spoolRepos) {
+				if (!summary.repos.includes(repo)) summary.repos.push(repo);
+			}
 
 			// Storage handoff: this CLI run IS the service worker's session-close
 			// pass, so render every touched repo's memory tree (an LLM-free
