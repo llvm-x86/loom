@@ -36,6 +36,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{/if}}
 {{/if}}
+  - `cwd`: Directory this item runs in — and the git checkout its isolated worktree is cut from. Defaults to the session's working directory. Pass it when the session was started in a container directory (e.g. `~/workspace`) instead of inside the repo: isolation cannot guess which sibling checkout you mean, and the spawn fails without it.
 {{else}}
 - `name`: A stable CamelCase identifier (≤32 chars), used to address the agent (IRC, job ids). Generated automatically if omitted.
 - `agent`: The agent type to spawn (e.g. `scout`, `reviewer`). Omitting it gives you the general-purpose worker (`{{defaultAgent}}`) — NEVER pass that name explicitly. Only omit it after checking the agent list below and finding no specialist that fits.{{#if allowedAgentsText}} Current spawn policy allows: {{allowedAgentsText}}.{{/if}}
@@ -54,6 +55,7 @@ Agents marked BLOCKING run inline — results return in this call; non-blocking 
 {{/if}}
 {{/if}}
 {{/if}}
+- `cwd`: Directory this spawn runs in — and the git checkout its isolated worktree is cut from. Defaults to the session's working directory. Pass it when the session was started in a container directory (e.g. `~/workspace`) instead of inside the repo: isolation cannot guess which sibling checkout you mean, and the spawn fails without it.
 {{/if}}
 
 # Model Reproducibility

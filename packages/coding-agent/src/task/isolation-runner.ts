@@ -37,6 +37,7 @@ import {
 	commitToBranch,
 	ensureIsolation,
 	getRepoRoot,
+	type RepoRootOptions,
 	type IgnoredChangeScan,
 	type IsolationHandle,
 	mergeTaskBranches,
@@ -55,11 +56,13 @@ export interface IsolationContext {
 
 /**
  * Resolve the git repo root and capture the worktree baseline used to diff
- * each isolated spawn against. Throws when the cwd is not inside a git
- * repository; callers surface the error as a task-tool failure.
+ * each isolated spawn against. When `cwd` is not itself a checkout the root is
+ * recovered from `options.configuredRoot` (`task.isolation.repoRoot`) or from a
+ * single unambiguous child checkout; otherwise this throws and callers surface
+ * the error as a task-tool failure.
  */
-export async function prepareIsolationContext(cwd: string): Promise<IsolationContext> {
-	const repoRoot = await getRepoRoot(cwd);
+export async function prepareIsolationContext(cwd: string, options: RepoRootOptions = {}): Promise<IsolationContext> {
+	const repoRoot = await getRepoRoot(cwd, options);
 	const baseline = await captureBaseline(repoRoot);
 	return { repoRoot, baseline };
 }

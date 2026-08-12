@@ -43,6 +43,7 @@ function session(
 		isolationRequired?: boolean;
 		serializeSharedTree?: boolean;
 		cwd?: string;
+		repoRoot?: string;
 	} = {},
 ): ToolSession {
 	return {
@@ -55,6 +56,7 @@ function session(
 			"task.isolation.byDefault": options.isolationByDefault ?? false,
 			"task.isolation.required": options.isolationRequired ?? false,
 			"task.isolation.serializeSharedTree": options.serializeSharedTree ?? false,
+			"task.isolation.repoRoot": options.repoRoot ?? "",
 			"task.enableLsp": true,
 		}),
 		getSessionFile: () => null,
@@ -442,6 +444,35 @@ describe("structured subagent primitive", () => {
 		expect(ran).toHaveBeenCalled();
 		expect(settled.result.exitCode).toBe(0);
 		await fs.rm(settled.artifactsDir, { recursive: true, force: true });
+	});
+
+	it("resolves isolation from the spawn's cwd and the configured repo root", async () => {
+		// The session sits in a container directory; the spawn names the checkout.
+		mockDiscovery();
+		const prepare = vi
+			.spyOn(isolationRunner, "prepareIsolationContext")
+			.mockRejectedValue(new Error("not a repository"));
+		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-spawncwd-"));
+
+		await expect(
+			runStructuredSubagent(
+				request({
+					session: session({ isolationMode: "worktree", cwd: "/tmp", repoRoot: "checkout" }),
+					isolation: { requested: true },
+					cwd: dir,
+				}),
+			),
+		).rejects.toThrow("Isolated subagent execution requires a git repository");
+
+		expect(prepare).toHaveBeenCalledWith(dir, { configuredRoot: "checkout" });
+		await fs.rm(dir, { recursive: true, force: true });
+	});
+
+	it("rejects a spawn cwd that does not exist rather than falling back to the session cwd", async () => {
+		mockDiscovery();
+		await expect(
+			runStructuredSubagent(request({ cwd: path.join(os.tmpdir(), "omp-missing-spawn-cwd") })),
+		).rejects.toThrow("Spawn cwd is not an existing directory");
 	});
 
 	/** Isolation intended, but no repo to build a worktree from ⇒ degraded. */

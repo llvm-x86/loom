@@ -40,7 +40,45 @@ export interface WorktreeBaseline {
 	nested: Array<{ relativePath: string; baseline: RepoBaseline }>;
 }
 
-export async function getRepoRoot(cwd: string): Promise<string> {
+/** Options for {@link getRepoRoot}: how to recover when `cwd` itself is not a checkout. */
+export interface RepoRootOptions {
+	/** `task.isolation.repoRoot` — explicit checkout to isolate from. Relative values resolve against `cwd`. */
+	configuredRoot?: string;
+}
+
+/** Cap on how many sibling checkouts are named in the ambiguous-container error. */
+const REPO_CANDIDATE_SAMPLE = 8;
+
+function expandHome(p: string): string {
+	if (p === "~") return os.homedir();
+	if (p.startsWith("~/") || p.startsWith("~\\")) return os.homedir() + p.slice(1);
+	return p;
+}
+
+/**
+ * Depth-1 scan for checkouts directly below `dir`. A container directory (the
+ * classic `~/workspace`) holds the real repos as siblings, so this is what
+ * distinguishes "nothing to isolate here" from "you are one level too high".
+ * Resolved through git rather than a `.git` stat: `.git` may be a linked
+ * worktree pointer, and a dead pointer is not a usable checkout.
+ */
+async function findChildRepos(dir: string): Promise<string[]> {
+	let entries: Dirent[];
+	try {
+		entries = await fs.readdir(dir, { withFileTypes: true });
+	} catch {
+		return [];
+	}
+	const candidates = entries.filter(
+		entry => entry.isDirectory() && !entry.name.startsWith(".") && entry.name !== "node_modules",
+	);
+	const { results } = await mapWithConcurrencyLimit(candidates, 16, async entry =>
+		git.repo.root(path.join(dir, entry.name)),
+	);
+	return [...new Set(results.filter((root): root is string => !!root))].sort();
+}
+
+export async function getRepoRoot(cwd: string, options: RepoRootOptions = {}): Promise<string> {
 	// Pure-jj check runs first so a jj workspace nested under an unrelated
 	// outer Git checkout is rejected at its own root rather than silently
 	// mutating the surrounding Git tree behind jj's back.
@@ -53,7 +91,48 @@ export async function getRepoRoot(cwd: string): Promise<string> {
 	const repoRoot = await git.repo.root(cwd);
 	if (repoRoot) return repoRoot;
 
-	throw new Error("Git repository not found for isolated task execution.");
+	// `cwd` is not a checkout. Dead-ending here is what pushes agents into
+	// hand-rolling `git worktree add` siblings inside the container directory,
+	// so resolve the checkout the spawn is actually for before giving up.
+	const configured = options.configuredRoot?.trim();
+	if (configured) {
+		const resolved = path.resolve(cwd, expandHome(configured));
+		// A path that does not exist would make git itself fail to spawn (ENOENT
+		// on the child cwd), surfacing as a mystery instead of "your setting is
+		// wrong" — so establish the directory exists before asking git anything.
+		const exists = await fs
+			.stat(resolved)
+			.then((s: Stats) => s.isDirectory())
+			.catch(() => false);
+		const configuredRepo = exists ? await git.repo.root(resolved) : null;
+		// An explicit setting that misses is a misconfiguration, not licence to
+		// guess: report it instead of silently falling through to inference.
+		if (!configuredRepo) {
+			throw new Error(
+				`task.isolation.repoRoot (${configured}) is not inside a git repository. Point it at a checkout, or clear the setting.`,
+			);
+		}
+		return configuredRepo;
+	}
+
+	const children = await findChildRepos(cwd);
+	// Exactly one checkout below the directory is unambiguous. Two or more is a
+	// real choice — sibling checkouts of one project are common, and picking by
+	// heuristic would isolate against the wrong tree without ever saying so.
+	if (children.length === 1) {
+		logger.info(`task isolation: ${cwd} is not a checkout; using its only child repo ${children[0]}`);
+		return children[0];
+	}
+	if (children.length > 1) {
+		const sample = children.slice(0, REPO_CANDIDATE_SAMPLE).map(p => path.basename(p));
+		const more = children.length > sample.length ? `, +${children.length - sample.length} more` : "";
+		throw new Error(
+			`Git repository not found for isolated task execution: ${cwd} is not a checkout, but contains ${children.length} of them (${sample.join(", ")}${more}). Isolation will not guess which one this spawn is for — pass \`cwd\` on the spawn (e.g. cwd: ${JSON.stringify(children[0])}), or set \`task.isolation.repoRoot\`.`,
+		);
+	}
+	throw new Error(
+		`Git repository not found for isolated task execution (cwd: ${cwd}). Start the session inside a checkout, pass \`cwd\` on the spawn, or set \`task.isolation.repoRoot\`.`,
+	);
 }
 
 const GIT_NO_INDEX_NULL_PATH = process.platform === "win32" ? "NUL" : "/dev/null";

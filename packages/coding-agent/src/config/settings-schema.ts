@@ -4246,6 +4246,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"task.isolation.repoRoot": {
+		type: "string",
+		default: "",
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Isolation Repo Root",
+			description:
+				"Checkout to isolate subagent spawns from when the session's working directory is not itself a git repository (e.g. a session started in a container directory like ~/workspace). Leave empty to use the session's own repository, or its single child checkout when there is exactly one.",
+		},
+	},
+
 	"task.isolation.byDefault": {
 		type: "boolean",
 		default: true,

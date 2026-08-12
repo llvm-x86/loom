@@ -55,6 +55,18 @@ async function createGitRepo(): Promise<{ baseBranch: string; repo: string }> {
 	};
 }
 
+/** Init a checkout at an exact path (container-dir layouts need siblings, not tmpdirs). */
+async function initRepoAt(dir: string): Promise<string> {
+	await fs.mkdir(dir, { recursive: true });
+	await runGit(dir, ["init"]);
+	await runGit(dir, ["config", "user.email", "test@example.com"]);
+	await runGit(dir, ["config", "user.name", "Test User"]);
+	await fs.writeFile(path.join(dir, "file.txt"), "base\n");
+	await runGit(dir, ["add", "."]);
+	await runGit(dir, ["commit", "-m", "initial"]);
+	return dir;
+}
+
 afterEach(async () => {
 	vi.restoreAllMocks();
 	jj.repo.clearRootCache();
@@ -560,10 +572,53 @@ describe("getRepoRoot", () => {
 		await expect(getRepoRoot(dir)).rejects.toThrow(/jj git init --colocate/);
 	});
 
-	it("preserves the generic git-not-found error for directories without any repo", async () => {
+	it("keeps the git-not-found error, now naming the cwd and the ways out", async () => {
 		const dir = await fs.mkdtemp(path.join(os.tmpdir(), "omp-norepo-"));
 		tempDirs.push(dir);
-		await expect(getRepoRoot(dir)).rejects.toThrow("Git repository not found for isolated task execution.");
+		await expect(getRepoRoot(dir)).rejects.toThrow("Git repository not found for isolated task execution");
+		await expect(getRepoRoot(dir)).rejects.toThrow(/task\.isolation\.repoRoot/);
+	});
+
+	it("resolves the only child checkout when cwd is a container directory", async () => {
+		const container = await fs.mkdtemp(path.join(os.tmpdir(), "omp-container-"));
+		tempDirs.push(container);
+		const child = await initRepoAt(path.join(container, "only-repo"));
+		await fs.mkdir(path.join(container, "not-a-repo"), { recursive: true });
+		expect(await getRepoRoot(container)).toBe(child);
+	});
+
+	it("refuses to guess between sibling checkouts, naming them and the fix", async () => {
+		const container = await fs.mkdtemp(path.join(os.tmpdir(), "omp-container-multi-"));
+		tempDirs.push(container);
+		await initRepoAt(path.join(container, "alpha"));
+		await initRepoAt(path.join(container, "beta"));
+		await expect(getRepoRoot(container)).rejects.toThrow(/contains 2 of them \(alpha, beta\)/);
+		await expect(getRepoRoot(container)).rejects.toThrow(/pass `cwd` on the spawn/);
+	});
+
+	it("uses configuredRoot when cwd is not a checkout", async () => {
+		const container = await fs.mkdtemp(path.join(os.tmpdir(), "omp-container-cfg-"));
+		tempDirs.push(container);
+		await initRepoAt(path.join(container, "alpha"));
+		const beta = await initRepoAt(path.join(container, "beta"));
+		// Ambiguous without the setting; the setting decides.
+		expect(await getRepoRoot(container, { configuredRoot: "beta" })).toBe(beta);
+		expect(await getRepoRoot(container, { configuredRoot: beta })).toBe(beta);
+	});
+
+	it("reports a configuredRoot that is not a checkout instead of guessing", async () => {
+		const container = await fs.mkdtemp(path.join(os.tmpdir(), "omp-container-badcfg-"));
+		tempDirs.push(container);
+		await initRepoAt(path.join(container, "alpha"));
+		await expect(getRepoRoot(container, { configuredRoot: "nope" })).rejects.toThrow(
+			/task\.isolation\.repoRoot \(nope\) is not inside a git repository/,
+		);
+	});
+
+	it("prefers the cwd's own checkout over configuredRoot", async () => {
+		const { repo } = await createGitRepo();
+		const other = await createGitRepo();
+		expect(await getRepoRoot(repo, { configuredRoot: other.repo })).toBe(repo);
 	});
 
 	it("rejects a pure jj workspace nested inside an unrelated outer git checkout", async () => {

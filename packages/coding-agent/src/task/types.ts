@@ -127,6 +127,7 @@ export const taskItemSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
+	"cwd?": "string",
 	"+": "delete",
 });
 
@@ -146,6 +147,12 @@ export interface TaskItem {
 	schemaMode?: "permissive" | "strict";
 	/** Run this spawn in an isolated worktree (batch form; flat form carries it top-level). */
 	isolated?: boolean;
+	/**
+	 * Directory this spawn runs in, and the checkout isolation resolves from.
+	 * Defaults to the session cwd; set it when the session was started in a
+	 * container directory (e.g. `~/workspace`) rather than inside the repo.
+	 */
+	cwd?: string;
 }
 
 export const taskSchema = type({
@@ -156,6 +163,7 @@ export const taskSchema = type({
 	"outputSchema?": outputSchemaInputSchema,
 	"schemaMode?": '"permissive" | "strict"',
 	"isolated?": "boolean",
+	"cwd?": "string",
 	"+": "delete",
 });
 const taskSchemaBatch = type({
@@ -191,6 +199,7 @@ function createTaskSchema(options: { batchEnabled: boolean; defaultAgent: string
 		"outputSchema?": outputSchemaInputSchema,
 		"schemaMode?": '"permissive" | "strict"',
 		"isolated?": "boolean",
+		"cwd?": "string",
 		"+": "delete",
 	} as const;
 	if (options.batchEnabled) {
@@ -241,6 +250,8 @@ export interface TaskParams {
 	context?: string;
 	/** Run in an isolated worktree (flat form; per-item in batch form). */
 	isolated?: boolean;
+	/** Directory the spawn runs in, and the checkout isolation resolves from (flat form; per-item in batch form). */
+	cwd?: string;
 }
 
 /**

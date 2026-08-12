@@ -96,6 +96,12 @@ export interface StructuredSubagentRequest {
 	invokedAt?: number;
 	acquiredAt?: number;
 	isolation?: StructuredSubagentIsolationControls;
+	/**
+	 * Directory this spawn runs in, and the checkout isolation resolves from.
+	 * Defaults to `session.cwd`; callers set it when the session was started in
+	 * a container directory rather than inside the repo being worked on.
+	 */
+	cwd?: string;
 	/** The parent agent name forbidden from recursively spawning itself. */
 	blockedAgent?: string;
 	/** Preserve a completed temporary artifacts directory for an agent:// handle. */
@@ -391,11 +397,33 @@ function resolveAutoloadSkills(session: ToolSession, agent: AgentDefinition) {
 	return { skills, autoloadSkills };
 }
 
+/**
+ * Resolve the directory a spawn runs in. `~` expands, relative values resolve
+ * against the session cwd, and a miss is a preflight error: silently running
+ * somewhere other than where the caller said would isolate against — and edit
+ * — the wrong tree.
+ */
+async function resolveSpawnCwd(request: StructuredSubagentRequest): Promise<string> {
+	const requested = request.cwd?.trim();
+	if (!requested) return request.session.cwd;
+	const expanded =
+		requested === "~" || requested.startsWith("~/") || requested.startsWith("~\\")
+			? os.homedir() + requested.slice(1)
+			: requested;
+	const resolved = path.resolve(request.session.cwd, expanded);
+	const stats = await fs.stat(resolved).catch(() => null);
+	if (!stats?.isDirectory()) {
+		throw new StructuredSubagentError("preflight", `Spawn cwd is not an existing directory: ${resolved}`);
+	}
+	return resolved;
+}
+
 function buildExecutorOptions(
 	request: StructuredSubagentRequest,
 	policy: EffectiveSubagentPolicy,
 	lease: ArtifactLease,
 	id: string,
+	cwd: string,
 ): ExecutorOptions {
 	const { session } = request;
 	const { skills, autoloadSkills } = resolveAutoloadSkills(session, policy.agent);
@@ -405,7 +433,7 @@ function buildExecutorOptions(
 	};
 	const enableMCP = !policy.planMode && (session.enableMCP ?? true);
 	return {
-		cwd: session.cwd,
+		cwd,
 		agent: policy.effectiveAgent,
 		task: renderSubagentPrompt(request.assignment),
 		assignment: request.assignment.trim(),
@@ -574,13 +602,16 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 			...request.identity,
 			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
 		});
-		const baseOptions = buildExecutorOptions(request, policy, lease, id);
+		const spawnCwd = await resolveSpawnCwd(request);
+		const baseOptions = buildExecutorOptions(request, policy, lease, id, spawnCwd);
 		baseOptions.planReference = await loadPlanReference(request, policy);
 		let isolationContext: IsolationContext | null = null;
 		let isolationDegraded = false;
 		if (isolated) {
 			try {
-				isolationContext = await prepareIsolationContext(request.session.cwd);
+				isolationContext = await prepareIsolationContext(spawnCwd, {
+					configuredRoot: request.session.settings.get("task.isolation.repoRoot"),
+				});
 			} catch (error) {
 				// An explicit `isolated: true` fails loudly — the caller asked for a
 				// boundary and did not get one. An isolation default must NOT turn a
@@ -615,7 +646,7 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 		const runInParentTree = async () => await runSubprocess(baseOptions);
 		const result = !isolationContext
 			? sharesParentTree
-				? await withSharedTreeLock(path.resolve(request.session.cwd), runInParentTree)
+				? await withSharedTreeLock(path.resolve(spawnCwd), runInParentTree)
 				: await runInParentTree()
 			: await runIsolatedSubprocess({
 					baseOptions,
