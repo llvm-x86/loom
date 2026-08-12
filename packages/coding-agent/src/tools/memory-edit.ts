@@ -27,9 +27,7 @@ const memoryEditSchema = type({
 	"replacement_id?": type("string").describe("replacement memory id for invalidate"),
 	"old_text?": type("string").describe("exact text to locate for replace/remove (must match exactly once)"),
 	"new_text?": type("string").describe("replacement text for replace"),
-	"operations?": memoryEditOpSchema
-		.array()
-		.describe("batch of edit operations applied atomically (all-or-nothing)"),
+	"operations?": memoryEditOpSchema.array().describe("batch of edit operations applied atomically (all-or-nothing)"),
 });
 
 export type MemoryEditParams = typeof memoryEditSchema.infer;
@@ -63,10 +61,11 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 
 	constructor(private readonly session: ToolSession) {}
 
-	static createIf(session: ToolSession): MemoryEditTool | null {
-		const backend = session.settings.get("memory.backend");
-		if (backend !== "mnemopi") return null;
-		return new MemoryEditTool(session);
+	static createIf(_session: ToolSession): MemoryEditTool | null {
+		// Superseded by the single `memory` tool (background-owned memory tree).
+		// Kept as a registered-but-inert factory so `--tools memory_edit` still
+		// resolves to a name instead of failing loudly.
+		return null;
 	}
 
 	async execute(_id: string, params: MemoryEditParams): Promise<AgentToolResult> {
@@ -145,13 +144,16 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 		const applied = results.filter(result => result.status !== "not_found" && result.status !== "not_editable");
 		const lines = plan.commits.map((commit, index) => {
 			const result = results[index];
-			const location = result.bank
-				? ` in bank ${result.bank}${result.store ? ` (${result.store})` : ""}`
-				: "";
+			const location = result.bank ? ` in bank ${result.bank}${result.store ? ` (${result.store})` : ""}` : "";
 			return `Memory ${commit.id} ${result.status}${location}.`;
 		});
 		return {
-			content: [{ type: "text", text: `Applied ${applied.length} of ${plan.commits.length} operation(s).\n${lines.join("\n")}` }],
+			content: [
+				{
+					type: "text",
+					text: `Applied ${applied.length} of ${plan.commits.length} operation(s).\n${lines.join("\n")}`,
+				},
+			],
 			details: { status: "applied", results },
 		};
 	}

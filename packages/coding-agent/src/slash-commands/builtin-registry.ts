@@ -1779,12 +1779,16 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		acpInputHint: "<subcommand>",
 		subcommands: [
 			{ name: "view", description: "Show current memory injection payload" },
-			{ name: "stats", description: "Show memory backend statistics" },
+			{ name: "status", description: "Show memory backend + memory tree statistics" },
+			{ name: "stats", description: "Alias for status" },
 			{ name: "diagnose", description: "Run memory backend diagnostics" },
 			{ name: "clear", description: "Clear persisted memory data and artifacts" },
 			{ name: "reset", description: "Alias for clear" },
 			{ name: "enqueue", description: "Enqueue memory consolidation maintenance" },
 			{ name: "rebuild", description: "Alias for enqueue" },
+			{ name: "apply", description: "Reconcile the memory tree now (materialise banks to leaves)" },
+			{ name: "reconcile", description: "Alias for apply" },
+			{ name: "backup", description: "Bundle the memory tree + bank into a timestamped backup" },
 			{ name: "mm list", description: "List mental models on the active bank" },
 			{ name: "mm show", description: "Show one mental model (id required)" },
 			{
@@ -1824,10 +1828,22 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 					return commandConsumed();
 				}
 				case "stats":
+				case "status":
 				case "diagnose": {
-					const hook = verb === "stats" ? backend.stats : backend.diagnose;
+					const hook = verb === "diagnose" ? backend.diagnose : backend.stats;
 					const payload = await hook?.(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
 					await runtime.output(payload ?? `Memory ${verb} is not available for the ${backend.id} backend.`);
+					return commandConsumed();
+				}
+				case "apply":
+				case "reconcile": {
+					const payload = await backend.apply?.(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+					await runtime.output(payload ?? `Memory reconcile is not available for the ${backend.id} backend.`);
+					return commandConsumed();
+				}
+				case "backup": {
+					const payload = await backend.backup?.(runtime.settings.getAgentDir(), runtime.cwd, runtime.session);
+					await runtime.output(payload ?? `Memory backup is not available for the ${backend.id} backend.`);
 					return commandConsumed();
 				}
 				case "mm":
@@ -1836,7 +1852,10 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 						runtime,
 					);
 				default:
-					return usage("Usage: /memory <view|stats|diagnose|clear|reset|enqueue|rebuild>", runtime);
+					return usage(
+						"Usage: /memory <view|status|stats|diagnose|clear|reset|enqueue|rebuild|apply|reconcile|backup>",
+						runtime,
+					);
 			}
 		},
 		handleTui: async (command, runtime) => {
