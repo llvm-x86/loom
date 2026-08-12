@@ -53,8 +53,12 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 	const configuredDbPath = settings.get("mnemopi.dbPath");
 	const cwd = settings.getCwd();
 	const scoping = settings.get("mnemopi.scoping");
+	// Repo-keyed bank override: setting first, then the documented
+	// LOOM_MNEMOPI_BANK_REPO env override (the console injects it per-session
+	// so one GitHub repository maps to one bank across accounts/checkouts).
+	const bankRepo = settings.get("mnemopi.bankRepo")?.trim() || Bun.env.LOOM_MNEMOPI_BANK_REPO?.trim();
 	const dbPath = configuredDbPath ?? path.join(getMemoriesDir(agentDir), "mnemopi", "mnemopi.db");
-	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping);
+	const scope = computeMnemopiBankScope(settings.get("mnemopi.bank"), cwd, scoping, bankRepo);
 	const recallBanks =
 		scoping === "global" ? scope.recallBanks : extendRecallWithLegacyBanks(scope.recallBanks, dbPath, cwd);
 	const llmMode = settings.get("mnemopi.llmMode");
@@ -145,8 +149,9 @@ export function computeMnemopiBankScope(
 	configured: string | undefined,
 	cwd: string,
 	scoping: MnemopiScoping,
+	bankRepo?: string,
 ): MnemopiBankScope {
-	const project = projectBank(configured, cwd);
+	const project = projectBank(configured, cwd, bankRepo);
 	const globalBank = sharedBank(configured);
 	switch (scoping) {
 		case "global":
@@ -181,21 +186,36 @@ function sharedBank(configured: string | undefined): string {
 }
 
 /**
- * Derive the per-project bank id from `cwd` alone.
+ * Derive the per-project bank id.
  *
- * Earlier versions resolved the enclosing git root before hashing, which
- * made the bank id unstable: removing or adding a `.git` anywhere above the
- * cwd repointed the same conversation directory to a different bank and
- * fragmented memories (#2412). The git lookup is gone here; the rescue path
+ * Two modes. With `bankRepo` set (a GitHub `owner/repo` slug, delivered at
+ * boot via the `LOOM_MNEMOPI_BANK_REPO` env var), the bank id is the slug
+ * itself — no `cwd` component. The slug is globally unique, so one
+ * repository converges on ONE bank regardless of checkout path or Linux
+ * account: kevin's session in `/home/kevin/workspace/BehaviorOS` and ubuntu's
+ * in `/home/ubuntu/workspace/BehaviorOS` read and write the same rows.
+ *
+ * Without it, the bank id derives from `cwd` alone. Earlier versions
+ * resolved the enclosing git root before hashing, which made the bank id
+ * unstable: removing or adding a `.git` anywhere above the cwd repointed the
+ * same conversation directory to a different bank and fragmented memories
+ * (#2412). The git lookup is gone here; the rescue path
  * for already-fragmented installs lives in {@link extendRecallWithLegacyBanks}.
  */
-function projectBank(configured: string | undefined, cwd: string): string {
+function projectBank(configured: string | undefined, cwd: string, bankRepo: string | undefined): string {
+	const slug = bankRepo?.trim() ? sanitizeBankName(bankRepo) : undefined;
+	if (slug) {
+		// Repo-keyed mode: the GitHub slug alone IS the project identity —
+		// globally unique, so no path/hash suffix. One bank per repository,
+		// shared across accounts and checkout locations.
+		const base = sanitizeBankName(configured);
+		return base && base !== slug ? `${base}-${slug}` : slug;
+	}
 	const projectRoot = path.resolve(cwd || ".");
 	const project = projectBankSegment(projectRoot);
 	const base = sanitizeBankName(configured);
 	return limitBankName(base ? `${base}-${project}` : project);
 }
-
 function projectBankSegment(projectRoot: string): string {
 	const project = sanitizeBankName(path.basename(projectRoot)) ?? "default";
 	return limitBankName(`${project}-${Bun.hash(projectRoot).toString(36)}`);

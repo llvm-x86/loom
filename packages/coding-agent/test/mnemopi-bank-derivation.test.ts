@@ -102,6 +102,53 @@ describe("computeMnemopiBankScope (#2412)", () => {
 	});
 });
 
+describe("computeMnemopiBankScope repo-keyed (LOOM_MNEMOPI_BANK_REPO)", () => {
+	it("pins one repository to one bank regardless of checkout path or account", () => {
+		// kevin's session in his home and ubuntu's in its own home — the
+		// console passes the same GitHub slug, so both must resolve to the
+		// exact same bank id (no cwd component).
+		const slug = "Family-Fun-Group/BehaviorOS";
+		const kevin = computeMnemopiBankScope(undefined, "/home/kevin/workspace/BehaviorOS", "per-project", slug);
+		const ubuntu = computeMnemopiBankScope(undefined, "/home/ubuntu/workspace/BehaviorOS", "per-project", slug);
+		expect(ubuntu.bank).toBe(kevin.bank);
+		expect(ubuntu.bank).toBe("Family-Fun-Group-BehaviorOS");
+	});
+
+	it("repo key still participates in per-project-tagged recall", () => {
+		const scope = computeMnemopiBankScope(
+			undefined,
+			"/elsewhere/landing-pages",
+			"per-project-tagged",
+			"Family-Fun-Group/landing-pages",
+		);
+		expect(scope.retainBank).toBe("Family-Fun-Group-landing-pages");
+		expect(scope.recallBanks).toContain("Family-Fun-Group-landing-pages");
+		expect(scope.recallBanks).toContain("default");
+	});
+
+	it("repo key composes with a configured shared bank base", () => {
+		const scope = computeMnemopiBankScope("acme", "/anywhere", "per-project", "acme/skyrail");
+		expect(scope.bank).toBe("acme-acme-skyrail");
+	});
+
+	it("repo key is ignored under global scoping", () => {
+		const scope = computeMnemopiBankScope(undefined, "/anywhere", "global", "someone/else");
+		expect(scope.bank).toBe("default");
+	});
+
+	it("distinct repositories get distinct banks", () => {
+		const a = computeMnemopiBankScope(undefined, "/x/a", "per-project", "Family-Fun-Group/BehaviorOS").bank;
+		const b = computeMnemopiBankScope(undefined, "/x/b", "per-project", "Family-Fun-Group/landing-pages").bank;
+		expect(a).not.toBe(b);
+	});
+
+	it("omitting or blanking the repo key falls back to cwd derivation", () => {
+		const blank = computeMnemopiBankScope(undefined, "/projects/repo", "per-project", "   ").bank;
+		const omitted = computeMnemopiBankScope(undefined, "/projects/repo", "per-project").bank;
+		expect(blank).toBe(omitted);
+	});
+});
+
 describe("extendRecallWithLegacyBanks (#2412)", () => {
 	it("adds a sibling bank only when all working_memory rows tag the active cwd", () => {
 		const activeCwd = path.join(rootDir.path(), "projects", "myrepo");

@@ -3,6 +3,13 @@
 ## [Unreleased]
 
 ### Added
+- Added `mnemopi.bankRepo` (env override `LOOM_MNEMOPI_BANK_REPO`): a GitHub
+  `owner/repo` slug that pins the per-project Mnemopi bank to the REPOSITORY
+  instead of the checkout path. One repo converges on one bank across Linux
+  accounts and checkout locations, so sessions working the same GitHub
+  repository — e.g. kevin in `/home/kevin/workspace/BehaviorOS` and ubuntu in
+  `/home/ubuntu/workspace/BehaviorOS` — share the same memories. The console
+  injects the slug at boot; unset, derivation falls back to the cwd-based id.
 - Added a background-maintained **memory tree** for the Mnemopi backend: every
   scoped bank renders as an agent-readable markdown tree under
   `mnemopi.treeRoot` (default `<memories>/tree`) — a root `MEMORY.md` rollup, a

@@ -2602,6 +2602,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "mnemopiActive",
 		},
 	},
+	"mnemopi.bankRepo": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Mnemopi",
+			label: "Mnemopi Bank Repo",
+			description:
+				"GitHub owner/repo slug that pins this session's bank to the REPOSITORY instead of the cwd, so every account working the same repo shares one bank. The LOOM_MNEMOPI_BANK_REPO env var overrides this at boot (console-injected).",
+			condition: "mnemopiActive",
+		},
+	},
 	"mnemopi.scoping": {
 		type: "enum",
 		values: ["global", "per-project", "per-project-tagged"] as const,
