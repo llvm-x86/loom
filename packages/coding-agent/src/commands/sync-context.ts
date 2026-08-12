@@ -45,6 +45,10 @@ import {
 	type SessionContextSyncReason,
 	type SessionContextSyncSession,
 } from "../utils/session-context-sync";
+import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
+import { loadMnemopiConfig } from "../mnemopi/config";
+import { loadMnemopi, loadMnemopiCore } from "../mnemopi/state";
+import { renderMemoryTree } from "../mnemopi/tree";
 
 interface SyncContextSummary {
 	ok: boolean;
@@ -214,6 +218,60 @@ async function runRepairMode(target: string, dryRun: boolean, activityId: string
 	printRepairSummaryAndExit(summary);
 }
 
+/**
+ * Render every touched repo's memory tree from its mnemopi bank. The spool
+ * repo slugs are GitHub `owner-repo` strings — identical to the repo-keyed
+ * bank id (`mnemopi.bankRepo` / `LOOM_MNEMOPI_BANK_REPO`), so the bank name
+ * IS the slug. Lanes that ran without a repo key used cwd-derived banks and
+ * rendered in-process; here a missing bank file is simply skipped. Purely a
+ * read of the bank plus file writes — never mutates the sqlite, never embeds.
+ */
+async function reconcileRepoMemoryTrees(settings: Settings, repos: readonly string[]): Promise<void> {
+	const config = loadMnemopiConfig(settings, getAgentDir());
+	if (!config.treeEnabled) return;
+	const treeInput = {
+		leafCharCap: config.treeLeafCharCap,
+		entryRows: config.treeEntryRows,
+		archiveGcDays: config.treeArchiveGcDays,
+	};
+	for (const repo of repos) {
+		await reconcileRepoMemoryTree(config.treeRoot, path.dirname(config.dbPath), repo, treeInput).catch(
+			(error: unknown) => {
+				logger.warn("Sync-context: memory-tree render failed.", { repo, error: String(error) });
+			},
+		);
+	}
+}
+
+/**
+ * Render ONE repo's bank into its tree. Exported for tests; returns whether a
+ * bank existed for the slug. Never throws on a missing bank — that is the
+ * cwd-derived-bank case and simply skips.
+ */
+export async function reconcileRepoMemoryTree(
+	treeRoot: string,
+	dbDir: string,
+	repo: string,
+	opts: { leafCharCap?: number; entryRows?: number; archiveGcDays?: number } = {},
+): Promise<boolean> {
+	await loadMnemopi();
+	const { BankManager, Mnemopi } = await loadMnemopiCore();
+	const dbPath = new BankManager(dbDir).getBankDbPath(repo);
+	if (!existsSync(dbPath)) return false;
+	const memory = new Mnemopi({
+		dbPath,
+		bank: repo,
+		sessionId: `sync-context-${repo}`,
+		noEmbeddings: true,
+	});
+	try {
+		await renderMemoryTree({ memory, bank: repo, treeRoot, ...opts });
+		return true;
+	} finally {
+		memory.close();
+	}
+}
+
 export default class SyncContext extends Command {
 	static description = "Run a one-shot session-context sync out-of-band (used by agent-chat's shutdown worker)";
 	static hidden = true;
@@ -294,6 +352,18 @@ export default class SyncContext extends Command {
 					}
 				},
 			});
+
+			// Storage handoff: this CLI run IS the service worker's session-close
+			// pass, so render every touched repo's memory tree (an LLM-free
+			// projection of the bank) here — lanes killed before `dispose` never
+			// got an in-process render, and the service owns storage. Best-effort:
+			// a failed render never changes the ledger outcome or the exit code
+			// (the tree is disposable and the next pass repairs it).
+			if (!failure && summary.repos.length > 0) {
+				await reconcileRepoMemoryTrees(session.settings, summary.repos).catch((error: unknown) => {
+					logger.warn("Sync-context: memory-tree reconcile failed.", { error: String(error) });
+				});
+			}
 
 			summary.ok = failure === undefined;
 			if (failure) summary.error = failure;
