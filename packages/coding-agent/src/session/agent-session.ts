@@ -2343,6 +2343,21 @@ export class AgentSession {
 		await writeSpoolRecordAtomically(spoolDir, record);
 	}
 
+	/**
+	 * External close hook: atomically spool the shutdown-context handoff
+	 * WITHOUT a live sync. Mirrors the dispose path's guards but is reachable
+	 * by the mnemopi session-close hook when the process is torn down by a
+	 * signal or fatal error before `dispose` runs — so killed lanes still hand
+	 * their touched repos to the out-of-band worker. Never performs an LLM
+	 * turn (non-blocking by construction).
+	 */
+	async spoolContextSyncShutdown(): Promise<void> {
+		if (this.#isDisposed || this.#syncContextCliMode) return;
+		const settings = this.settings.getGroup("sessionContextSync");
+		if (!settings.enabled || !settings.dir) return;
+		await this.#writeContextSyncShutdownSpool(settings.dir);
+	}
+
 	#clearSessionContextSyncIdleTimer(): void {
 		if (this.#sessionContextSyncIdleTimer) {
 			clearTimeout(this.#sessionContextSyncIdleTimer);

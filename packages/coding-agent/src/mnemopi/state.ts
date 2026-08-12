@@ -4,7 +4,7 @@ import type * as MnemopiNs from "@oh-my-pi/pi-mnemopi";
 import type { Mnemopi, RecallResult } from "@oh-my-pi/pi-mnemopi";
 import type * as MnemopiCoreNs from "@oh-my-pi/pi-mnemopi/core";
 import type { LocalModelInitializer } from "@oh-my-pi/pi-mnemopi/core";
-import { logger } from "@oh-my-pi/pi-utils";
+import { logger, postmortem } from "@oh-my-pi/pi-utils";
 import {
 	composeRecallQuery,
 	formatCurrentTime,
@@ -325,6 +325,10 @@ export class MnemopiSessionState {
 	treeChangePending = false;
 	unsubscribe?: () => void;
 
+	/** Reconcile-on-shutdown hook state; see {@link MnemopiSessionState.attachSessionListeners}. */
+	private exitReconcileArmed = false;
+	private exitReconcileCancel?: () => void;
+
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
 		this.config = options.config;
@@ -336,7 +340,6 @@ export class MnemopiSessionState {
 		this.memory = this.scoped.retain.memory;
 		this.globalMemory = this.scoped.global?.memory;
 	}
-
 	setSessionId(sessionId: string): void {
 		this.sessionId = sessionId;
 	}
@@ -719,6 +722,45 @@ export class MnemopiSessionState {
 				void this.maybeRetainOnAgentEnd(event.messages);
 			}
 		});
+		// Session-close hook. The agent-chat service owns storage
+		// reconciliation; loom's part is to hand off that a session closed and
+		// which repos it touched. The normal teardown path does this inside
+		// `dispose`, but a lane torn down by a signal or a fatal error —
+		// SIGTERM'd hub/spawned lanes, headless and launch-mode agents with no
+		// TUI teardown — dies before `dispose`, so nothing would ever reach
+		// the worker. Register a process cleanup callback that spools the
+		// handoff on the way out; `postmortem` awaits it (a single atomic
+		// file write — never an LLM turn or a blocking render). Disposed
+		// states skip: `dispose` clears `unsubscribe` first. Aliased subagent
+		// states share the parent's coverage, so only root states arm.
+		if (!this.aliasOf && !this.exitReconcileArmed) {
+			this.exitReconcileArmed = true;
+			this.exitReconcileCancel = postmortem.register(
+				`mnemopi-exit-reconcile-${this.sessionId}`,
+				(reason: postmortem.Reason) => this.exitReconcile(reason),
+			);
+		}
+	}
+
+	/**
+	 * Session-close hook: hand the shutdown context off to the out-of-band
+	 * worker without blocking the exiting process. The agent-chat service owns
+	 * storage reconciliation (ledgers AND the memory tree projection); loom
+	 * only records that a session closed and which repos it touched. The
+	 * spool write is a single atomic file op — never an LLM turn, never a
+	 * bounded render wait (issue: killed lanes). Registered by
+	 * {@link attachSessionListeners}; exposed for tests.
+	 *
+	 * Skips normal `exit` (the dispose path spools there) and any state whose
+	 * `dispose` already ran (`dispose` clears `unsubscribe` first). Aliased
+	 * subagent states share the parent's banks and coverage, so only root
+	 * states arm.
+	 */
+	exitReconcile(reason: postmortem.Reason): Promise<void> | void {
+		if (reason === postmortem.Reason.EXIT || this.unsubscribe === undefined) return;
+		return this.session.spoolContextSyncShutdown?.().catch((error: unknown) => {
+			logger.warn("Mnemopi: shutdown context handoff failed.", { error: String(error) });
+		});
 	}
 
 	async maybeRecallOnAgentStart(): Promise<void> {
@@ -784,6 +826,8 @@ export class MnemopiSessionState {
 
 	/**
 	 * Release the per-session resources. Defaults to running a lighter
+		this.exitReconcileCancel?.();
+		this.exitReconcileCancel = undefined;
 	 * {@link consolidate} pass before closing handles: it retains the current
 	 * transcript and flushes in-flight extractions, but skips the synchronous
 	 * bank sleep so normal session shutdown returns promptly. Full promotion of
@@ -808,6 +852,8 @@ export class MnemopiSessionState {
 	async dispose(options: { consolidate?: boolean; timeoutMs?: number } = {}): Promise<void> {
 		this.unsubscribe?.();
 		this.unsubscribe = undefined;
+		this.exitReconcileCancel?.();
+		this.exitReconcileCancel = undefined;
 		if (this.aliasOf) return;
 		const closeOwned = (): void => {
 			for (const memory of this.scoped.owned) memory.close();
