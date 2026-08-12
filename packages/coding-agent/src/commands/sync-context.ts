@@ -265,7 +265,15 @@ export async function reconcileRepoMemoryTree(
 		noEmbeddings: true,
 	});
 	try {
-		await renderMemoryTree({ memory, bank: repo, treeRoot, ...opts });
+		// The tree filesystem is keyed per repo: each bank owns
+		// `<treeRoot>/<repo>/MEMORY.md` + subtrees. Rendering into the raw
+		// root would collide every repo's projection into one pile and leave
+		// agents nothing at the documented `treeRoot/<repo>` location.
+		await renderMemoryTree({
+			memory,
+			bank: repo,
+			treeRoot: path.join(treeRoot, repo),
+		});
 		return true;
 	} finally {
 		memory.close();

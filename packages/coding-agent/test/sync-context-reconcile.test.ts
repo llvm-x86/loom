@@ -29,8 +29,9 @@ describe("sync-context repo memory-tree reconcile", () => {
 			const rendered = await reconcileRepoMemoryTree(treeRoot, dbDir, bank);
 			expect(rendered).toBe(true);
 
-			const subtreeDir = path.join(treeRoot, "projects", "agent-chat");
-			expect(existsSync(path.join(treeRoot, "MEMORY.md"))).toBe(true);
+			const bankRoot = path.join(treeRoot, bank);
+			const subtreeDir = path.join(bankRoot, "projects", "agent-chat");
+			expect(existsSync(path.join(bankRoot, "MEMORY.md"))).toBe(true);
 			expect(existsSync(path.join(subtreeDir, "MEMORY.md"))).toBe(true);
 			const leafNames = (await readdir(subtreeDir)).filter(name => name !== "MEMORY.md");
 			expect(leafNames.length).toBe(1);
