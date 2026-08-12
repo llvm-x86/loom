@@ -3,6 +3,35 @@
 ## [Unreleased]
 
 ### Added
+- Added a background-maintained **memory tree** for the Mnemopi backend: every
+  scoped bank renders as an agent-readable markdown tree under
+  `mnemopi.treeRoot` (default `<memories>/tree`) — a root `MEMORY.md` rollup, a
+  `MEMORY.md` per subtree, one leaf per bank row, and `archive/<subtree>/`
+  leaves for archived rows. Renders are idempotent full projections written
+  atomically; the bank stays the source of truth and a 500-row `tree_write_log`
+  records each pass for status/audit. Reconcile runs after retain, consolidate,
+  dispose and `/memory apply`, so the tree is materialised in the background,
+  never by the working agent.
+- Added reconcile lifecycle to the memory tree: time-archived rows whose
+  `valid_until` falls more than `mnemopi.treeArchiveGcDays` (default 90) in the
+  past are garbage-collected from the bank and their archive leaves swept;
+  `superseded_by`-only rows survive. Subtree entry points are capped at
+  `mnemopi.treeEntryRows` (default 200) newest-first with an explicit overflow
+  line, and deleting the whole tree re-materialises it on the next pass.
+- Added a single `memory` tool (add/replace/remove/restore) as the only
+  agent-facing write path for the Mnemopi backend; the previous recall/retain/
+  reflect tool set is superseded under Mnemopi. `rememberScoped` dedupes
+  repeated fact writes (whitespace/case-insensitive match over the recent
+  working rows, gated by `mnemopi.treeDedupe`, default on) onto the canonical
+  row so the leaf never flips, revives a row that is re-added after archival,
+  and restores archived rows named in a new memory's `connections`. A pending
+  tool change appends a one-line verification nudge to the next turn-start
+  prompt.
+- Added `/memory status|stats|apply|reconcile|backup` slash subcommands
+  (plus `memory.tree.root` as the top-level alias for the tree root): status
+  adds a memory-tree section (root, caps, last reconcile), apply/reconcile
+  materialise the tree now, and backup bundles the tree plus each bank's
+  SQLite files into a timestamped tarball under `<memories>/backups/`.
 
 - Added `task.isolation.linkBuildArtifacts` (`off` | `readonly` | `full`, default `readonly`). After an isolation worktree is materialised, loom inherits gitignored build outputs from the parent checkout: `readonly` copies only small generated binaries (native `.node` addons and `tool-views.generated.js`) so subagents can run tests without a fresh `bun install` and without sharing mutable stores; `full` additionally symlinks `node_modules` and `target` per the manual worktree recipe (opt-in — `bun install` in a linked worktree mutates the parent); `off` leaves the worktree bare. Inherited paths are excluded from ignored-file divergence scans so seeded artifacts do not spam "removed node_modules" noise.
 - Added `task.isolation.required` (**on by default**). A spawn that passes `isolated: false` is now refused at preflight rather than quietly sharing the parent's working tree. Sharing one tree between concurrent write-access subagents means uncommitted work has no owner: file-level assignments between agents are a convention, and `git checkout -- .` in one agent does not respect a convention — it reverted a sibling's uncommitted file and the agent's own test gate in a single stroke, with nothing failing loudly until a downstream import broke. A worktree is an enforced boundary, so the opt-out is now an operator setting rather than a flag a model can pass. Plan-mode spawns are unaffected (read-only, never isolated), and the setting cannot force isolation on when `task.isolation.mode` is `none`.
@@ -28,6 +57,12 @@
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
 
+- Fixed `task` isolation failing to capture a nested worktree whose `gitdir`
+  pointer is dead (a deleted parent worktree leaves the child's `.git` file
+  pointing at a removed administrative directory). The nested checkout was
+  skipped as a broken link and its changes were silently dropped from the
+  diff; a dead pointer is now tolerated by resolving through the worktree's
+  in-repo metadata, so the child's changes survive the parent's removal.
 - Fixed the `artifact://` capture advertised as a command's full output being silently corrupted when the per-line column cap (`tools.outputMaxColumns`) first tripped on a chunk with two or fewer bytes of budget left. The cap emits a three-byte `…` even when nothing fits, so the capped chunk outgrew the raw one and the "did this chunk lose bytes" test — a byte-size comparison — read false: the artifact mirror never opened for that chunk, and the deferred file-sink backfill later replayed the ellipsis-bearing capped buffer instead. The advertised capture carried a fabricated `…`, permanently lost the one or two boundary bytes, and was byte-wrong from the cap offset onward. The mirror now triggers on the cap's own dropped-byte counter, so it opens on the first chunk that actually loses data and the retained windows are still a verbatim prefix when they are replayed. As a backstop the backfill is skipped outright when those windows can no longer reproduce the raw stream (only reachable after a failed first open), and `dump()` then withholds `artifactId` rather than name a capture it cannot vouch for.
 - Fixed background (`async`) bash results reaching the model with no output notice: the completion path flattened the tool result to bare text, and notices are appended by the tool wrapper around `execute()`, which a job resolving after `execute()` returned never passes through. A wide-line background command therefore arrived with no `Some lines truncated`, no dropped-byte count and no `artifact://` id, while the complete capture sat on disk unnamed. The async lane now renders `details.meta` into the delivered text itself; the foreground auto-background lane is untouched and still gets its notice from the wrapper.
 - Fixed shell snapshots being written into a group/world-accessible directory when the well-known `omp-shell-snapshots` path under the system temp dir is already owned by another user: `mkdir`'s `mode` is ignored for an existing directory and the defensive `chmod` fails with `EPERM`, so the UUID filenames (and the env-var values inlined into them) were listable by any local user. The directory is now verified to be a non-symlinked directory owned by the current user at mode `0700`, falling back to a uid-qualified and then a `mkdtemp` path when it is not.
