@@ -35,6 +35,12 @@ export interface MnemopiBackendConfig {
 	treeEnabled: boolean;
 	treeRoot: string;
 	treeLeafCharCap: number;
+	/** Per-subtree entry-point row cap (default 200). */
+	treeEntryRows: number;
+	/** Purge archived rows older than this many days (0 disables GC; default 90). */
+	treeArchiveGcDays: number;
+	/** Collapse duplicate fact writes into the existing row (default true). */
+	treeDedupe: boolean;
 	debug: boolean;
 	providerOptions: MnemopiProviderOptions;
 	llmMode: MnemopiLlmMode;
@@ -82,8 +88,14 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		recallMaxQueryChars: Math.max(256, Math.floor(settings.get("mnemopi.recallMaxQueryChars"))),
 		injectionTokenLimit: Math.max(256, Math.floor(settings.get("mnemopi.injectionTokenLimit"))),
 		treeEnabled: settings.get("mnemopi.treeEnabled"),
-		treeRoot: settings.get("mnemopi.treeRoot") ?? path.join(getMemoriesDir(agentDir), "tree"),
+		treeRoot:
+			settings.get("memory.tree.root") ??
+			settings.get("mnemopi.treeRoot") ??
+			path.join(getMemoriesDir(agentDir), "tree"),
 		treeLeafCharCap: Math.max(512, Math.floor(settings.get("mnemopi.treeLeafCharCap"))),
+		treeEntryRows: Math.max(20, Math.floor(settings.get("mnemopi.treeEntryRows"))),
+		treeArchiveGcDays: Math.max(0, Math.floor(settings.get("mnemopi.treeArchiveGcDays"))),
+		treeDedupe: settings.get("mnemopi.treeDedupe"),
 		debug: settings.get("mnemopi.debug"),
 		providerOptions: {
 			noEmbeddings: settings.get("mnemopi.noEmbeddings"),

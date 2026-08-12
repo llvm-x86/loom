@@ -8,7 +8,8 @@
  */
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync } from "node:fs";
+import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { HindsightApi } from "@oh-my-pi/pi-coding-agent/hindsight/client";
@@ -24,15 +25,15 @@ import {
 	MnemopiSessionState,
 	setMnemopiSessionState,
 } from "@oh-my-pi/pi-coding-agent/mnemopi/state";
+import { findMemoryIdsBySubstring } from "@oh-my-pi/pi-coding-agent/mnemopi/tree";
 import type { ToolSession } from "@oh-my-pi/pi-coding-agent/tools/index";
 import { MemoryEditTool } from "@oh-my-pi/pi-coding-agent/tools/memory-edit";
-import { MemoryTool } from "@oh-my-pi/pi-coding-agent/tools/memory-tool";
-import { findMemoryIdsBySubstring } from "@oh-my-pi/pi-coding-agent/mnemopi/tree";
 import { MemoryRecallTool } from "@oh-my-pi/pi-coding-agent/tools/memory-recall";
 import { MemoryReflectTool } from "@oh-my-pi/pi-coding-agent/tools/memory-reflect";
 import { MemoryRetainTool } from "@oh-my-pi/pi-coding-agent/tools/memory-retain";
+import { MemoryTool } from "@oh-my-pi/pi-coding-agent/tools/memory-tool";
 import { resetMemoryForTests } from "@oh-my-pi/pi-mnemopi";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { getMemoriesDir, TempDir } from "@oh-my-pi/pi-utils";
 
 // Mnemopi is lazy-loaded at runtime; preload it so the sync construction in
 // registerMnemopiState() and getMnemopiScopedDbPaths() can resolve the module.
@@ -134,6 +135,9 @@ function makeMnemopiConfig(
 		treeEnabled: false,
 		treeRoot: tempDbDir!.join("tree"),
 		treeLeafCharCap: 4096,
+		treeEntryRows: 200,
+		treeArchiveGcDays: 90,
+		treeDedupe: true,
 		proactiveLinking: false,
 		retainEveryNTurns: 3,
 		recallLimit: 10,
@@ -462,6 +466,63 @@ describe("memory.execute (Mnemopi backend)", () => {
 			/not initialised/i,
 		);
 	});
+
+	it("dedupes repeated identical fact writes onto the same leaf id", async () => {
+		const state = registerMnemopiState();
+		const retain = state.getScopedRetainTarget().memory;
+
+		const first = state.rememberScoped("same fact written twice", { source: "test", scope: "bank" })!;
+		const second = state.rememberScoped("same   fact   written  twice", { source: "test", scope: "bank" });
+		expect(second).toBe(first);
+		const rows = retain.db.query("SELECT COUNT(*) AS c FROM working_memory").get() as { c: number };
+		expect(rows.c).toBe(1);
+		expect(findMemoryIdsBySubstring(retain, "same fact written twice", 5)).toEqual([first]);
+	});
+
+	it("re-adding an archived fact revives its row", async () => {
+		const state = registerMnemopiState();
+		const retain = state.getScopedRetainTarget().memory;
+		const id = state.rememberScoped("archived then re-added fact", { source: "test", scope: "bank" })!;
+		retain.db.prepare("UPDATE working_memory SET valid_until = '2000-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+		const again = state.rememberScoped("archived  then  re-added  fact", { source: "test", scope: "bank" });
+		expect(again).toBe(id);
+		const row = retain.db.query("SELECT valid_until FROM working_memory WHERE id = ?").get(id) as {
+			valid_until: string | null;
+		};
+		expect(row.valid_until).toBeNull();
+	});
+
+	it("stores a distinct row when treeDedupe is disabled", async () => {
+		const state = registerMnemopiState(makeMnemopiConfig({ treeDedupe: false }));
+		const retain = state.getScopedRetainTarget().memory;
+
+		state.rememberScoped("duplicate  records  allowed", { source: "test", scope: "bank" });
+		state.rememberScoped("duplicate records allowed", { source: "test", scope: "bank" });
+		const rows = retain.db.query("SELECT COUNT(*) AS c FROM working_memory").get() as { c: number };
+		expect(rows.c).toBe(2);
+	});
+
+	it("restores archived rows named in a new memory's connections", async () => {
+		const state = registerMnemopiState();
+		const retain = state.getScopedRetainTarget().memory;
+		const archivedId = state.rememberScoped("archived sibling fact", { source: "test", scope: "bank" })!;
+		retain.db.prepare("UPDATE working_memory SET valid_until = '2000-01-01T00:00:00Z' WHERE id = ?").run(archivedId);
+		const before = retain.db.query("SELECT valid_until FROM working_memory WHERE id = ?").get(archivedId) as {
+			valid_until: string | null;
+		};
+		expect(before.valid_until).not.toBeNull();
+
+		state.rememberScoped("new fact links its sibling", {
+			source: "test",
+			scope: "bank",
+			metadata: { connections: [archivedId] },
+		});
+		const revived = retain.db.query("SELECT valid_until FROM working_memory WHERE id = ?").get(archivedId) as {
+			valid_until: string | null;
+		};
+		expect(revived.valid_until).toBeNull();
+	});
 });
 
 describe("Mnemopi backend lifecycle", () => {
@@ -712,6 +773,28 @@ describe("Mnemopi backend lifecycle", () => {
 		registeredMnemopiState = undefined;
 	});
 
+	it("consolidate materialises the retained rows into the memory tree", async () => {
+		const config = makeMnemopiConfig({ treeEnabled: true });
+		const state = registerMnemopiState(config);
+		const retainMemory = state.getScopedRetainTarget().memory;
+		vi.spyOn(state, "forceRetainCurrentSession").mockResolvedValue();
+		vi.spyOn(retainMemory, "flushExtractions").mockResolvedValue();
+		state.rememberScoped("consolidated fact for the tree", {
+			source: "test",
+			scope: "bank",
+			metadata: { subtree: "concepts" },
+		});
+
+		await state.consolidate({ sleep: false });
+
+		const [id] = findMemoryIdsBySubstring(retainMemory, "consolidated fact for the tree", 5);
+		expect(id).toBeDefined();
+		const leaf = await readFile(path.join(config.treeRoot, "concepts", `${id}.md`), "utf8");
+		expect(leaf).toContain("status: active");
+
+		registeredMnemopiState = undefined;
+	});
+
 	it("skips consolidation when disposing an aliased subagent state (#2320)", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const parentState = registerMnemopiState();
@@ -746,6 +829,42 @@ describe("Mnemopi backend lifecycle", () => {
 		expect(sleepSpy).not.toHaveBeenCalled();
 		expect(closeSpy).not.toHaveBeenCalled();
 		expect(parentRetainSpy).not.toHaveBeenCalled();
+	});
+
+	it("memory apply reconciles the tree through the backend hook", async () => {
+		const config = makeMnemopiConfig({ treeEnabled: true });
+		const state = registerMnemopiState(config);
+		const retain = state.getScopedRetainTarget().memory;
+		state.rememberScoped("apply-reconciled fact", {
+			source: "test",
+			scope: "bank",
+			metadata: { subtree: "concepts" },
+		});
+		const [id] = findMemoryIdsBySubstring(retain, "apply-reconciled fact", 5);
+
+		const summary = await mnemopiBackend.apply!(path.dirname(tempDbPath!), "/tmp", state.session);
+		expect(summary).toContain("Memory tree reconciled");
+		const leaf = await readFile(path.join(config.treeRoot, "concepts", `${id}.md`), "utf8");
+		expect(leaf).toContain("status: active");
+
+		registeredMnemopiState = undefined;
+	});
+
+	it("memory backup bundles the tree and the bank files", async () => {
+		const config = makeMnemopiConfig({ treeEnabled: true });
+		const state = registerMnemopiState(config);
+		state.rememberScoped("backed-up fact", {
+			source: "test",
+			metadata: { subtree: "concepts" },
+		});
+
+		await state.renderMemoryTree();
+
+		const summary = await mnemopiBackend.backup!(path.dirname(tempDbPath!), "/tmp", state.session);
+		expect(summary).toMatch(/memory-\d{4}-\d{2}-\d{2}T.*\.tar\.gz \(\+ \d+ sqlite snapshot/);
+		const backupsDir = path.join(getMemoriesDir(path.dirname(tempDbPath!)), "backups");
+
+		registeredMnemopiState = undefined;
 	});
 
 	it("aliased subagent enqueue still flushes and sleeps the parent's shared banks (#2327 review)", async () => {

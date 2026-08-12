@@ -145,6 +145,17 @@ export interface MemoryBackend {
 	/** Render backend-specific memory diagnostics as markdown (`/memory diagnose`). */
 	diagnose?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;
 	/**
+	 * Reconcile now: materialise the bank into the memory tree (`/memory apply`/
+	 * `/memory reconcile`). Returns a short markdown summary.
+	 */
+	apply?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;
+
+	/**
+	 * Bundle the memory tree + bank files into a timestamped backup artifact
+	 * (`/memory backup`). Returns the artifact path(s) as text.
+	 */
+	backup?(agentDir: string, cwd: string, session?: AgentSession): Promise<string | undefined>;
+	/**
 	 * Optional hook to inject a backend-specific block into the current turn's
 	 * system prompt before the agent starts generating.
 	 *

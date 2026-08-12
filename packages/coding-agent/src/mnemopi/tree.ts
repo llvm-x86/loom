@@ -45,6 +45,8 @@ export interface MemoryTreeRow {
 	/** Which table the id resolved from — decides which SQL adopt targets. */
 	store: "working" | "episodic";
 	archived: boolean;
+	/** Timestamp that archived this row, if archival was time-based. */
+	validUntil: string | null;
 	subtree: string;
 }
 
@@ -54,6 +56,10 @@ export interface RenderMemoryTreeInput {
 	treeRoot: string;
 	/** Per-leaf content cap in characters. Defaults to 4096. */
 	leafCharCap?: number;
+	/** Per-subtree entry-point row cap. Defaults to 200. */
+	entryRows?: number;
+	/** Purge archived rows whose `valid_until` is older than this many days. Defaults to 90; 0 disables GC. */
+	archiveGcDays?: number;
 }
 
 export interface RenderMemoryTreeResult {
@@ -62,10 +68,15 @@ export interface RenderMemoryTreeResult {
 	archived: number;
 	adopted: number;
 	removedStale: number;
+	/** Bank rows garbage-collected (archived beyond the horizon) this pass. */
+	gc: number;
 }
 
 const TREE_LEAF_MIN_CHARS = 256;
 const TREE_ENTRY_SUMMARY_CHARS = 140;
+const TREE_ENTRY_ROWS = 200;
+const TREE_ARCHIVE_GC_DAYS = 90;
+const TREE_WRITE_LOG_KEEP = 500;
 
 const ROW_QUERY = `
 	SELECT id, content, source, timestamp,
@@ -128,6 +139,7 @@ export function queryTreeRows(memory: Mnemopi, bank: string, now: Date = new Dat
 			bank,
 			store,
 			archived,
+			validUntil: row.valid_until,
 			subtree: deriveSubtree(metadata, bank),
 		});
 	}
@@ -240,13 +252,20 @@ function renderLeafBody(row: MemoryTreeRow, leafCharCap: number): string {
 	return header;
 }
 
-function renderSubtreeEntry(subtree: string, leaves: readonly MemoryTreeRow[], archivedCount: number): string {
+function renderSubtreeEntry(
+	subtree: string,
+	leaves: readonly MemoryTreeRow[],
+	archivedCount: number,
+	overflow = 0,
+): string {
 	const lines = leaves.map(row => {
 		const slug = slugForId(row.id);
 		return `| ${slug} | ${escapeCell(summaryOf(row.content, TREE_ENTRY_SUMMARY_CHARS))} | ${escapeCell(
 			tagsFor(row).join(", "),
-		)} | ${row.archived ? "archived" : "active"} | ${escapeCell(row.updated.slice(0, 19))} |`;
+		)} | active | ${escapeCell(row.updated.slice(0, 19))} |`;
 	});
+	const overflowLines =
+		overflow > 0 ? [`${overflow} older leaf(ren) not listed (entry point capped at ${leaves.length} rows).`, ""] : [];
 	return [
 		`# Memory: ${subtree}`,
 		"",
@@ -259,7 +278,7 @@ function renderSubtreeEntry(subtree: string, leaves: readonly MemoryTreeRow[], a
 		...lines,
 		"",
 		`${leaves.length} leaf(ren) active, ${archivedCount} archived under \`archive/${subtree}/\`.`,
-		"",
+		...overflowLines,
 	].join("\n");
 }
 
@@ -299,9 +318,20 @@ async function atomicWrite(dest: string, content: string): Promise<void> {
  */
 export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<RenderMemoryTreeResult> {
 	const { memory, bank, treeRoot } = input;
+	const nowMs = Date.now();
 	const leafCharCap = Math.max(TREE_LEAF_MIN_CHARS, input.leafCharCap ?? 4096);
+	const entryRows = Math.max(1, input.entryRows ?? TREE_ENTRY_ROWS);
+	const archiveGcDays = Math.max(0, input.archiveGcDays ?? TREE_ARCHIVE_GC_DAYS);
+	const gcHorizonMs = nowMs - archiveGcDays * 86_400_000;
 	const rows = queryTreeRows(memory, bank);
-	const result: RenderMemoryTreeResult = { leaves: rows.length, written: 0, archived: 0, adopted: 0, removedStale: 0 };
+	const result: RenderMemoryTreeResult = {
+		leaves: rows.length,
+		written: 0,
+		archived: 0,
+		adopted: 0,
+		removedStale: 0,
+		gc: 0,
+	};
 
 	const bySubtree = new Map<string, { active: Map<string, MemoryTreeRow>; archived: Map<string, MemoryTreeRow> }>();
 	for (const row of rows) {
@@ -312,6 +342,7 @@ export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<Re
 		}
 		(row.archived ? group.archived : group.active).set(slugForId(row.id), row);
 	}
+	const archivedKeptBySubtree = new Map<string, number>();
 
 	for (const [subtree, group] of bySubtree) {
 		const activeDir = path.join(treeRoot, subtree);
@@ -345,23 +376,32 @@ export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<Re
 			result.written += 1;
 		}
 
-		const archivedSlugs = new Set<string>();
+		const keptArchived: MemoryTreeRow[] = [];
+		const archivedKeptSlugs = new Set<string>();
 		for (const [slug, row] of group.archived) {
-			archivedSlugs.add(slug);
+			const expiryMs = row.validUntil !== null ? Date.parse(row.validUntil) : Number.NaN;
+			if (archiveGcDays > 0 && Number.isFinite(expiryMs) && expiryMs < gcHorizonMs && deleteRow(memory, row)) {
+				// Lifecycle: archived → gc. The archive leaf is dropped by stale cleanup.
+				result.gc += 1;
+				continue;
+			}
+			archivedKeptSlugs.add(slug);
+			keptArchived.push(row);
 			await atomicWrite(path.join(archiveDir, `${slug}.md`), renderLeafBody(row, leafCharCap));
 			result.archived += 1;
 		}
 
 		result.removedStale += await removeStaleLeaves(activeDir, activeSlugs);
-		result.removedStale += await removeStaleLeaves(archiveDir, archivedSlugs);
+		result.removedStale += await removeStaleLeaves(archiveDir, archivedKeptSlugs);
+		const entryLeaves = [...group.active.values()]
+			.sort((a, b) => (a.updated === b.updated ? (a.id < b.id ? -1 : 1) : a.updated < b.updated ? 1 : -1))
+			.slice(0, entryRows);
+		const overflow = group.active.size - entryLeaves.length;
 		await atomicWrite(
 			path.join(activeDir, MEMORY_TREE_ENTRY_FILE),
-			renderSubtreeEntry(
-				subtree,
-				[...group.active.values()].sort((a, b) => (a.id < b.id ? -1 : 1)),
-				group.archived.size,
-			),
+			renderSubtreeEntry(subtree, entryLeaves, keptArchived.length, overflow),
 		);
+		archivedKeptBySubtree.set(subtree, keptArchived.length);
 	}
 
 	const rollup = [...bySubtree.entries()]
@@ -369,10 +409,16 @@ export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<Re
 			const rows = [...group.active.values(), ...group.archived.values()];
 			let updated = "";
 			for (const row of rows) if (row.updated > updated) updated = row.updated;
-			return { subtree, leaves: group.active.size, archived: group.archived.size, updated };
+			return {
+				subtree,
+				leaves: group.active.size,
+				archived: archivedKeptBySubtree.get(subtree) ?? 0,
+				updated,
+			};
 		})
 		.sort((a, b) => (a.subtree < b.subtree ? -1 : 1));
 	await atomicWrite(path.join(treeRoot, MEMORY_TREE_ENTRY_FILE), renderRootEntry(treeRoot, rollup));
+	appendTreeWriteLog(memory, bank, result);
 	return result;
 }
 
@@ -440,4 +486,110 @@ export function findMemoryIdsBySubstring(memory: Mnemopi, needle: string, limit 
 		}
 	}
 	return ids;
+}
+/** Hard-delete a bank row (GC step of the queued→active⇄archived→gc lifecycle). */
+function deleteRow(memory: Mnemopi, row: MemoryTreeRow): boolean {
+	try {
+		const table = row.store === "working" ? "working_memory" : "episodic_memory";
+		const result = memory.db.prepare(`DELETE FROM ${table} WHERE id = ?`).run(row.id);
+		return Number(result.changes) > 0;
+	} catch (error) {
+		logger.warn("Mnemopi: memory tree GC could not delete row", { id: row.id, error: String(error) });
+		return false;
+	}
+}
+
+const TREE_WRITE_LOG_TABLE = `
+	CREATE TABLE IF NOT EXISTS tree_write_log (
+		seq INTEGER PRIMARY KEY AUTOINCREMENT,
+		at TEXT NOT NULL,
+		bank TEXT NOT NULL,
+		leaves INTEGER NOT NULL,
+		written INTEGER NOT NULL,
+		archived INTEGER NOT NULL,
+		adopted INTEGER NOT NULL,
+		removed_stale INTEGER NOT NULL,
+		gc INTEGER NOT NULL
+	)
+`;
+
+export interface TreeWriteLogEntry {
+	at: string;
+	bank: string;
+	leaves: number;
+	written: number;
+	archived: number;
+	adopted: number;
+	removedStale: number;
+	gc: number;
+}
+
+/**
+ * Append one audit row per reconcile pass. The log is the background's record
+ * of materialisation; the bank stays the source of truth, so "replay" after a
+ * crash is just the next idempotent render, and the table only serves status
+ * and debugging.
+ */
+function appendTreeWriteLog(memory: Mnemopi, bank: string, result: RenderMemoryTreeResult): void {
+	try {
+		memory.db.exec(TREE_WRITE_LOG_TABLE);
+		memory.db
+			.prepare(
+				`INSERT INTO tree_write_log (at, bank, leaves, written, archived, adopted, removed_stale, gc)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			)
+			.run(
+				new Date().toISOString(),
+				bank,
+				result.leaves,
+				result.written,
+				result.archived,
+				result.adopted,
+				result.removedStale,
+				result.gc,
+			);
+		memory.db
+			.prepare(
+				`DELETE FROM tree_write_log WHERE seq NOT IN (SELECT seq FROM tree_write_log ORDER BY seq DESC LIMIT ?)`,
+			)
+			.run(TREE_WRITE_LOG_KEEP);
+	} catch (error) {
+		logger.warn("Mnemopi: tree write-log append failed.", { error: String(error) });
+	}
+}
+
+/** Read the most recent reconcile-pass records for status output. */
+export function readTreeWriteLog(memory: Mnemopi, limit = 10): TreeWriteLogEntry[] {
+	try {
+		memory.db.exec(TREE_WRITE_LOG_TABLE);
+		return memory.db
+			.query(
+				`SELECT at, bank, leaves, written, archived, adopted, removed_stale AS removedStale, gc
+				 FROM tree_write_log ORDER BY seq DESC LIMIT ?`,
+			)
+			.all(Math.max(1, limit)) as TreeWriteLogEntry[];
+	} catch {
+		return [];
+	}
+}
+
+/**
+ * Normalised content match used by dedupe: whitespace-collapsed, case-folded.
+ * The bank has no exact-match index on content, so the scan is bounded to the
+ * most recent working-memory rows — enough to catch "same fact written twice".
+ */
+export function findMemoryIdByNormalizedContent(memory: Mnemopi, content: string, limit = 200): string | undefined {
+	const normalized = content.replace(/\s+/g, " ").trim().toLowerCase();
+	if (normalized === "") return undefined;
+	const rows = memory.db
+		.query(
+			`SELECT id, content FROM working_memory
+			 WHERE memory_type IS NULL OR memory_type != 'episode'
+			 ORDER BY COALESCE(timestamp, '') DESC LIMIT ?`,
+		)
+		.all(limit) as { id: string; content: string }[];
+	for (const row of rows) {
+		if (row.content.replace(/\s+/g, " ").trim().toLowerCase() === normalized) return row.id;
+	}
+	return undefined;
 }

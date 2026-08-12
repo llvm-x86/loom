@@ -133,7 +133,7 @@ export const TAB_GROUPS: Record<SettingTab, readonly string[]> = {
 		"Git",
 	],
 	context: ["General", "Compaction", "Rules (TTSR)", "Experimental"],
-	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight"],
+	memory: ["General", "Auto-Learn", "Mnemopi", "Hindsight", "Memory Tree"],
 	files: ["Editing", "Reading", "Read Summaries", "LSP"],
 	shell: ["Bash", "Eval & Runtimes"],
 	tools: [
@@ -2722,6 +2722,52 @@ export const SETTINGS_SCHEMA = {
 			label: "Background Memory Tree",
 			description:
 				"Render the memory bank into an agent-readable file tree (leaves + MEMORY.md entry points) written only by the background memory system. Agents read it with normal file tools and request changes through the single `memory` tool.",
+			condition: "mnemopiActive",
+		},
+	},
+	"memory.tree.root": {
+		type: "string",
+		default: undefined,
+		ui: {
+			tab: "memory",
+			group: "Memory Tree",
+			label: "Memory Tree Root",
+			description:
+				"Stable profile-scoped directory where the background writes the memory tree (leaves + MEMORY.md entry points). Overrides mnemopi.treeRoot; default: <agent memories>/tree",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.treeEntryRows": {
+		type: "number",
+		default: 200,
+		ui: {
+			tab: "memory",
+			group: "Memory Tree",
+			label: "Tree Entry-Point Cap",
+			description: "Max leaf rows listed per subtree MEMORY.md (older leaves are omitted with a note)",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.treeArchiveGcDays": {
+		type: "number",
+		default: 90,
+		ui: {
+			tab: "memory",
+			group: "Memory Tree",
+			label: "Archive GC Horizon",
+			description:
+				"Archived memories older than this many days are purged from the bank and archive tree (0 disables)",
+			condition: "mnemopiActive",
+		},
+	},
+	"mnemopi.treeDedupe": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Memory Tree",
+			label: "Deduplicate Fact Writes",
+			description: "Writing the same fact twice updates the existing leaf instead of adding a second one",
 			condition: "mnemopiActive",
 		},
 	},

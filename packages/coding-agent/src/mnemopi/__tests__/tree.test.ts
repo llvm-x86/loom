@@ -1,10 +1,10 @@
 import { describe, expect, it } from "bun:test";
-import { readFile, readdir, writeFile } from "node:fs/promises";
-import * as path from "node:path";
 import { mkdtempSync, rmSync, utimesSync } from "node:fs";
+import { readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
+import * as path from "node:path";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core";
-import { findMemoryIdsBySubstring, renderMemoryTree, restoreMemoryRow } from "../tree";
+import { findMemoryIdsBySubstring, readTreeWriteLog, renderMemoryTree, restoreMemoryRow } from "../tree";
 
 describe("memory tree", () => {
 	function makeMemory(): Mnemopi {
@@ -111,7 +111,7 @@ describe("memory tree", () => {
 			});
 			memory.db.prepare("UPDATE working_memory SET valid_until = '2000-01-01T00:00:00Z' WHERE id = ?").run(id);
 
-			const result = await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
+			const result = await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root, archiveGcDays: 0 });
 			expect(result.archived).toBe(1);
 
 			const archivedLeaf = await readFile(
@@ -189,7 +189,7 @@ describe("memory tree", () => {
 				scope: "bank",
 			});
 			memory.db.prepare("UPDATE working_memory SET valid_until = '2000-01-01T00:00:00Z' WHERE id = ?").run(id);
-			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
+			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root, archiveGcDays: 0 });
 
 			expect(restoreMemoryRow(memory, id)).toBe(true);
 			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
@@ -198,6 +198,92 @@ describe("memory tree", () => {
 			expect(leaf).toContain("status: active");
 			const archiveNames = await readdir(path.join(root, "archive", "concepts"));
 			expect(archiveNames).not.toContain(`${id}.md`);
+		} finally {
+			cleanup(root);
+			memory.close();
+		}
+	});
+
+	it("garbage-collects archived rows past the horizon and drops their leaves", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			const id = memory.remember("gc-me old archived fact", {
+				source: "test",
+				metadata: { subtree: "concepts" },
+				scope: "bank",
+			});
+			memory.db.prepare("UPDATE working_memory SET valid_until = '2000-01-01T00:00:00Z' WHERE id = ?").run(id);
+
+			const result = await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
+			expect(result.gc).toBe(1);
+			expect(result.archived).toBe(0);
+			expect(memory.get(id)).toBeNull();
+			await expect(readFile(path.join(root, "archive", "concepts", `${id}.md`), "utf8")).rejects.toThrow();
+		} finally {
+			cleanup(root);
+			memory.close();
+		}
+	});
+
+	it("caps the subtree entry point at entryRows and notes the overflow", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			for (let i = 0; i < 5; i++) {
+				memory.remember(`capped leaf number ${i}`, {
+					source: "test",
+					metadata: { subtree: "bigsub" },
+					scope: "bank",
+				});
+			}
+			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root, entryRows: 3 });
+
+			const entry = await readFile(path.join(root, "bigsub", "MEMORY.md"), "utf8");
+			expect(entry).toContain("2 older leaf(ren) not listed (entry point capped at 3 rows)");
+			const names = await readdir(path.join(root, "bigsub"));
+			expect(names.filter(n => n.endsWith(".md") && n !== "MEMORY.md")).toHaveLength(5);
+		} finally {
+			cleanup(root);
+			memory.close();
+		}
+	});
+
+	it("records every reconcile pass in the tree write log", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			memory.remember("logged fact", { source: "test", scope: "bank" });
+			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
+			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
+
+			const log = readTreeWriteLog(memory, 10);
+			expect(log).toHaveLength(2);
+			expect(log[0].bank).toBe(memory.bank);
+			expect(log[0].leaves).toBeGreaterThanOrEqual(1);
+			expect(log[0].at >= log[1].at).toBe(true);
+		} finally {
+			cleanup(root);
+			memory.close();
+		}
+	});
+
+	it("re-materialises the tree after the whole root is deleted", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			memory.remember("survives deletion of the tree", {
+				source: "test",
+				metadata: { subtree: "concepts" },
+				scope: "bank",
+			});
+			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
+			rmSync(root, { recursive: true, force: true });
+
+			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: root });
+			const [id] = findMemoryIdsBySubstring(memory, "survives deletion", 5);
+			const leaf = await readFile(path.join(root, "concepts", `${id}.md`), "utf8");
+			expect(leaf).toContain("status: active");
 		} finally {
 			cleanup(root);
 			memory.close();

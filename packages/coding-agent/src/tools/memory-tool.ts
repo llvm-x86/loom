@@ -97,6 +97,7 @@ export class MemoryTool implements AgentTool<typeof memoryToolSchema> {
 			if (!memoryId) {
 				return failure("The memory system rejected the request; nothing was stored.");
 			}
+			state.markTreeChange();
 			this.scheduleRender(state);
 			return {
 				content: [
@@ -128,6 +129,7 @@ export class MemoryTool implements AgentTool<typeof memoryToolSchema> {
 			if (!content) return failure("memory replace requires non-empty content.");
 			const result = state.editScopedMemory("update", memoryId, { content });
 			if (result.status === "not_found" || result.status === "not_editable") return memoryNotFound(params);
+			state.markTreeChange();
 			this.scheduleRender(state);
 			return {
 				content: [
@@ -143,6 +145,7 @@ export class MemoryTool implements AgentTool<typeof memoryToolSchema> {
 		if (params.action === "remove") {
 			const result = state.editScopedMemory("forget", memoryId);
 			if (result.status === "not_found" || result.status === "not_editable") return memoryNotFound(params);
+			state.markTreeChange();
 			this.scheduleRender(state);
 			return {
 				content: [
@@ -157,6 +160,7 @@ export class MemoryTool implements AgentTool<typeof memoryToolSchema> {
 
 		// restore
 		if (state.restoreScopedMemory(memoryId)) {
+			state.markTreeChange();
 			this.scheduleRender(state);
 			return {
 				content: [
