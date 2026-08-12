@@ -303,28 +303,45 @@ export default class SyncContext extends Command {
 			await runRepairMode(flags.repair, flags["dry-run"] === true, flags["activity-id"]);
 			return;
 		}
-		if (!flags.resume) throw new CliUsageError("sync-context requires --resume <transcript>");
-		if (!existsSync(flags.resume)) {
-			throw new CliUsageError(
-				`sync-context --resume transcript not found: ${flags.resume} (a nonexistent path would silently start a fresh session)`,
-			);
-		}
+		// Spool-record repos (env-keyed banks like LOOM_MNEMOPI_BANK_REPO)
+		// that a resumed session's own git-based repo detection cannot see.
+		// Merged with `event.repos` in the close pass so every bank the
+		// closed session touched gets its tree rendered.
+		const spoolRepos = (flags.repos ?? "")
+			.split(",")
+			.map(repo => repo.trim())
+			.filter(Boolean);
+
 		const reason: SessionContextSyncReason = (VALID_REASONS as readonly string[]).includes(flags.reason ?? "")
 			? (flags.reason as SessionContextSyncReason)
 			: "shutdown";
 
 		const summary: SyncContextSummary = { ok: false, repos: [], tokens_in: 0, tokens_out: 0 };
-
-		// Spool-record repos (env-keyed banks like LOOM_MNEMOPI_BANK_REPO)
-		// that the resumed session's own repo detection cannot see. Merged
-		// with `event.repos` later so the close pass renders every bank the
-		// closed session touched.
-		const spoolRepos = (flags.repos ?? "")
-			.split(",")
-			.map(repo => repo.trim())
-			.filter(Boolean);
 		let dispose: (() => Promise<void>) | undefined;
 		try {
+			if (!flags.resume) {
+				// Tree-only close pass: a lane killed by a signal or fatal
+				// error may never have persisted its transcript, so the
+				// ledger resume is impossible — but the spool record's repos
+				// still name the banks whose trees must be rendered. Runs
+				// the same LLM-free projection, then falls through to the
+				// shared summary/exit tail.
+				if (spoolRepos.length === 0) {
+					throw new CliUsageError("sync-context requires --resume <transcript> or --repos <repo[,repo...]>");
+				}
+				const settings = await Settings.loadReadOnly();
+				await reconcileRepoMemoryTrees(settings, spoolRepos).catch((error: unknown) => {
+					logger.warn("Sync-context: memory-tree reconcile failed.", { error: String(error) });
+				});
+				summary.ok = true;
+				summary.repos = spoolRepos.slice();
+				return;
+			}
+			if (!existsSync(flags.resume)) {
+				throw new CliUsageError(
+					`sync-context --resume transcript not found: ${flags.resume} (a nonexistent path would silently start a fresh session)`,
+				);
+			}
 			const sessionManager = await SessionManager.open(flags.resume);
 			const { session } = await createAgentSession({
 				cwd: sessionManager.getCwd(),
