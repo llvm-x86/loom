@@ -2365,7 +2365,11 @@ export class AgentSession {
 		if (this.#isDisposed || this.#syncContextCliMode) return;
 		const settings = this.settings.getGroup("sessionContextSync");
 		if (!settings.enabled || !settings.dir) return;
-		await this.#writeContextSyncShutdownSpool(settings.dir);
+		// Records must land in the worker's spool dir, not the ledger dir:
+		// agent-chat's worker polls `spoolDir` and would never see a record
+		// written next to the ledgers. Falls back to `dir` when no spoolDir is
+		// configured (the write stays non-blocking either way).
+		await this.#writeContextSyncShutdownSpool(settings.spoolDir || settings.dir);
 	}
 
 	#clearSessionContextSyncIdleTimer(): void {
