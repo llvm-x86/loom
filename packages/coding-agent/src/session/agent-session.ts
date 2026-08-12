@@ -2330,6 +2330,16 @@ export class AgentSession {
 		const transcriptPath = this.sessionManager.getSessionFile();
 		if (!transcriptPath) return; // Unsaved session — nothing to hand off.
 		const repos = await detectTouchedRepos(this.#sessionContextSyncHandle(), settings);
+		// Repo-keyed lanes: the memory bank identity comes from the boot-time
+		// LOOM_MNEMOPI_BANK_REPO env, which git-based repo detection never sees
+		// (console lanes boot in cwd with no origin). Carry its slug so the
+		// service worker's close pass renders the right bank even when the
+		// transcript touched no checkout.
+		const bankRepo = Bun.env.LOOM_MNEMOPI_BANK_REPO?.trim();
+		if (bankRepo) {
+			const slug = bankRepo.replaceAll("/", "-");
+			if (!repos.includes(slug)) repos.push(slug);
+		}
 		const record: ContextSyncSpoolRequest = {
 			sessionId: this.sessionId,
 			transcriptPath,
