@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Fireworks `x-session-affinity` prompt-cache affinity: chat-completions and Responses requests to Fireworks models now send the session's stable prompt-cache key as the `x-session-affinity` header (mirroring the existing Grok `x-grok-conv-id` wiring), so serverless replicas can reuse the warm KV-cache prefix across turns instead of cold-prefilling.
+
 ## [17.0.5] - 2026-07-18
 
 ### Added

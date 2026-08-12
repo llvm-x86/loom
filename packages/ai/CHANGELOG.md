@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Changed
+
+- Changed Fireworks requests to emit the session prompt-cache key as `x-session-affinity` via the per-model `promptCacheSessionHeader` compat flag, giving serverless Fireworks replicas a sticky routing key for KV-cache reuse across multi-turn agent sessions.
+
 ## [17.0.5] - 2026-07-18
 
 ### Changed
