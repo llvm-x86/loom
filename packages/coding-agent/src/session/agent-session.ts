@@ -48,6 +48,7 @@ import {
 	AUTO_HANDOFF_THRESHOLD_FOCUS,
 	applyShakeRegions,
 	CompactionCancelledError,
+	CompactionCredentialsError,
 	type CompactionPreparation,
 	type CompactionResult,
 	type CompactionSettings,
@@ -10745,9 +10746,7 @@ export class AgentSession {
 		}
 		if (model?.provider === "fireworks") {
 			if (this.#fireworksFastMode !== undefined) {
-				return this.#fireworksFastMode === "priority" && !isFireworksFastModelId(model.id)
-					? "priority"
-					: undefined;
+				return this.#fireworksFastMode === "priority" && !isFireworksFastModelId(model.id) ? "priority" : undefined;
 			}
 			return this.settings.get("providers.fireworksTier") === "priority" && !isFireworksFastModelId(model.id)
 				? "priority"
@@ -11198,8 +11197,6 @@ export class AgentSession {
 			// text-only model (issue #5064).
 			const explicitSnapcompact = compactMode?.name === "snapcompact";
 			let snapcompactReady = wantsSnapcompact;
-			const snapcompactShapeSetting = this.settings.get("snapcompact.shape");
-			let snapcompactShape: snapcompact.Shape | undefined;
 			if (wantsSnapcompact && !this.model.input.includes("image")) {
 				if (explicitSnapcompact) {
 					this.emitNotice(
@@ -11215,28 +11212,6 @@ export class AgentSession {
 					"compaction",
 				);
 				snapcompactReady = false;
-			} else if (snapcompactReady) {
-				const text = snapcompact.serializeConversation(
-					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
-				);
-				const probeText = snapcompact.renderabilityProbeText(
-					text,
-					preparation.previousPreserveData,
-					preparation.previousSummary,
-				);
-				snapcompactShape = snapcompact.resolveShapeForText(probeText, this.model, snapcompactShapeSetting);
-				const renderScan = snapcompact.scanRenderability(probeText, { shape: snapcompactShape });
-				if (!renderScan.isSafe) {
-					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
-					this.emitNotice(
-						"warning",
-						`snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%). No LLM fallback was attempted.`,
-						"compaction",
-					);
-					throw new Error(
-						`snapcompact cannot render this conversation locally: unsupported characters for selected snapcompact font (${percent}%).`,
-					);
-				}
 			}
 
 			let summary: string;
@@ -11252,61 +11227,12 @@ export class AgentSession {
 			// the snapcompact request locally rather than falling back to an LLM call.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (snapcompactReady) {
-				const maxFrames = this.#computeSnapcompactMaxFrames(preparation, effectiveSettings);
-				if (maxFrames < 1) {
-					logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
-						model: this.model?.id,
-					});
-					this.emitNotice(
-						"warning",
-						"snapcompact: kept history alone exceeds the context budget. No LLM fallback was attempted.",
-						"compaction",
-					);
-					throw new Error("snapcompact cannot run locally: kept history alone exceeds the context budget.");
-				} else {
-					const shape = snapcompactShape;
-					if (!shape) {
-						throw new Error("snapcompact shape was not resolved before rendering.");
-					}
-					snapcompactResult = await snapcompact.compact(preparation, {
-						convertToLlm,
-						model: this.model,
-						...(snapcompactShapeSetting === "auto" ? {} : { shape }),
-						maxFrames,
-					});
-					const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
-					if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
-						logger.warn("Snapcompact exceeded the per-request frame payload budget", {
-							model: this.model?.id,
-							framePayloadBytes,
-							budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
-						});
-						this.emitNotice(
-							"warning",
-							"snapcompact produced too much standing image payload. No LLM fallback was attempted.",
-							"compaction",
-						);
-						throw new Error(
-							"snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
-						);
-					}
-					const ctxWindow = this.model?.contextWindow ?? 0;
-					const budget =
-						ctxWindow > 0
-							? ctxWindow - effectiveReserveTokens(ctxWindow, effectiveSettings)
-							: Number.POSITIVE_INFINITY;
-					if (this.#projectSnapcompactContextTokens(preparation, snapcompactResult) > budget) {
-						logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
-							model: this.model?.id,
-						});
-						this.emitNotice(
-							"warning",
-							"snapcompact could not bring the context under the limit. No LLM fallback was attempted.",
-							"compaction",
-						);
-						throw new Error("snapcompact could not bring the context under the limit locally.");
-					}
+				const attempt = await this.#attemptSnapcompact(preparation, effectiveSettings);
+				if (attempt.blocker) {
+					this.emitNotice("warning", `${attempt.blocker.notice}. No LLM fallback was attempted.`, "compaction");
+					throw new Error(attempt.blocker.error);
 				}
+				snapcompactResult = attempt.result;
 			}
 
 			if (compactionPrep.kind === "fromHook") {
@@ -11367,7 +11293,29 @@ export class AgentSession {
 					if (compactionAbortController.signal.aborted && err instanceof Error && err.name === "AbortError") {
 						throw new CompactionCancelledError();
 					}
-					throw err;
+					// Same downgrade the auto path takes when the model chain is
+					// spent, with two contract lines held: an explicit `/compact
+					// <mode>` or a focus instruction is a deliberate request for that
+					// exact strategy, so it fails loudly instead of quietly producing
+					// a different kind of compaction; and a credentials failure stays
+					// loud because it is the operator's to fix, unlike an exhausted
+					// usage window, which is the provider's and recovers on its own.
+					const canDowngrade =
+						!compactMode &&
+						!customInstructions &&
+						!options?.internalGuidance &&
+						!(err instanceof CompactionCredentialsError);
+					const archived = canDowngrade
+						? await this.#lastResortSnapcompact(preparation, effectiveSettings, err)
+						: undefined;
+					if (!archived) throw err;
+					summary = archived.summary;
+					shortSummary = archived.shortSummary;
+					firstKeptEntryId = archived.firstKeptEntryId;
+					tokensBefore = archived.tokensBefore;
+					details = archived.details;
+					preserveData = { ...(compactionPrep.preserveData ?? {}), ...(archived.preserveData ?? {}) };
+					codexCompaction = undefined;
 				}
 			}
 
@@ -13539,12 +13487,15 @@ export class AgentSession {
 			addCandidate(this.#resolveRoleModelFull(role, availableModels, preferredModel ?? undefined).model);
 		}
 
+		// Every remaining enabled model, widest window first — not just one spare.
+		// A single spare dead-ends the moment both the preferred summarizer and
+		// that one spare are out of quota, and compaction then fails while other
+		// authenticated models sit unused. Extra entries cost nothing until an
+		// earlier candidate actually fails: both runtime loops skip candidates
+		// without resolvable credentials and stop at the first success.
 		const sortedByContext = [...availableModels].sort((a, b) => (b.contextWindow ?? 0) - (a.contextWindow ?? 0));
 		for (const model of sortedByContext) {
-			if (!seen.has(this.#getModelKey(model))) {
-				addCandidate(model);
-				break;
-			}
+			addCandidate(model);
 		}
 
 		return [...primary, ...deferred];
@@ -13564,17 +13515,188 @@ export class AgentSession {
 		return credential !== undefined && isOAuthToken(credential.access);
 	}
 
-	#buildCompactionAuthError(): Error {
+	/**
+	 * The one compaction failure that must stay loud rather than downgrade to a
+	 * local archive: no candidate had a usable credential. Typed so callers gate
+	 * on `instanceof` instead of matching this message (issue #986).
+	 */
+	#buildCompactionAuthError(): CompactionCredentialsError {
 		const currentModel = this.model;
 		if (!currentModel) {
-			return new Error(
+			return new CompactionCredentialsError(
 				"Compaction requires a model with usable credentials, but no authenticated compaction model is available.",
 			);
 		}
-		return new Error(
+		return new CompactionCredentialsError(
 			`Compaction requires usable credentials for ${currentModel.provider}/${currentModel.id}. ` +
 				`Configure ${currentModel.provider} credentials or assign an authenticated fallback role such as modelRoles.smol.`,
 		);
+	}
+
+	/**
+	 * Run the local snapcompact archive pass for a prepared compaction, applying
+	 * every renderability and budget gate in order. Shared by the configured
+	 * strategy paths (auto and manual) and by {@link #lastResortSnapcompact}, so
+	 * the gates cannot drift apart across three copies.
+	 *
+	 * The caller owns the vision-capability check and the sentence tail: `notice`
+	 * is the shared head of the warning the strategy paths emit, `error` the
+	 * message the local-only manual contract throws.
+	 */
+	async #attemptSnapcompact(
+		preparation: CompactionPreparation,
+		settings: CompactionSettings,
+	): Promise<
+		| { result: snapcompact.CompactionResult; blocker?: undefined }
+		| { result?: undefined; blocker: { notice: string; error: string } }
+	> {
+		const text = snapcompact.serializeConversation(
+			convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
+		);
+		const probeText = snapcompact.renderabilityProbeText(
+			text,
+			preparation.previousPreserveData,
+			preparation.previousSummary,
+		);
+		const shapeSetting = this.settings.get("snapcompact.shape");
+		const shape = snapcompact.resolveShapeForText(probeText, this.model, shapeSetting);
+		const renderScan = snapcompact.scanRenderability(probeText, { shape });
+		if (!renderScan.isSafe) {
+			const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
+			logger.warn("Snapcompact disabled: unsupported characters for selected snapcompact font", {
+				model: this.model?.id,
+				unrenderableRatio: renderScan.unrenderableRatio,
+			});
+			return {
+				blocker: {
+					notice: `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%)`,
+					error: `snapcompact cannot render this conversation locally: unsupported characters for selected snapcompact font (${percent}%).`,
+				},
+			};
+		}
+
+		const maxFrames = this.#computeSnapcompactMaxFrames(preparation, settings);
+		if (maxFrames < 1) {
+			logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
+				model: this.model?.id,
+			});
+			return {
+				blocker: {
+					notice: "snapcompact: kept history alone exceeds the context budget",
+					error: "snapcompact cannot run locally: kept history alone exceeds the context budget.",
+				},
+			};
+		}
+
+		const result = await snapcompact.compact(preparation, {
+			convertToLlm,
+			model: this.model,
+			...(shapeSetting === "auto" ? {} : { shape }),
+			maxFrames,
+		});
+
+		const framePayloadBytes = this.#snapcompactFramePayloadBytes(result);
+		if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
+			logger.warn("Snapcompact exceeded the per-request frame payload budget", {
+				model: this.model?.id,
+				framePayloadBytes,
+				budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
+			});
+			return {
+				blocker: {
+					notice: "snapcompact produced too much standing image payload",
+					error: "snapcompact cannot run locally: standing image payload exceeds the per-request budget.",
+				},
+			};
+		}
+
+		const ctxWindow = this.model?.contextWindow ?? 0;
+		const budget = ctxWindow > 0 ? ctxWindow - effectiveReserveTokens(ctxWindow, settings) : Number.POSITIVE_INFINITY;
+		const projected = this.#projectSnapcompactContextTokens(preparation, result);
+		if (projected > budget) {
+			logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
+				model: this.model?.id,
+				projected,
+				budget,
+			});
+			return {
+				blocker: {
+					notice: "snapcompact could not bring the context under the limit",
+					error: "snapcompact could not bring the context under the limit locally.",
+				},
+			};
+		}
+
+		return { result };
+	}
+
+	/**
+	 * Archive the history with snapcompact after every LLM summarizer candidate
+	 * has been spent — quota exhausted, context too small, or no usable
+	 * credentials. Snapcompact needs no model, key, or network, so it is the one
+	 * strategy that can still run when the model chain cannot, and a local
+	 * archive beats the alternative: a failed compaction that leaves the context
+	 * oversized and the session wedged.
+	 *
+	 * Returns `undefined` when the downgrade is not available (already the
+	 * configured strategy and therefore already tried, text-only active model, or
+	 * a local snapcompact blocker) — the caller then reports the original
+	 * provider error, which is the honest one.
+	 */
+	async #lastResortSnapcompact(
+		preparation: CompactionPreparation,
+		settings: CompactionSettings,
+		cause: unknown,
+	): Promise<snapcompact.CompactionResult | undefined> {
+		// Already the configured strategy means it ran (or was blocked) before the
+		// model chain was tried; re-running it would hit the identical blocker.
+		if (settings.strategy === "snapcompact") return undefined;
+		const model = this.model;
+		const causeText = cause instanceof Error ? cause.message : String(cause ?? "no usable compaction model");
+		if (!model?.input.includes("image")) {
+			this.emitNotice(
+				"warning",
+				`no compaction model could summarize (${causeText}) and snapcompact needs a vision-capable active model${
+					model ? ` (${model.id} is text-only)` : ""
+				}.`,
+				"compaction",
+			);
+			return undefined;
+		}
+
+		const attempt = await this.#attemptSnapcompact(preparation, settings);
+		if (!attempt.result) {
+			this.emitNotice(
+				"warning",
+				`no compaction model could summarize (${causeText}) and ${attempt.blocker.notice}.`,
+				"compaction",
+			);
+			return undefined;
+		}
+
+		logger.warn("Compaction model chain exhausted; archived locally with snapcompact", {
+			model: model.id,
+			cause: causeText,
+		});
+		this.emitNotice(
+			"warning",
+			`no compaction model could summarize (${causeText}); archived this history with snapcompact instead.`,
+			"compaction",
+		);
+		return attempt.result;
+	}
+
+	/**
+	 * A model whose window is `W` overflowed on this exact summarization input,
+	 * so every candidate with a window at or below `W` would overflow too. Skip
+	 * them instead of spending a doomed request each — this is what keeps the
+	 * now-exhaustive candidate chain from walking the whole model list when the
+	 * input simply does not fit anywhere.
+	 */
+	#candidateFitsAfterOverflow(candidate: Model, overflowedWindow: number): boolean {
+		if (overflowedWindow <= 0) return true;
+		const window = candidate.contextWindow ?? 0;
+		return window > overflowedWindow;
 	}
 
 	async #compactWithFallbackModel(
@@ -13588,8 +13710,12 @@ export class AgentSession {
 			precomputedCandidates ?? this.#getCompactionModelCandidates(this.#modelRegistry.getAvailable());
 		const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 		let lastCandidateError: unknown;
+		// Widest window observed to overflow on this input; anything at or below
+		// it cannot fit either, so those candidates are skipped.
+		let overflowedWindow = 0;
 
 		for (const candidate of candidates) {
+			if (!this.#candidateFitsAfterOverflow(candidate, overflowedWindow)) continue;
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 			if (!apiKey) continue;
 
@@ -13643,6 +13769,9 @@ export class AgentSession {
 					AIError.is(flags, AIError.Flag.Timeout) ||
 					AIError.is(flags, AIError.Flag.ContextOverflow);
 				if (!candidateLocal) throw error;
+				if (AIError.is(flags, AIError.Flag.ContextOverflow)) {
+					overflowedWindow = Math.max(overflowedWindow, candidate.contextWindow ?? 0);
+				}
 				lastCandidateError = error;
 			}
 		}
@@ -14297,74 +14426,15 @@ export class AgentSession {
 			// running is the right behavior. Manual `/compact snapcompact` keeps the
 			// local-only contract (#3599): the user explicitly picked it.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
-			let snapcompactBlocker: string | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
-				const text = snapcompact.serializeConversation(
-					convertToLlm(preparation.messagesToSummarize.concat(preparation.turnPrefixMessages)),
-				);
-				const probeText = snapcompact.renderabilityProbeText(
-					text,
-					preparation.previousPreserveData,
-					preparation.previousSummary,
-				);
-				const shapeSetting = this.settings.get("snapcompact.shape");
-				const shape = snapcompact.resolveShapeForText(probeText, this.model, shapeSetting);
-				const renderScan = snapcompact.scanRenderability(probeText, { shape });
-				if (!renderScan.isSafe) {
-					const percent = (renderScan.unrenderableRatio * 100).toFixed(1);
-					logger.warn("Snapcompact disabled: unsupported characters for selected snapcompact font", {
-						model: this.model?.id,
-						unrenderableRatio: renderScan.unrenderableRatio,
-					});
-					snapcompactBlocker = `snapcompact disabled: unsupported characters for selected snapcompact font (${percent}%); using context-full auto-compaction instead.`;
-				} else {
-					const maxFrames = this.#computeSnapcompactMaxFrames(preparation, compactionSettings);
-					if (maxFrames < 1) {
-						logger.warn("Snapcompact skipped: kept history alone exceeds the context budget", {
-							model: this.model?.id,
-						});
-						snapcompactBlocker =
-							"snapcompact: kept history alone exceeds the context budget; using context-full auto-compaction instead.";
-					} else {
-						snapcompactResult = await snapcompact.compact(preparation, {
-							convertToLlm,
-							model: this.model,
-							...(shapeSetting === "auto" ? {} : { shape }),
-							maxFrames,
-						});
-						const framePayloadBytes = this.#snapcompactFramePayloadBytes(snapcompactResult);
-						if (framePayloadBytes > snapcompact.FRAME_DATA_BYTES_BUDGET) {
-							logger.warn("Snapcompact exceeded the per-request frame payload budget", {
-								model: this.model?.id,
-								framePayloadBytes,
-								budget: snapcompact.FRAME_DATA_BYTES_BUDGET,
-							});
-							snapcompactBlocker =
-								"snapcompact produced too much standing image payload; using context-full auto-compaction instead.";
-							snapcompactResult = undefined;
-						}
-						if (snapcompactResult) {
-							const ctxWindow = this.model?.contextWindow ?? 0;
-							const budget =
-								ctxWindow > 0
-									? ctxWindow - effectiveReserveTokens(ctxWindow, compactionSettings)
-									: Number.POSITIVE_INFINITY;
-							const projected = this.#projectSnapcompactContextTokens(preparation, snapcompactResult);
-							if (projected > budget) {
-								logger.warn("Snapcompact still overflows the window after frame-budget sizing", {
-									model: this.model?.id,
-									projected,
-									budget,
-								});
-								snapcompactBlocker =
-									"snapcompact could not bring the context under the limit; using context-full auto-compaction instead.";
-								snapcompactResult = undefined;
-							}
-						}
-					}
-				}
-				if (snapcompactBlocker) {
-					this.emitNotice("warning", snapcompactBlocker, "compaction");
+				const attempt = await this.#attemptSnapcompact(preparation, compactionSettings);
+				snapcompactResult = attempt.result;
+				if (attempt.blocker) {
+					this.emitNotice(
+						"warning",
+						`${attempt.blocker.notice}; using context-full auto-compaction instead.`,
+						"compaction",
+					);
 					action = "context-full";
 				}
 			}
@@ -14389,6 +14459,13 @@ export class AgentSession {
 				const telemetry = resolveTelemetry(this.agent.telemetry, this.sessionId);
 				let compactResult: CompactionResult | undefined;
 				let lastError: unknown;
+				// A failure the provider owns rather than the operator: an exhausted
+				// usage window, a timeout, an overflow. Only these earn the local
+				// archive downgrade below; a pure credentials failure must surface.
+				let lastNonCredentialError: unknown;
+				// Widest window observed to overflow on this input; anything at or
+				// below it cannot fit either, so those candidates are skipped.
+				let overflowedWindow = 0;
 				codexCompaction = createCodexCompactionContext({
 					trigger: "auto",
 					reason: "context_limit",
@@ -14400,6 +14477,7 @@ export class AgentSession {
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
+					if (!this.#candidateFitsAfterOverflow(candidate, overflowedWindow)) continue;
 					const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
 					if (!apiKey) continue;
 
@@ -14444,6 +14522,19 @@ export class AgentSession {
 								lastError = this.#buildCompactionAuthError();
 								break;
 							}
+							// Past the auth branch every remaining failure is the
+							// provider's: quota, overflow, timeout, transient.
+							lastNonCredentialError = error;
+							if (AIError.is(id, AIError.Flag.ContextOverflow)) {
+								overflowedWindow = Math.max(overflowedWindow, candidate.contextWindow ?? 0);
+								logger.warn("Auto-compaction summarization overflowed the candidate window", {
+									error: message,
+									model: `${candidate.provider}/${candidate.id}`,
+									contextWindow: candidate.contextWindow,
+								});
+								lastError = error;
+								break;
+							}
 							if (AIError.is(id, AIError.Flag.Timeout)) {
 								logger.warn(
 									hasMoreCandidates
@@ -14473,17 +14564,28 @@ export class AgentSession {
 							const baseDelayMs = retrySettings.baseDelayMs * 2 ** attempt;
 							const delayMs = retryAfterMs !== undefined ? Math.max(baseDelayMs, retryAfterMs) : baseDelayMs;
 
-							// If retry delay is too long (>30s), try next candidate instead of waiting
-							const maxAcceptableDelayMs = 30_000;
-							if (delayMs > maxAcceptableDelayMs && hasMoreCandidates) {
-								logger.warn("Auto-compaction retry delay too long, trying next model", {
-									delayMs,
-									retryAfterMs,
-									error: message,
-									model: `${candidate.provider}/${candidate.id}`,
-								});
+							// `retry.maxDelayMs` is the documented ceiling: when a provider asks
+							// for a longer wait than that (a 5h usage window resets hours out),
+							// fail fast instead of sleeping. Compaction blocks the whole session,
+							// so it caps tighter still. Bailing is right even on the last
+							// candidate — the chain ends in a local snapcompact archive, which
+							// beats a session that sits "compacting" until the window resets.
+							const maxAcceptableDelayMs =
+								retrySettings.maxDelayMs > 0 ? Math.min(30_000, retrySettings.maxDelayMs) : 30_000;
+							if (delayMs > maxAcceptableDelayMs) {
+								logger.warn(
+									hasMoreCandidates
+										? "Auto-compaction retry delay too long, trying next model"
+										: "Auto-compaction retry delay too long, archiving locally instead of waiting",
+									{
+										delayMs,
+										retryAfterMs,
+										error: message,
+										model: `${candidate.provider}/${candidate.id}`,
+									},
+								);
 								lastError = error;
-								break; // Exit retry loop, continue to next candidate
+								break; // Stop waiting: next candidate, else the local archive.
 							}
 
 							attempt++;
@@ -14505,18 +14607,38 @@ export class AgentSession {
 				}
 
 				if (!compactResult) {
-					if (lastError) {
+					// Every summarizer is spent. Auto maintenance runs on the user's
+					// behalf, so archiving locally beats failing and leaving the
+					// context oversized — the same reasoning that downgrades a
+					// blocked snapcompact to context-full, in the other direction.
+					// Only capacity failures qualify: if nothing but credentials
+					// failed, the user has to hear that, and the same broken auth is
+					// about to block their next turn anyway (issue #986).
+					const archived = lastNonCredentialError
+						? await this.#lastResortSnapcompact(preparation, compactionSettings, lastNonCredentialError)
+						: undefined;
+					if (archived) {
+						action = "snapcompact";
+						summary = archived.summary;
+						shortSummary = archived.shortSummary;
+						firstKeptEntryId = archived.firstKeptEntryId;
+						tokensBefore = archived.tokensBefore;
+						details = archived.details;
+						preserveData = { ...(compactionPrep.preserveData ?? {}), ...(archived.preserveData ?? {}) };
+						codexCompaction = undefined;
+					} else if (lastError) {
 						throw lastError;
+					} else {
+						throw new Error("Compaction failed: no available model");
 					}
-					throw new Error("Compaction failed: no available model");
+				} else {
+					summary = compactResult.summary;
+					shortSummary = compactResult.shortSummary;
+					firstKeptEntryId = compactResult.firstKeptEntryId;
+					tokensBefore = compactResult.tokensBefore;
+					details = compactResult.details;
+					preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
 				}
-
-				summary = compactResult.summary;
-				shortSummary = compactResult.shortSummary;
-				firstKeptEntryId = compactResult.firstKeptEntryId;
-				tokensBefore = compactResult.tokensBefore;
-				details = compactResult.details;
-				preserveData = mergeLlmCompactionPreserveData(compactionPrep.preserveData, compactResult.preserveData);
 			}
 
 			if (autoCompactionSignal.aborted) {

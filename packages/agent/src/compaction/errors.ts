@@ -19,6 +19,24 @@ export class CompactionCancelledError extends Error {
 }
 
 /**
+ * Raised when compaction has no usable credential to run with — every
+ * candidate model was unauthenticated, or the only ones that answered
+ * rejected the credential (401/403).
+ *
+ * This is the one compaction failure that must stay loud. Capacity failures
+ * (an exhausted 5h usage window, a quota cap, a context overflow) are the
+ * provider saying "not now", and the session recovers by archiving history
+ * locally with snapcompact. A credential failure is the *operator* saying
+ * nothing at all works: the same broken auth blocks every ordinary turn, so
+ * silently archiving would hide the one fact the user has to act on. Callers
+ * discriminate via `instanceof` rather than message matching — see issue #986,
+ * which is exactly the regression of swallowing this as a generic failure.
+ */
+export class CompactionCredentialsError extends Error {
+	readonly name = "CompactionCredentialsError" as const;
+}
+
+/**
  * Outcome of a compaction attempt, surfaced by `CommandController.executeCompaction`
  * so callers (e.g. the plan-mode approval flow) can distinguish a deliberate abort
  * from an unrelated failure.
