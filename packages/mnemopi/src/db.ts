@@ -1,5 +1,5 @@
 import { Database } from "bun:sqlite";
-import { mkdirSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { dbPath } from "./config";
 
@@ -23,15 +23,82 @@ type TxDatabase = Database & { [TX_STATE]?: TxState };
 type ExtensionDatabase = Database & { loadExtension(path: string): void };
 
 export function openDatabase(path: DatabasePath = dbPath(), options: OpenDatabaseOptions = {}): Database {
-	if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
-	const db = new Database(path, {
-		create: options.create ?? true,
-		readwrite: options.readwrite ?? true,
-		strict: options.strict ?? true,
-	});
-	if (options.pragmas !== false) enablePragmas(db, path);
-	if (options.loadExtension !== undefined) loadExtensions(db, options.loadExtension);
-	return db;
+	// Everything SQLite creates -- the db, and the `-wal`/`-shm` it recreates
+	// per connection -- is masked by the process umask, so the relaxed umask
+	// has to stay in force until the WAL pragma has run. No `await` happens in
+	// between, so this never leaks into unrelated work.
+	const previousUmask = path === ":memory:" ? undefined : relaxUmaskForSharedStore(dirname(path));
+	try {
+		if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true });
+		const db = new Database(path, {
+			create: options.create ?? true,
+			readwrite: options.readwrite ?? true,
+			strict: options.strict ?? true,
+		});
+		if (options.pragmas !== false) enablePragmas(db, path);
+		if (path !== ":memory:" && previousUmask !== undefined) shareExistingFiles(path);
+		if (options.loadExtension !== undefined) loadExtensions(db, options.loadExtension);
+		return db;
+	} finally {
+		if (previousUmask !== undefined) process.umask(previousUmask);
+	}
+}
+
+/**
+ * Drop the group bits from the umask when this store is meant to be shared,
+ * returning the previous umask (or undefined when it is not shared).
+ *
+ * A repo-keyed bank is one GitHub repository, not one Linux account: every
+ * account working that repo is meant to open the SAME database. Operators
+ * express that by putting the store on a group-writable setgid directory, but
+ * setgid propagates the GROUP and not the write BIT, so under the usual 022
+ * umask the first account to touch a bank creates 0755 dirs and 0644 files
+ * and silently locks every other account out of memories they are supposed to
+ * share. The directory matters as much as the file: SQLite recreates
+ * `-wal`/`-shm` per connection, so a peer that cannot create the sidecars
+ * cannot open a WAL bank at all.
+ *
+ * Done with the umask rather than a chmod afterwards for two reasons. It is
+ * race-free -- the files are never briefly private -- and, decisively,
+ * `fs.chmodSync` under Bun silently drops the setgid bit (0o2775 lands as
+ * 0775, verified on Bun 1.3), which would break group inheritance for every
+ * directory below the root. Letting the kernel inherit setgid through
+ * `mkdir` keeps it intact.
+ *
+ * Shared-ness is judged on the deepest ALREADY-EXISTING ancestor. Walking
+ * further up looking for "some" group-writable ancestor would be wrong:
+ * `/tmp` is 1777, so every private 0700 directory beneath it would qualify.
+ */
+function relaxUmaskForSharedStore(dir: string): number | undefined {
+	let anchor = dir;
+	while (!existsSync(anchor)) {
+		const parent = dirname(anchor);
+		if (parent === anchor) return undefined;
+		anchor = parent;
+	}
+	try {
+		if ((statSync(anchor).mode & 0o020) === 0) return undefined;
+	} catch {
+		return undefined;
+	}
+	return process.umask(0o002);
+}
+
+/**
+ * Widen a database that predates its move onto a shared root. Files created
+ * under the relaxed umask above are already group-writable; this only rescues
+ * one migrated in at 0644. SQLite derives `-wal`/`-shm` permissions from the
+ * database file, so fixing the db is what fixes the sidecars.
+ */
+function shareExistingFiles(path: string): void {
+	for (const file of [path, `${path}-wal`, `${path}-shm`]) {
+		try {
+			const mode = statSync(file).mode & 0o7777;
+			if ((mode & 0o060) !== 0o060) chmodSync(file, mode | 0o060);
+		} catch {
+			// Absent (no WAL yet), or owned by a peer that already shared it.
+		}
+	}
 }
 
 export function enablePragmas(db: Database, path?: DatabasePath): void {
