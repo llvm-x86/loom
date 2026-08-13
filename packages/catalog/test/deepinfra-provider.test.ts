@@ -62,7 +62,7 @@ describe("DeepInfra provider support", () => {
 			| Model<"openai-completions">
 			| undefined;
 		expect(flash?.reasoning).toBe(true);
-		expect(flash?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		expect(flash?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(flash?.compat?.requiresReasoningContentForToolCalls).toBe(true);
 		// 1M context, but per-response max output is the separate 16K DeepInfra cap.
 		expect(flash?.contextWindow).toBe(1_048_576);
@@ -100,6 +100,6 @@ describe("DeepInfra provider support", () => {
 		);
 		const flash = models?.find(model => model.id === "deepseek-ai/DeepSeek-V4-Flash");
 		expect(flash?.reasoning).toBe(true);
-		expect(flash?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		expect(flash?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 });
