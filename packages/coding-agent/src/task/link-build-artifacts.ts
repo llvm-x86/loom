@@ -24,13 +24,20 @@ export async function linkParentBuildArtifacts(
 	repoRoot: string,
 	mergedDir: string,
 	mode: BuildArtifactLinkMode,
+	extraPaths: readonly string[] = [],
 ): Promise<LinkBuildArtifactsResult> {
-	if (mode === "off") {
-		return { linked: [], warnings: [] };
-	}
-
 	const linked: string[] = [];
 	const warnings: string[] = [];
+
+	// The configured allowlist is orthogonal to `mode`: `mode` governs loom's
+	// own generated JS/Rust outputs, `extraPaths` is what the operator named
+	// for this repo. "off" disables the former, never the latter — the Python
+	// case is precisely mode "off" plus `["venv", ".env"]`.
+	await linkConfiguredPaths(repoRoot, mergedDir, extraPaths, linked, warnings);
+
+	if (mode === "off") {
+		return { linked, warnings };
+	}
 
 	await copyFileArtifact(repoRoot, mergedDir, TOOL_VIEWS_RELATIVE, linked, warnings);
 
@@ -43,6 +50,61 @@ export async function linkParentBuildArtifacts(
 	}
 
 	return { linked, warnings };
+}
+
+/**
+ * Seed operator-named gitignored paths into the worktree. Directories are
+ * symlinked because the interesting ones (`venv/`, `node_modules/`) are far
+ * too large to copy per spawn; files are copied so a subagent rewriting
+ * `.env` cannot mutate the parent checkout's copy.
+ */
+async function linkConfiguredPaths(
+	repoRoot: string,
+	mergedDir: string,
+	requested: readonly string[],
+	linked: string[],
+	warnings: string[],
+): Promise<void> {
+	const seen = new Set<string>();
+	for (const raw of requested) {
+		const candidate = raw.trim();
+		if (candidate.length === 0) continue;
+
+		const relative = normalizeRepoRelative(repoRoot, candidate);
+		if (relative === undefined) {
+			warnings.push(`${candidate}: outside the repository root — skipped`);
+			logger.warn("isolation link path rejected", { path: candidate, reason: "escapes repo root" });
+			continue;
+		}
+		if (seen.has(relative)) continue;
+		seen.add(relative);
+
+		const source = path.join(repoRoot, relative);
+		let isDirectory: boolean;
+		try {
+			isDirectory = (await fs.stat(source)).isDirectory();
+		} catch {
+			// Absent in the parent is not an error: a config naming `venv` is
+			// shared across repos that may not all have one.
+			continue;
+		}
+
+		if (isDirectory) {
+			await linkDirectory(repoRoot, mergedDir, relative, linked, warnings);
+		} else {
+			await copyFileArtifact(repoRoot, mergedDir, relative, linked, warnings);
+		}
+	}
+}
+
+/** Repo-root-relative form of `candidate`, or undefined when it escapes the root. */
+function normalizeRepoRelative(repoRoot: string, candidate: string): string | undefined {
+	const root = path.resolve(repoRoot);
+	const resolved = path.resolve(root, candidate);
+	if (resolved === root) return undefined;
+	const relative = path.relative(root, resolved);
+	if (relative.length === 0 || relative.startsWith("..") || path.isAbsolute(relative)) return undefined;
+	return relative;
 }
 
 /** True when an ignored-entry path was seeded from the parent and should not surface as divergence. */

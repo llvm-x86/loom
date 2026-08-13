@@ -71,6 +71,79 @@ describe("linkParentBuildArtifacts", () => {
 		expect(linked).not.toContain(`${NATIVES_RELATIVE_DIR}/demo.node`);
 		await expect(fs.readFile(path.join(merged, NATIVES_RELATIVE_DIR, "demo.node"), "utf8")).resolves.toBe("local");
 	});
+
+	it("seeds configured paths a Python project needs: venv symlinked, .env copied", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-cfg-"));
+		tempDirs.push(repo);
+		const merged = path.join(repo, "merged");
+		await fs.mkdir(merged, { recursive: true });
+		await fs.mkdir(path.join(repo, "venv", "bin"), { recursive: true });
+		await fs.writeFile(path.join(repo, "venv", "bin", "python"), "interpreter");
+		await fs.writeFile(path.join(repo, ".env"), "TOKEN=parent");
+
+		const { linked, warnings } = await linkParentBuildArtifacts(repo, merged, "off", ["venv", ".env"]);
+
+		expect(warnings).toEqual([]);
+		expect(linked).toContain("venv/");
+		expect(linked).toContain(".env");
+		// The interpreter must be reachable through the worktree, or the
+		// subagent's test command dies on the first import.
+		await expect(fs.readFile(path.join(merged, "venv", "bin", "python"), "utf8")).resolves.toBe("interpreter");
+		expect((await fs.lstat(path.join(merged, "venv"))).isSymbolicLink()).toBe(true);
+		// A file is copied, not linked: rewriting .env in the worktree must not
+		// reach the parent checkout.
+		expect((await fs.lstat(path.join(merged, ".env"))).isSymbolicLink()).toBe(false);
+		await fs.writeFile(path.join(merged, ".env"), "TOKEN=child");
+		await expect(fs.readFile(path.join(repo, ".env"), "utf8")).resolves.toBe("TOKEN=parent");
+	});
+
+	it("honours configured paths independently of mode off and ignores absent ones", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-off-"));
+		tempDirs.push(repo);
+		const merged = path.join(repo, "merged");
+		await fs.mkdir(merged, { recursive: true });
+		await fs.mkdir(path.dirname(path.join(repo, TOOL_VIEWS_RELATIVE)), { recursive: true });
+		await fs.writeFile(path.join(repo, TOOL_VIEWS_RELATIVE), "views");
+		await fs.writeFile(path.join(repo, ".env"), "TOKEN=parent");
+
+		const { linked, warnings } = await linkParentBuildArtifacts(repo, merged, "off", [".env", "no-such-dir"]);
+
+		// "off" suppresses loom's own generated outputs but never the operator's allowlist.
+		expect(linked).toEqual([".env"]);
+		expect(warnings).toEqual([]);
+	});
+
+	it("refuses configured paths that escape the repository root", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-esc-"));
+		tempDirs.push(repo);
+		const merged = path.join(repo, "merged");
+		await fs.mkdir(merged, { recursive: true });
+
+		const { linked, warnings } = await linkParentBuildArtifacts(repo, merged, "off", [
+			"../outside",
+			"/etc",
+			".",
+		]);
+
+		expect(linked).toEqual([]);
+		expect(warnings).toHaveLength(3);
+		expect(warnings.every(warning => warning.includes("outside the repository root"))).toBe(true);
+	});
+
+	it("excludes configured paths from the ignored-divergence report", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-skip-"));
+		tempDirs.push(repo);
+		await fs.writeFile(path.join(repo, ".env"), "TOKEN=parent");
+		const merged = path.join(repo, "merged");
+		await fs.mkdir(merged, { recursive: true });
+
+		// Unconfigured: the worktree genuinely lacks .env, so divergence reports it.
+		const bare = await linkParentBuildArtifacts(repo, merged, "off");
+		expect(shouldSkipLinkedIgnoredEntry(".env", bare.linked)).toBe(false);
+
+		const seeded = await linkParentBuildArtifacts(repo, merged, "off", [".env", "venv"]);
+		expect(shouldSkipLinkedIgnoredEntry(".env", seeded.linked)).toBe(true);
+	});
 });
 
 describe("shouldSkipLinkedIgnoredEntry", () => {

@@ -812,6 +812,8 @@ export function getTaskIsolationSegment(repoRoot: string, id: string): string {
 
 export interface EnsureIsolationOptions {
 	linkBuildArtifacts?: BuildArtifactLinkMode;
+	/** Repo-root-relative gitignored paths to seed from the parent checkout. */
+	linkPaths?: readonly string[];
 }
 
 export async function ensureIsolation(
@@ -846,6 +848,7 @@ export async function ensureIsolation(
 				repoRoot,
 				mergedDir,
 				linkMode,
+				options?.linkPaths ?? [],
 			);
 			for (const warning of linkWarnings) {
 				logger.warn("isolation build-artifact link skipped path", { baseDir, warning });

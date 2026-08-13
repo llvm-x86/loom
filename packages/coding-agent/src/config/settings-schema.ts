@@ -4304,9 +4304,9 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Link Parent Build Artifacts",
 			description:
-				'How an isolated worktree inherits gitignored build outputs from the parent checkout. "readonly" (default) copies only small generated binaries (.node addons, tool-views.generated.js) so tests can run without sharing mutable stores. "full" additionally symlinks node_modules and target per the manual worktree recipe — opt-in only; bun install in a linked worktree mutates the parent. "off" leaves the worktree bare.',
+				'How an isolated worktree inherits loom\'s own gitignored build outputs from the parent checkout. "readonly" (default) copies only small generated binaries (.node addons, tool-views.generated.js) so tests can run without sharing mutable stores. "full" additionally symlinks node_modules and target per the manual worktree recipe — opt-in only; bun install in a linked worktree mutates the parent. "off" leaves the worktree bare apart from anything listed in "Link Paths Into Worktree", which is honoured regardless of this setting.',
 			options: [
-				{ value: "off", label: "Off", description: "No inheritance — subagent must install its own toolchain" },
+				{ value: "off", label: "Off", description: "No automatic inheritance — only explicitly configured link paths" },
 				{
 					value: "readonly",
 					label: "Read-only",
@@ -4318,6 +4318,18 @@ export const SETTINGS_SCHEMA = {
 					description: "Also symlink node_modules and target from the parent (fast, shared-writer hazard)",
 				},
 			],
+		},
+	},
+
+	"task.isolation.linkPaths": {
+		type: "array",
+		default: [] as string[],
+		ui: {
+			tab: "tasks",
+			group: "Isolation",
+			label: "Link Paths Into Worktree",
+			description:
+				'Repo-root-relative gitignored paths every isolated worktree inherits from the parent checkout, for projects the built-in linker does not know about. A worktree is a git-only checkout: tracked files at HEAD and nothing else, so a Python project arrives with no `venv/` and no `.env` and its test command fails on the first import. List those paths here — e.g. ["venv", ".env"] — and directories are symlinked (cheap, shared) while files are copied (writes stay in the worktree). Independent of "Link Parent Build Artifacts": that setting governs loom\'s own JS/Rust outputs, this one is your allowlist and is honoured even when that is "off". Paths must stay inside the repo; absolute or escaping entries are skipped with a warning. Inherited paths are excluded from the spawn\'s ignored-file divergence report.',
 		},
 	},
 

@@ -108,6 +108,8 @@ export interface IsolatedRunOptions {
 	agentId: string;
 	/** How gitignored build outputs are inherited from the parent checkout. */
 	linkBuildArtifacts?: BuildArtifactLinkMode;
+	/** Repo-root-relative gitignored paths to seed from the parent checkout. */
+	linkPaths?: readonly string[];
 	/** Merge mode driving how changes are captured ("branch" commits, "patch" diffs). */
 	mergeMode: "patch" | "branch";
 	/** Output dir for `${agentId}.patch` artifacts (patch mode and branch-mode commit failures). */
@@ -283,6 +285,7 @@ export async function runIsolatedSubprocess(opts: IsolatedRunOptions): Promise<S
 		const taskBaseline = structuredClone(opts.context.baseline);
 		handle = await ensureIsolation(opts.context.repoRoot, opts.agentId, opts.preferredBackend, {
 			linkBuildArtifacts: opts.linkBuildArtifacts,
+			linkPaths: opts.linkPaths,
 		});
 		const isolationDir = handle.mergedDir;
 		const result = await runSubprocess({
