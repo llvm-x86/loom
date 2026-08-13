@@ -17,12 +17,21 @@ afterEach(async () => {
 	await Promise.all(tempDirs.splice(0).map(dir => removeWithRetries(dir)));
 });
 
+/** A rule only activates when its marker exists, so every fixture states its ecosystem. */
+async function writeMarker(repo: string, relative: string): Promise<void> {
+	const target = path.join(repo, relative);
+	await fs.mkdir(path.dirname(target), { recursive: true });
+	await fs.writeFile(target, "{}\n");
+}
+
 describe("linkParentBuildArtifacts", () => {
 	it("copies readonly generated artifacts without symlinking node_modules", async () => {
 		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-ro-"));
 		tempDirs.push(repo);
 		const merged = path.join(repo, "merged");
 		await fs.mkdir(merged, { recursive: true });
+		await writeMarker(repo, "package.json");
+		await writeMarker(repo, "packages/coding-agent/package.json");
 		await fs.mkdir(path.join(repo, NATIVES_RELATIVE_DIR), { recursive: true });
 		await fs.writeFile(path.join(repo, NATIVES_RELATIVE_DIR, "demo.node"), "native");
 		await fs.mkdir(path.dirname(path.join(repo, TOOL_VIEWS_RELATIVE)), { recursive: true });
@@ -44,6 +53,9 @@ describe("linkParentBuildArtifacts", () => {
 		tempDirs.push(repo);
 		const merged = path.join(repo, "merged");
 		await fs.mkdir(merged, { recursive: true });
+		await writeMarker(repo, "package.json");
+		await writeMarker(repo, "Cargo.toml");
+		await writeMarker(repo, "packages/coding-agent/package.json");
 		await fs.mkdir(path.join(repo, "node_modules"), { recursive: true });
 		await fs.mkdir(path.join(repo, "target"), { recursive: true });
 		await fs.mkdir(path.join(repo, NATIVES_RELATIVE_DIR), { recursive: true });
@@ -55,6 +67,8 @@ describe("linkParentBuildArtifacts", () => {
 		expect(linked).toContain("target/");
 		const nm = await fs.readlink(path.join(merged, "node_modules"));
 		expect(nm).toBe(path.join(repo, "node_modules"));
+		// `suffixDirs` follows the mode: copied at readonly, linked at full.
+		expect((await fs.lstat(path.join(merged, NATIVES_RELATIVE_DIR, "demo.node"))).isSymbolicLink()).toBe(true);
 	});
 
 	it("skips paths that already exist in the worktree", async () => {
@@ -62,6 +76,7 @@ describe("linkParentBuildArtifacts", () => {
 		tempDirs.push(repo);
 		const merged = path.join(repo, "merged");
 		await fs.mkdir(path.join(merged, NATIVES_RELATIVE_DIR), { recursive: true });
+		await writeMarker(repo, "packages/coding-agent/package.json");
 		await fs.mkdir(path.join(repo, NATIVES_RELATIVE_DIR), { recursive: true });
 		await fs.writeFile(path.join(repo, NATIVES_RELATIVE_DIR, "demo.node"), "parent");
 		await fs.writeFile(path.join(merged, NATIVES_RELATIVE_DIR, "demo.node"), "local");
@@ -70,6 +85,96 @@ describe("linkParentBuildArtifacts", () => {
 
 		expect(linked).not.toContain(`${NATIVES_RELATIVE_DIR}/demo.node`);
 		await expect(fs.readFile(path.join(merged, NATIVES_RELATIVE_DIR, "demo.node"), "utf8")).resolves.toBe("local");
+	});
+
+	it("symlinks a Python project's venv in full mode off the pyproject marker", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-py-"));
+		tempDirs.push(repo);
+		const merged = path.join(repo, "merged");
+		await fs.mkdir(merged, { recursive: true });
+		await writeMarker(repo, "pyproject.toml");
+		await fs.mkdir(path.join(repo, "venv", "bin"), { recursive: true });
+		await fs.writeFile(path.join(repo, "venv", "bin", "python"), "interpreter");
+
+		const { linked, warnings } = await linkParentBuildArtifacts(repo, merged, "full");
+
+		expect(warnings).toEqual([]);
+		expect(linked).toEqual(["venv/"]);
+		expect((await fs.lstat(path.join(merged, "venv"))).isSymbolicLink()).toBe(true);
+		await expect(fs.readFile(path.join(merged, "venv", "bin", "python"), "utf8")).resolves.toBe("interpreter");
+		// `.venv` is in the same row but absent here — an absent store is a
+		// silent skip, never a warning.
+		await expect(fs.lstat(path.join(merged, ".venv"))).rejects.toThrow();
+	});
+
+	it("leaves a committed vendor directory alone in a Go repo", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-go-"));
+		tempDirs.push(repo);
+		const merged = path.join(repo, "merged");
+		await writeMarker(repo, "go.mod");
+		await fs.mkdir(path.join(repo, "vendor", "github.com"), { recursive: true });
+		await fs.writeFile(path.join(repo, "vendor", "parent-only.txt"), "parent");
+		// `vendor/` is tracked in this repo, so the git checkout already put it in
+		// the worktree: the rule must not shadow real source with the parent's copy.
+		await fs.mkdir(path.join(merged, "vendor"), { recursive: true });
+		await fs.writeFile(path.join(merged, "vendor", "tracked.go"), "package vendor");
+
+		const { linked, warnings } = await linkParentBuildArtifacts(repo, merged, "full");
+
+		expect(warnings).toEqual([]);
+		expect(linked).toEqual([]);
+		expect((await fs.lstat(path.join(merged, "vendor"))).isSymbolicLink()).toBe(false);
+		await expect(fs.readFile(path.join(merged, "vendor", "tracked.go"), "utf8")).resolves.toBe("package vendor");
+		await expect(fs.lstat(path.join(merged, "vendor", "parent-only.txt"))).rejects.toThrow();
+	});
+
+	it("links a directory once when two active rules both name it", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-dedupe-"));
+		tempDirs.push(repo);
+		// Both rows want `vendor`.
+		await writeMarker(repo, "go.mod");
+		await writeMarker(repo, "composer.json");
+		await fs.mkdir(path.join(repo, "vendor"), { recursive: true });
+
+		const merged = path.join(repo, "merged");
+		await fs.mkdir(merged, { recursive: true });
+		const first = await linkParentBuildArtifacts(repo, merged, "full");
+		expect(first.warnings).toEqual([]);
+		expect(first.linked).toEqual(["vendor/"]);
+
+		// A second attempt would warn a second time about the same failure, which
+		// is what makes the dedupe observable rather than merely tidy.
+		const sealed = path.join(repo, "sealed");
+		await fs.mkdir(sealed, { recursive: true });
+		await fs.chmod(sealed, 0o500);
+		try {
+			const denied = await linkParentBuildArtifacts(repo, sealed, "full");
+			expect(denied.linked).toEqual([]);
+			expect(denied.warnings).toHaveLength(1);
+			expect(denied.warnings[0]).toContain("vendor/");
+		} finally {
+			await fs.chmod(sealed, 0o700);
+		}
+	});
+
+	it("touches nothing beyond the allowlist in a repo matching no marker", async () => {
+		const repo = await fs.mkdtemp(path.join(os.tmpdir(), "omp-link-bare-"));
+		tempDirs.push(repo);
+		const merged = path.join(repo, "merged");
+		await fs.mkdir(merged, { recursive: true });
+		// Stores present but unexplained: no marker claims them, so the linker
+		// must not guess.
+		await fs.mkdir(path.join(repo, "node_modules"), { recursive: true });
+		await fs.mkdir(path.join(repo, "target"), { recursive: true });
+		await fs.mkdir(path.join(repo, "build"), { recursive: true });
+		await fs.writeFile(path.join(repo, ".env"), "TOKEN=parent");
+
+		const { linked, warnings } = await linkParentBuildArtifacts(repo, merged, "full", [".env"]);
+
+		expect(warnings).toEqual([]);
+		expect(linked).toEqual([".env"]);
+		await expect(fs.lstat(path.join(merged, "node_modules"))).rejects.toThrow();
+		await expect(fs.lstat(path.join(merged, "target"))).rejects.toThrow();
 	});
 
 	it("seeds configured paths a Python project needs: venv symlinked, .env copied", async () => {

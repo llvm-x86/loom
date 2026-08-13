@@ -4304,18 +4304,18 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Link Parent Build Artifacts",
 			description:
-				'How an isolated worktree inherits loom\'s own gitignored build outputs from the parent checkout. "readonly" (default) copies only small generated binaries (.node addons, tool-views.generated.js) so tests can run without sharing mutable stores. "full" additionally symlinks node_modules and target per the manual worktree recipe — opt-in only; bun install in a linked worktree mutates the parent. "off" leaves the worktree bare apart from anything listed in "Link Paths Into Worktree", which is honoured regardless of this setting.',
+				'How an isolated worktree inherits gitignored build outputs from the parent checkout. Each ecosystem is gated on a marker file in the repo root, so only what the repo actually uses is considered: package.json, Cargo.toml, pyproject.toml/requirements.txt/setup.py/Pipfile, go.mod, Gemfile, composer.json, build.gradle/pom.xml. "readonly" (default) copies only small generated binaries (native addons and generated JS in loom\'s own checkout) so tests can run without sharing mutable stores. "full" additionally symlinks that ecosystem\'s dependency store — node_modules, target, venv/.venv, vendor, .bundle, .gradle — which is opt-in only: an install in a linked worktree mutates the parent. A path already present in the worktree is never replaced, so a committed vendor/ stays real source. "off" leaves the worktree bare apart from anything listed in "Link Paths Into Worktree", which is honoured regardless of this setting.',
 			options: [
 				{ value: "off", label: "Off", description: "No automatic inheritance — only explicitly configured link paths" },
 				{
 					value: "readonly",
 					label: "Read-only",
-					description: "Copy generated native addons and tool views only (~few MB, no shared mutation risk)",
+					description: "Copy small generated binaries only — a few MB, no shared mutation risk",
 				},
 				{
 					value: "full",
 					label: "Full",
-					description: "Also symlink node_modules and target from the parent (fast, shared-writer hazard)",
+					description: "Also symlink the ecosystem's dependency store (fast, shared-writer hazard)",
 				},
 			],
 		},
@@ -4329,7 +4329,7 @@ export const SETTINGS_SCHEMA = {
 			group: "Isolation",
 			label: "Link Paths Into Worktree",
 			description:
-				'Repo-root-relative gitignored paths every isolated worktree inherits from the parent checkout, for projects the built-in linker does not know about. A worktree is a git-only checkout: tracked files at HEAD and nothing else, so a Python project arrives with no `venv/` and no `.env` and its test command fails on the first import. List those paths here — e.g. ["venv", ".env"] — and directories are symlinked (cheap, shared) while files are copied (writes stay in the worktree). Independent of "Link Parent Build Artifacts": that setting governs loom\'s own JS/Rust outputs, this one is your allowlist and is honoured even when that is "off". Paths must stay inside the repo; absolute or escaping entries are skipped with a warning. Inherited paths are excluded from the spawn\'s ignored-file divergence report.',
+				'Repo-root-relative gitignored paths every isolated worktree inherits from the parent checkout, for stores the built-in linker does not know about. A worktree is a git-only checkout: tracked files at HEAD and nothing else, so an unusual build directory or a `.env` never arrives and the test command fails on the first import. List those paths here — e.g. ["venv", ".env"] — and directories are symlinked (cheap, shared) while files are copied (writes stay in the worktree). Independent of "Link Parent Build Artifacts": that setting infers standard per-ecosystem stores, this one is your allowlist and is honoured even when that is "off". Paths must stay inside the repo; absolute or escaping entries are skipped with a warning. Inherited paths are excluded from the spawn\'s ignored-file divergence report.',
 		},
 	},
 
