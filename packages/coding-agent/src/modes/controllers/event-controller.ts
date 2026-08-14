@@ -1247,6 +1247,7 @@ export class EventController {
 	async #handleAutoCompactionStart(
 		event: Extract<AgentSessionEvent, { type: "auto_compaction_start" }>,
 	): Promise<void> {
+		this.ctx.setStatusScrollbackPinned?.(true);
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(true);
@@ -1258,6 +1259,7 @@ export class EventController {
 	async #handleCompactionPreparing(
 		event: Extract<AgentSessionEvent, { type: "compaction_preparing" }>,
 	): Promise<void> {
+		this.ctx.setStatusScrollbackPinned?.(true);
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(true);
@@ -1346,6 +1348,10 @@ export class EventController {
 	async #handleAutoRetryStart(event: Extract<AgentSessionEvent, { type: "auto_retry_start" }>): Promise<void> {
 		this.#trackRetrySupersededAssistantComponent(this.#lastAssistantComponent);
 		this.#stopWorkingLoader();
+		if (this.ctx.session.isCompacting) {
+			this.ctx.ui.requestRender();
+			return;
+		}
 		this.ctx.statusContainer.disposeChildren();
 		if (AIError.is(event.errorId, AIError.Flag.ThinkingLoop)) {
 			// The retry path drops the failed assistant from runtime context. Do not
@@ -1370,7 +1376,9 @@ export class EventController {
 		if (this.ctx.retryLoader) {
 			this.ctx.retryLoader.stop();
 			this.ctx.retryLoader = undefined;
-			this.ctx.statusContainer.disposeChildren();
+			if (!this.ctx.session.isCompacting) {
+				this.ctx.statusContainer.disposeChildren();
+			}
 		}
 		if (event.success) {
 			let appliedRecovered = false;

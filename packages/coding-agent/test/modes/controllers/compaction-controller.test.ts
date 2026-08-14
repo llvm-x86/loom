@@ -8,6 +8,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { Component } from "@oh-my-pi/pi-tui";
 import { Container, Text } from "@oh-my-pi/pi-tui";
+import { assistantMsg } from "../../utilities";
 
 /** Exact stall-notice copy from CompactionController.#startStallTimer (minus theme wrappers). */
 const STALL_NOTICE_SNIPPET = "Compaction still running";
@@ -347,6 +348,68 @@ describe("CompactionController", () => {
 		expect(disposeSpy).not.toHaveBeenCalled();
 		expect(statusChildren().length).toBe(1);
 		disposeSpy.mockRestore();
+	});
+
+	// Regression: streaming compaction summary text (compaction_live_update) plus
+	// progress/model ticks must not stack duplicate status blocks in scrollback.
+	it("keeps one surface when summary text streams during progress", () => {
+		const { ctx, statusChildren } = createContext();
+		const controller = new CompactionController(ctx);
+		const summary = assistantMsg("Continuing implementation of the Title I verification feature.");
+
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			phase: "preparing",
+			messagesTotal: 20,
+			tokensBefore: 180_000,
+		});
+		controller.handleModel({
+			type: "compaction_live_model",
+			model: {
+				id: "composer-2.5",
+				provider: "cursor",
+				api: "anthropic-messages",
+				contextWindow: 200_000,
+				input: ["text"],
+			} as Model,
+			thinkingLevel: ThinkingLevel.Medium,
+		});
+		controller.handleProgress({
+			type: "compaction_live_progress",
+			phase: "short_summary",
+			stepsDone: 2,
+			stepsTotal: 3,
+			messagesTotal: 20,
+		});
+
+		for (let chunk = 1; chunk <= 8; chunk++) {
+			controller.handleUpdate({
+				type: "compaction_live_update",
+				message: summary,
+				assistantMessageEvent: {
+					type: "text_delta",
+					contentIndex: 0,
+					delta: summary.content[0]?.text ?? "",
+					partial: summary,
+				},
+			});
+			controller.handleProgress({
+				type: "compaction_live_progress",
+				phase: "short_summary",
+				stepsDone: 2,
+				stepsTotal: 3,
+				messagesDone: chunk,
+				messagesTotal: 20,
+			});
+		}
+
+		expect(statusChildren().length).toBe(1);
+		const surfaceText = collectText(statusChildren()[0]!).join("\n");
+		expect(surfaceText.split("Compacting context").length - 1).toBeLessThanOrEqual(1);
+		expect(
+			surfaceText.split("Continuing implementation of the Title I verification feature").length - 1,
+		).toBeLessThanOrEqual(1);
 	});
 
 	// A surface detached by an unrelated `disposeChildren()` (auto-retry banner,
