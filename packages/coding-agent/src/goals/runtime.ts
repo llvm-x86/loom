@@ -145,7 +145,10 @@ export class GoalRuntime {
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
-	// Per-iteration accumulators. One inner-loop iteration spans onTurnStart..onAgentEnd.
+	// Per-iteration accumulators. One inner-loop iteration spans the whole agent run, not one
+	// model turn: `turn_start` fires once per request inside a run, so resetting there would
+	// leave the trace describing only the run's final (usually tool-free) turn.
+	#iterationOpen = false;
 	#iterationTools: string[] = [];
 	#iterationFailedTools: string[] = [];
 	#iterationGoalToolUsed = false;
@@ -229,18 +232,22 @@ export class GoalRuntime {
 
 	clearAccounting(): void {
 		this.#turnSnapshot = undefined;
+		this.#iterationOpen = false;
 		this.#clearActiveAccounting();
 		this.#budgetReportedFor = undefined;
 	}
 
 	onTurnStart(turnId: string, baselineUsage: GoalTokenUsage): void {
 		this.#turnSnapshot = { turnId, baselineUsage: { ...baselineUsage } };
-		this.#iterationTools = [];
-		this.#iterationFailedTools = [];
-		this.#iterationGoalToolUsed = false;
-		this.#iterationStartedAt = this.#now();
 		const state = this.#host.getState();
-		this.#iterationBaselineTokens = state?.goal.tokensUsed ?? 0;
+		if (!this.#iterationOpen) {
+			this.#iterationOpen = true;
+			this.#iterationTools = [];
+			this.#iterationFailedTools = [];
+			this.#iterationGoalToolUsed = false;
+			this.#iterationStartedAt = this.#now();
+			this.#iterationBaselineTokens = state?.goal.tokensUsed ?? 0;
+		}
 		if (state?.enabled && isAccountingStatus(state.goal)) {
 			this.#turnSnapshot.activeGoalId = state.goal.id;
 			if (this.#wallClock.activeGoalId !== state.goal.id) {
@@ -266,11 +273,14 @@ export class GoalRuntime {
 	async onAgentEnd(options?: { turnCompleted?: boolean; currentUsage?: GoalTokenUsage }): Promise<void> {
 		if (!this.#hasAccountingState()) {
 			this.#turnSnapshot = undefined;
+			this.#iterationOpen = false;
 			return;
 		}
 		await this.flushUsage("suppressed", options?.currentUsage);
 		this.#turnSnapshot = undefined;
 		await this.#runBilevelCycle();
+		// The iteration closes with the agent run; the next `turn_start` opens a fresh one.
+		this.#iterationOpen = false;
 	}
 
 	/**
@@ -282,6 +292,10 @@ export class GoalRuntime {
 	async #runBilevelCycle(): Promise<void> {
 		const settings = this.#host.bilevelSettings?.();
 		if (!settings?.enabled) return;
+		// A second `agent_end` without an intervening `turn_start` (maintenance re-entry, or a
+		// run already discarded by `onTaskAborted`) has no iteration to close: recording again
+		// would double-count the same tools and fabricate a repeated-signature stagnation.
+		if (!this.#iterationOpen) return;
 		const previous = this.#outerCycleTail;
 		const { promise, resolve } = Promise.withResolvers<void>();
 		this.#outerCycleTail = previous.then(
@@ -308,12 +322,19 @@ export class GoalRuntime {
 				await this.#commitState(state, { persist: "goal", emit: false });
 				return;
 			}
-			const result = await this.#host.analyzeGoalSearch?.({
-				objective: state.goal.objective,
-				state: bilevel,
-			});
-			// A missing or unusable analysis leaves the config untouched but still advances the
-			// cadence marker, so a persistently failing analyst cannot re-run on every iteration.
+			// A missing, throwing, or unusable analysis leaves the config untouched but still
+			// advances the cadence marker: a broken analyst must degrade to plain goal mode
+			// rather than re-run every iteration, and must never escape into `agent_end`, whose
+			// caller owns post-turn maintenance and the next continuation.
+			let result: OuterAnalysisResult | undefined;
+			try {
+				result = await this.#host.analyzeGoalSearch?.({
+					objective: state.goal.objective,
+					state: bilevel,
+				});
+			} catch {
+				result = undefined;
+			}
 			if (result) {
 				applyOuterAnalysis(bilevel, result.analysis, { stagnation: result.stagnation });
 			} else {
@@ -334,6 +355,9 @@ export class GoalRuntime {
 		const state = this.#host.getState();
 		const needsAccounting = state?.enabled && isAccountingStatus(state.goal);
 		const needsPause = options?.reason === "interrupted" && state?.enabled && state.goal.status === "active";
+		// An aborted run is not an iteration: drop the partial accumulation instead of letting it
+		// bleed into the next one, and stop a late `agent_end` from recording it.
+		this.#iterationOpen = false;
 		if (!needsAccounting && !needsPause) {
 			this.#turnSnapshot = undefined;
 			return;
@@ -602,9 +626,12 @@ export class GoalRuntime {
 
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
-		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal, renderOuterDirective(state.bilevel))
-			: undefined;
+		if (!state?.enabled || state.goal.status !== "active") return undefined;
+		// Gate the directive on the live setting, not on the presence of state: switching a
+		// running goal back to the standard loop must stop the outer loop from steering it, and
+		// the accumulated config is kept so switching back does not restart the search blind.
+		const bilevel = this.#host.bilevelSettings?.().enabled ? state.bilevel : undefined;
+		return renderGoalPrompt("continuation", state.goal, renderOuterDirective(bilevel));
 	}
 
 	async #sendBudgetLimitSteer(goal: Goal): Promise<void> {

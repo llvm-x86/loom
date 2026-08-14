@@ -188,10 +188,15 @@ export async function runOuterAnalysis(
 			diagnosis: obfuscator.deobfuscate(analysis.diagnosis),
 			guidance: obfuscator.deobfuscate(analysis.guidance),
 			reasoning: obfuscator.deobfuscate(analysis.reasoning),
+			// Every name-shaped field is mapped too, not just prose: freeze/unfreeze and retire
+			// entries are matched by name against already-deobfuscated state, so leaving a
+			// placeholder in one of them would silently never match.
 			freezeApproaches: analysis.freezeApproaches.map(entry => obfuscator.deobfuscate(entry)),
+			unfreezeApproaches: analysis.unfreezeApproaches.map(entry => obfuscator.deobfuscate(entry)),
+			retireMechanisms: analysis.retireMechanisms.map(entry => obfuscator.deobfuscate(entry)),
 			mechanism: analysis.mechanism
 				? {
-						...analysis.mechanism,
+						name: obfuscator.deobfuscate(analysis.mechanism.name),
 						intervention: obfuscator.deobfuscate(analysis.mechanism.intervention),
 						trigger: obfuscator.deobfuscate(analysis.mechanism.trigger),
 						revertWhen: obfuscator.deobfuscate(analysis.mechanism.revertWhen),

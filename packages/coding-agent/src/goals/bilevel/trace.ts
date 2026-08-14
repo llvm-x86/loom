@@ -1,5 +1,5 @@
 import type { GoalBilevelState, GoalIterationRecord, GoalSearchConfig } from "./state";
-import { iterationSignature, TRACE_CAPACITY } from "./state";
+import { iterationSignature, MAX_ITERATION_TOOLS, TRACE_CAPACITY } from "./state";
 
 /** Input for recording one inner-loop iteration. */
 export interface GoalIterationInput {
@@ -14,8 +14,11 @@ export function recordIteration(state: GoalBilevelState, input: GoalIterationInp
 	state.iterationCount += 1;
 	const record: GoalIterationRecord = {
 		iteration: state.iterationCount,
-		tools: [...input.tools],
-		failedTools: [...input.failedTools],
+		// A tool-heavy iteration is a process signal, not a transcript: keep the head at the same
+		// cap the parser enforces so neither the persisted record nor the rendered digest line
+		// scales with call count. The signature below still sees every call.
+		tools: input.tools.slice(0, MAX_ITERATION_TOOLS),
+		failedTools: input.failedTools.slice(0, MAX_ITERATION_TOOLS),
 		tokens: input.tokens,
 		durationMs: input.durationMs,
 		goalToolUsed: input.goalToolUsed,

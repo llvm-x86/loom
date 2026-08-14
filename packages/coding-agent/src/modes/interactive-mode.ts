@@ -79,7 +79,7 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import { parseBilevelState } from "../goals/bilevel";
+import { DEFAULT_INNER_BUDGET, parseBilevelState } from "../goals/bilevel";
 import { type GuidedGoalMessage, newGuidedGoalSessionId, runGuidedGoalTurn } from "../goals/guided-setup";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
@@ -3501,7 +3501,9 @@ export class InteractiveMode implements InteractiveModeContext {
 	 */
 	async #promptGoalSearchSetup(): Promise<boolean> {
 		const bilevelDefault = this.session.settings.get("goal.bilevel.enabled") === true;
-		const innerBudget = this.session.settings.get("goal.bilevel.innerBudget");
+		const rawBudget = this.session.settings.get("goal.bilevel.innerBudget");
+		const innerBudget =
+			Number.isInteger(rawBudget) && (rawBudget as number) > 0 ? (rawBudget as number) : DEFAULT_INNER_BUDGET;
 		const standard = "Standard goal loop";
 		const bilevel = "Bilevel loop (outer loop tunes the search)";
 		const mode = await this.showHookSelector(
@@ -3516,8 +3518,8 @@ export class InteractiveMode implements InteractiveModeContext {
 			{ initialIndex: bilevelDefault ? 1 : 0 },
 		);
 		if (!mode) return false;
-		this.session.settings.set("goal.bilevel.enabled", mode === bilevel);
 		if (mode !== bilevel) {
+			this.session.settings.set("goal.bilevel.enabled", false);
 			this.showStatus("Goal: standard loop.");
 			return true;
 		}
@@ -3535,7 +3537,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		if (!inner) return false;
 		const innerChoice = choices.find(choice => choice.label === inner);
-		if (innerChoice) await this.session.applyRoleModel(innerChoice.entry);
 
 		const configuredOuter = this.session.settings.getModelRole("goalOuter");
 		const keepOuter = configuredOuter
@@ -3556,6 +3557,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		);
 		if (!outer) return false;
 		const outerChoice = choices.find(choice => choice.label === outer);
+
+		// Nothing is written until both picks are in: escaping either model prompt has to leave
+		// the previous search shape untouched, the same cancellation contract as the objective
+		// editor that precedes this flow.
+		this.session.settings.set("goal.bilevel.enabled", true);
+		if (innerChoice) await this.session.applyRoleModel(innerChoice.entry);
 		if (outerChoice) this.session.settings.setModelRole("goalOuter", outerChoice.selector);
 
 		const outerLabel = outerChoice?.selector ?? configuredOuter ?? "auto (plan/slow)";

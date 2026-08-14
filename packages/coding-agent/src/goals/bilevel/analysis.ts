@@ -1,5 +1,14 @@
 import type { GoalBilevelState, GoalMechanism, GoalOuterCycle, GoalSearchStrategy } from "./state";
-import { GOAL_SEARCH_STRATEGIES, MAX_ACTIVE_MECHANISMS, MAX_FREEZE_PER_CYCLE, MAX_FROZEN_APPROACHES } from "./state";
+import {
+	GOAL_SEARCH_STRATEGIES,
+	MAX_ACTIVE_MECHANISMS,
+	MAX_CYCLES,
+	MAX_FREEZE_PER_CYCLE,
+	MAX_FROZEN_APPROACHES,
+	MAX_LABEL_CHARS,
+	MAX_LIST_ENTRIES,
+	MAX_TEXT_CHARS,
+} from "./state";
 
 /** Proposed Level 2 mechanism, before validation. */
 export interface GoalMechanismProposal {
@@ -18,7 +27,8 @@ export interface GoalMechanismProposal {
  */
 export interface GoalOuterAnalysis {
 	diagnosis: string;
-	strategy: GoalSearchStrategy;
+	/** Absent when the analyst named no recognized strategy, which leaves the live one in place. */
+	strategy?: GoalSearchStrategy;
 	freezeApproaches: string[];
 	unfreezeApproaches: string[];
 	guidance: string;
@@ -33,16 +43,19 @@ export interface OuterAnalysisResult {
 	stagnation: string;
 }
 
-function asTrimmedString(value: unknown): string {
-	return typeof value === "string" ? value.trim() : "";
+function asTrimmedString(value: unknown, limit = MAX_TEXT_CHARS): string {
+	if (typeof value !== "string") return "";
+	const trimmed = value.trim();
+	return trimmed.length > limit ? trimmed.slice(0, limit) : trimmed;
 }
 
 function asStringList(value: unknown): string[] {
 	if (!Array.isArray(value)) return [];
 	const out: string[] = [];
 	for (const entry of value) {
-		const text = asTrimmedString(entry);
+		const text = asTrimmedString(entry, MAX_LABEL_CHARS);
 		if (text) out.push(text);
+		if (out.length >= MAX_LIST_ENTRIES) break;
 	}
 	return out;
 }
@@ -79,9 +92,11 @@ export function parseOuterAnalysis(value: unknown): GoalOuterAnalysis | null {
 	if (!diagnosis && !guidance && !strategy) return null;
 	return {
 		diagnosis,
-		// An unrecognized strategy is dropped here and defaulted by the caller against the
-		// live config, matching upstream's `if new_strategy in (...)` whitelist check.
-		strategy: strategy in GOAL_SEARCH_STRATEGIES ? (strategy as GoalSearchStrategy) : "explore",
+		// An unrecognized or missing strategy stays `undefined` so the caller keeps the live one,
+		// matching upstream's `if new_strategy in (...)` whitelist check. Defaulting it to
+		// `explore` here would let an analyst that answers only with guidance silently reset a
+		// deliberate `focused` back to the widest strategy.
+		strategy: strategy in GOAL_SEARCH_STRATEGIES ? (strategy as GoalSearchStrategy) : undefined,
 		freezeApproaches: asStringList(raw.freezeApproaches),
 		unfreezeApproaches: asStringList(raw.unfreezeApproaches),
 		guidance,
@@ -109,7 +124,7 @@ export function applyOuterAnalysis(
 	options: { stagnation?: string } = {},
 ): GoalOuterCycle {
 	const config = state.config;
-	config.strategy = analysis.strategy;
+	if (analysis.strategy) config.strategy = analysis.strategy;
 
 	const unfroze: string[] = [];
 	for (const approach of analysis.unfreezeApproaches) {
@@ -166,6 +181,9 @@ export function applyOuterAnalysis(
 		...(mechanismInstalled ? { mechanismInstalled } : {}),
 	};
 	state.cycles.push(cycle);
+	// Bound the persisted history: cycles ride along in the session's mode entry and only the
+	// last two are ever read (the directive's diagnosis and its iteration window).
+	if (state.cycles.length > MAX_CYCLES) state.cycles.splice(0, state.cycles.length - MAX_CYCLES);
 	state.lastAnalyzedIteration = state.iterationCount;
 	return cycle;
 }

@@ -9,8 +9,12 @@ import {
 	isOuterCycleDue,
 	iterationSignature,
 	MAX_ACTIVE_MECHANISMS,
+	MAX_CYCLES,
 	MAX_FREEZE_PER_CYCLE,
 	MAX_FROZEN_APPROACHES,
+	MAX_ITERATION_TOOLS,
+	MAX_LIST_ENTRIES,
+	MAX_TEXT_CHARS,
 	parseBilevelState,
 	parseOuterAnalysis,
 	recordIteration,
@@ -95,6 +99,21 @@ describe("bilevel trace recording", () => {
 			{ tool: "read", used: 1, failed: 0 },
 		]);
 	});
+
+	it("caps the tool names retained per iteration without distorting the signature", () => {
+		const state = defaultBilevelState(2);
+		const tools = Array.from({ length: MAX_ITERATION_TOOLS + 20 }, (_, i) => `t${i}`);
+		const record = recordIteration(state, {
+			tools,
+			failedTools: tools,
+			tokens: 1,
+			durationMs: 1,
+			goalToolUsed: false,
+		});
+		expect(record.tools).toHaveLength(MAX_ITERATION_TOOLS);
+		expect(record.failedTools).toHaveLength(MAX_ITERATION_TOOLS);
+		expect(record.signature.split("+")).toHaveLength(tools.length);
+	});
 });
 
 describe("bilevel stagnation detection", () => {
@@ -144,9 +163,23 @@ describe("bilevel analysis parsing", () => {
 		expect(parseOuterAnalysis({})).toBeNull();
 	});
 
-	it("falls back to explore when the strategy is outside the whitelist", () => {
-		const parsed = parseOuterAnalysis({ diagnosis: "d", strategy: "yolo", guidance: "g" });
-		expect(parsed?.strategy).toBe("explore");
+	it("leaves an unrecognized or absent strategy unset so the live search shape survives", () => {
+		expect(parseOuterAnalysis({ diagnosis: "d", strategy: "yolo", guidance: "g" })?.strategy).toBeUndefined();
+		expect(parseOuterAnalysis({ diagnosis: "d", guidance: "g" })?.strategy).toBeUndefined();
+	});
+
+	it("truncates an essay-length field instead of discarding it", () => {
+		const parsed = parseOuterAnalysis({ diagnosis: "x".repeat(5_000), guidance: "g" });
+		expect(parsed?.diagnosis.length).toBe(MAX_TEXT_CHARS);
+	});
+
+	it("caps how many list entries one reply can contribute", () => {
+		const parsed = parseOuterAnalysis({
+			diagnosis: "d",
+			guidance: "g",
+			freezeApproaches: Array.from({ length: MAX_LIST_ENTRIES + 10 }, (_, i) => `approach ${i}`),
+		});
+		expect(parsed?.freezeApproaches.length).toBe(MAX_LIST_ENTRIES);
 	});
 
 	it("drops a mechanism that could never be applied or retired", () => {
@@ -254,6 +287,20 @@ describe("bilevel analysis application", () => {
 		expect(isOuterCycleDue(state)).toBe(false);
 		expect(state.cycles).toHaveLength(1);
 	});
+
+	it("keeps the configured strategy when the analyst names none", () => {
+		const state = defaultBilevelState();
+		applyOuterAnalysis(state, analysis({ strategy: "focused" }));
+		applyOuterAnalysis(state, analysis({ strategy: undefined, guidance: "keep going" }));
+		expect(state.config.strategy).toBe("focused");
+	});
+
+	it("bounds the recorded cycle history to the newest cycles", () => {
+		const state = defaultBilevelState(1);
+		for (let i = 0; i < MAX_CYCLES + 4; i++) applyOuterAnalysis(state, analysis({ diagnosis: `d${i}` }));
+		expect(state.cycles).toHaveLength(MAX_CYCLES);
+		expect(state.cycles.at(-1)?.diagnosis).toBe(`d${MAX_CYCLES + 3}`);
+	});
 });
 
 describe("bilevel directive rendering", () => {
@@ -352,6 +399,7 @@ function createHarness(options: {
 	innerBudget: number;
 	analyst?: () => GoalOuterAnalysis | undefined;
 }) {
+	let enabled = options.enabled;
 	let state: GoalModeState | undefined = {
 		enabled: true,
 		mode: "active",
@@ -368,14 +416,21 @@ function createHarness(options: {
 		persist: () => {},
 		sendHiddenMessage: async () => {},
 		now: () => 0,
-		bilevelSettings: () => ({ enabled: options.enabled, innerBudget: options.innerBudget }),
+		bilevelSettings: () => ({ enabled, innerBudget: options.innerBudget }),
 		analyzeGoalSearch: async request => {
 			analystCalls.push(request.objective);
 			const result = options.analyst?.();
 			return result ? { analysis: result, stagnation: "" } : undefined;
 		},
 	};
-	return { runtime: new GoalRuntime(host), analystCalls, getState: () => state };
+	return {
+		runtime: new GoalRuntime(host),
+		analystCalls,
+		getState: () => state,
+		setEnabled: (next: boolean) => {
+			enabled = next;
+		},
+	};
 }
 
 describe("bilevel goal runtime integration", () => {
@@ -385,13 +440,34 @@ describe("bilevel goal runtime integration", () => {
 		await runtime.onAgentEnd({ turnCompleted: true });
 	}
 
-	it("records an iteration per turn without calling the analyst before the budget", async () => {
+	it("records an iteration per agent run without calling the analyst before the budget", async () => {
 		const harness = createHarness({ enabled: true, innerBudget: 3 });
 		await runIteration(harness.runtime, [{ name: "read" }, { name: "edit", isError: true }]);
 		await runIteration(harness.runtime, [{ name: "read" }]);
 		expect(harness.getState()?.bilevel?.iterationCount).toBe(2);
 		expect(harness.getState()?.bilevel?.trace[0]?.failedTools).toEqual(["edit"]);
 		expect(harness.analystCalls).toEqual([]);
+	});
+
+	it("bills one iteration per agent run, not per model turn inside it", async () => {
+		const harness = createHarness({ enabled: true, innerBudget: 5 });
+		harness.runtime.onTurnStart("turn-1", { ...ZERO_USAGE });
+		await harness.runtime.onToolCompleted("read", false);
+		harness.runtime.onTurnStart("turn-2", { ...ZERO_USAGE });
+		await harness.runtime.onToolCompleted("edit", false);
+		harness.runtime.onTurnStart("turn-3", { ...ZERO_USAGE });
+		await harness.runtime.onAgentEnd({ turnCompleted: true });
+		const bilevel = harness.getState()?.bilevel;
+		expect(bilevel?.iterationCount).toBe(1);
+		// Signature spans the whole run; a per-turn reset would leave only the last turn.
+		expect(bilevel?.trace[0]?.signature).toBe("edit+read");
+	});
+
+	it("ignores an agent end that closes no open iteration", async () => {
+		const harness = createHarness({ enabled: true, innerBudget: 5 });
+		await runIteration(harness.runtime, [{ name: "read" }]);
+		await harness.runtime.onAgentEnd({ turnCompleted: true });
+		expect(harness.getState()?.bilevel?.iterationCount).toBe(1);
 	});
 
 	it("runs the analyst on the budget boundary and injects the result into the next continuation", async () => {
@@ -427,6 +503,32 @@ describe("bilevel goal runtime integration", () => {
 		expect(harness.getState()?.bilevel?.config.guidance).toBe("");
 		expect(harness.runtime.buildContinuationPrompt()).not.toContain("search-directive");
 	});
+
+	it("absorbs an analyst that throws and still advances the cadence marker", async () => {
+		const harness = createHarness({
+			enabled: true,
+			innerBudget: 1,
+			analyst: () => {
+				throw new Error("outer provider unreachable");
+			},
+		});
+		await runIteration(harness.runtime, [{ name: "read" }]);
+		expect(harness.getState()?.bilevel?.lastAnalyzedIteration).toBe(1);
+		// A thrown analyst must not abort the rest of agent-end maintenance.
+		expect(harness.runtime.buildContinuationPrompt()).toContain("completion audit");
+	});
+
+	it("drops a live directive as soon as the operator returns to the standard loop", async () => {
+		const harness = createHarness({
+			enabled: true,
+			innerBudget: 1,
+			analyst: () => analysis({ guidance: "read the failing test first" }),
+		});
+		await runIteration(harness.runtime, [{ name: "read" }]);
+		expect(harness.runtime.buildContinuationPrompt()).toContain("read the failing test first");
+		harness.setEnabled(false);
+		expect(harness.runtime.buildContinuationPrompt()).not.toContain("search-directive");
+	});
 });
 
 describe("bilevel state rehydration", () => {
@@ -452,6 +554,26 @@ describe("bilevel state rehydration", () => {
 	it("rejects values that are not persisted state", () => {
 		expect(parseBilevelState(undefined)).toBeUndefined();
 		expect(parseBilevelState("goal")).toBeUndefined();
+	});
+
+	it("drops persisted entries that are not cycles and re-caps the history", () => {
+		const cycles = [
+			"nope",
+			null,
+			...Array.from({ length: MAX_CYCLES + 3 }, (_, i) => ({
+				cycle: i + 1,
+				atIteration: i,
+				diagnosis: `d${i}`,
+				strategy: "focused",
+			})),
+		];
+		const parsed = parseBilevelState({ cycles });
+		expect(parsed?.cycles).toHaveLength(MAX_CYCLES);
+		expect(parsed?.cycles.every(cycle => cycle.strategy === "focused")).toBe(true);
+	});
+
+	it("rejects a fractional cadence that would break the outer-loop arithmetic", () => {
+		expect(parseBilevelState({ config: { innerBudget: 2.5 } }, 5)?.config.innerBudget).toBe(5);
 	});
 
 	it("recovers a usable state from partial or corrupt mode data", () => {
