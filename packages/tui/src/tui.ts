@@ -1180,6 +1180,8 @@ export class TUI extends Container {
 	#previousWindow: string[] = [];
 	#nativeScrollbackLiveRegionStart: number | undefined;
 	#nativeScrollbackLiveRegionPinned = false;
+	/** Host-level pin (compaction HUD): OR'd with the topmost child's pin. */
+	#hostNativeScrollbackPinned = false;
 	#fullRedrawCount = 0;
 	// Caps how many inline images render as live graphics; older ones fall back
 	// to text via a purge + full redraw. Cap is configured by the host app.
@@ -1385,7 +1387,7 @@ export class TUI extends Container {
 			// history.
 			if (liveLocalStart !== undefined && this.#nativeScrollbackLiveRegionStart === undefined) {
 				this.#nativeScrollbackLiveRegionStart = offset + liveLocalStart;
-				this.#nativeScrollbackLiveRegionPinned = liveRegionPinned;
+				this.#nativeScrollbackLiveRegionPinned = liveRegionPinned || this.#hostNativeScrollbackPinned;
 			}
 			if (chainStable) {
 				if (previous !== undefined && previous.component === child && previous.start === offset) {
@@ -1539,6 +1541,16 @@ export class TUI extends Container {
 	 */
 	setScrollbackRebuild(enabled: boolean): void {
 		this.#scrollbackRebuildEnabled = enabled;
+	}
+
+	/**
+	 * Keep the live suffix viewport-local even when the topmost live child
+	 * (todo HUD, pending queue, streaming transcript) is not itself pinned.
+	 * Compaction uses this so status frames cannot freeze into native history
+	 * while a higher HUD owns the seam.
+	 */
+	setNativeScrollbackPinned(pinned: boolean): void {
+		this.#hostNativeScrollbackPinned = pinned;
 	}
 
 	getShowHardwareCursor(): boolean {

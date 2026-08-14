@@ -4192,6 +4192,7 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	setStatusScrollbackPinned(pinned: boolean): void {
 		(this.statusContainer as AnchoredLiveContainer).setNativeScrollbackPinned(pinned);
+		this.ui.setNativeScrollbackPinned(pinned);
 	}
 
 	ensureLoadingAnimation(): void {
