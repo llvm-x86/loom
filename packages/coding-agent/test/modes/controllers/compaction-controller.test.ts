@@ -38,12 +38,14 @@ function createContext(options: { showStatus?: (message: string, opts?: { dim?: 
 	// that gets re-mounted per progress tick shows up here as duplicate children
 	// instead of silently overwriting one slot.
 	const statusContainer = new Container();
+	const setStatusScrollbackPinned = vi.fn();
 	const ctx = {
 		isInitialized: true,
 		focusedAgentId: undefined,
 		effectiveHideThinkingBlock: false,
 		proseOnlyThinking: true,
 		settings: Settings,
+		setStatusScrollbackPinned,
 		statusContainer,
 		noteDisplayableThinkingContent: () => false,
 		showStatus: options.showStatus ?? vi.fn(),
@@ -293,6 +295,58 @@ describe("CompactionController", () => {
 		// One header, not twelve stacked copies of it.
 		const occurrences = collectText(statusChildren()[0]!).join("\n").split("Compacting context").length - 1;
 		expect(occurrences).toBeLessThanOrEqual(1);
+	});
+
+	it("pins scrollback while the compaction surface is live", () => {
+		const { ctx } = createContext();
+		const controller = new CompactionController(ctx);
+		const pin = ctx.setStatusScrollbackPinned as ReturnType<typeof vi.fn>;
+
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			phase: "preparing",
+			messagesTotal: 4,
+			tokensBefore: 90_000,
+		});
+		expect(pin).toHaveBeenCalledWith(true);
+
+		controller.handleEnd({
+			type: "compaction_live_end",
+			trigger: "auto",
+			aborted: false,
+			result: sampleResult,
+		});
+		expect(pin).toHaveBeenLastCalledWith(false);
+	});
+
+	it("does not dispose the status container during repeated progress", () => {
+		const { ctx, statusChildren } = createContext();
+		const disposeSpy = vi.spyOn(ctx.statusContainer, "disposeChildren");
+		const controller = new CompactionController(ctx);
+
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "manual",
+			phase: "preparing",
+			messagesTotal: 12,
+			tokensBefore: 100_000,
+		});
+		disposeSpy.mockClear();
+
+		for (let step = 1; step <= 12; step++) {
+			controller.handleProgress({
+				type: "compaction_live_progress",
+				phase: "turn_prefix",
+				stepsDone: step,
+				stepsTotal: 12,
+				messagesTotal: 12,
+			});
+		}
+
+		expect(disposeSpy).not.toHaveBeenCalled();
+		expect(statusChildren().length).toBe(1);
+		disposeSpy.mockRestore();
 	});
 
 	// A surface detached by an unrelated `disposeChildren()` (auto-retry banner,

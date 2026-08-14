@@ -357,8 +357,22 @@ export interface InteractiveModeOptions {
  * when present, sits higher and wins (topmost-seam merge in TUI.render).
  */
 class AnchoredLiveContainer extends Container implements NativeScrollbackLiveRegion {
+	#scrollbackPinned = false;
+
+	setNativeScrollbackPinned(pinned: boolean): void {
+		this.#scrollbackPinned = pinned;
+	}
+
 	getNativeScrollbackLiveRegionStart(): number | undefined {
+		// While compaction pins scrollback, keep reporting a live region even if a
+		// third party briefly clears children — otherwise the seam ends and every
+		// prior compaction frame commits to native scrollback.
+		if (this.#scrollbackPinned) return 0;
 		return this.children.length > 0 ? 0 : undefined;
+	}
+
+	isNativeScrollbackLiveRegionPinned(): boolean {
+		return this.#scrollbackPinned;
 	}
 }
 
@@ -4176,7 +4190,12 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#cacheWorkingMessageAccent(key, main && dim ? { main, dim } : undefined);
 	}
 
+	setStatusScrollbackPinned(pinned: boolean): void {
+		(this.statusContainer as AnchoredLiveContainer).setNativeScrollbackPinned(pinned);
+	}
+
 	ensureLoadingAnimation(): void {
+		if (this.session.isCompacting) return;
 		if (!this.loadingAnimation) {
 			this.#clearWorkingMessageAccentCache();
 			this.statusContainer.disposeChildren();

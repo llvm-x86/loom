@@ -276,7 +276,6 @@ export class CompactionController {
 	#showPreparingSurface(event: AutoCompactionStartEvent): void {
 		try {
 			this.#trigger = "auto";
-			this.#ctx.statusContainer?.disposeChildren?.();
 			this.#ensureSurface();
 			this.#updateHeader(event.action, event.reason, true);
 			this.#ctx.ui.requestRender();
@@ -299,21 +298,21 @@ export class CompactionController {
 	#ensureSurface(): void {
 		const status = this.#ctx.statusContainer;
 		if (!status) return;
-		if (this.#root) {
-			// `addChild` is an unconditional push, so re-adding a surface that is
-			// still mounted stacks a whole duplicate copy of it — once per progress
-			// tick, which is every LLM step of every compaction.
-			if (this.#surfaceIsMounted()) {
-				this.#active = true;
-				return;
-			}
-			// Detached by someone else's `disposeChildren()`, which disposes as it
-			// detaches: our Loader's timer is already dead, so this surface cannot
-			// be remounted. Drop it and build a live one.
+		if (this.#root && this.#surfaceIsMounted()) {
+			this.#active = true;
+			return;
+		}
+		if (this.#root && !this.#surfaceIsMounted()) {
+			// Detached by a third party; the Loader is already disposed.
 			this.#releaseSurfaceRefs();
 		}
 		this.#active = true;
-		status.disposeChildren?.();
+		this.#buildSurfaceRoot();
+		this.#mountSurfaceAtomically(status);
+		this.#ctx.setStatusScrollbackPinned?.(true);
+	}
+
+	#buildSurfaceRoot(): void {
 		this.#root = new Container();
 		this.#root.addChild(new Spacer(1));
 		this.#headerText = new Text("", 1, 0);
@@ -332,7 +331,20 @@ export class CompactionController {
 			getSymbolTheme().spinnerFrames,
 		);
 		this.#root.addChild(this.#loader);
-		status.addChild(this.#root);
+	}
+
+	/** Mount compaction root without clearing the container to zero (which commits scrollback). */
+	#mountSurfaceAtomically(status: Container): void {
+		const root = this.#root;
+		if (!root) return;
+		if (!status.children.includes(root)) {
+			status.addChild(root);
+		}
+		for (const child of [...status.children]) {
+			if (child !== root) {
+				status.removeChild(child);
+			}
+		}
 	}
 
 	#updateHeader(
@@ -413,7 +425,12 @@ export class CompactionController {
 	}
 
 	#teardownSurface(): void {
+		const status = this.#ctx.statusContainer;
+		const root = this.#root;
+		this.#ctx.setStatusScrollbackPinned?.(false);
+		if (status && root && status.children.includes(root)) {
+			status.removeChild(root);
+		}
 		this.#releaseSurfaceRefs();
-		this.#ctx.statusContainer?.disposeChildren?.();
 	}
 }

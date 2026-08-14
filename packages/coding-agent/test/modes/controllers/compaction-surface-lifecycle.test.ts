@@ -31,13 +31,16 @@ function createContext(): {
 	// re-mounted per progress tick shows up as duplicate children rather than
 	// silently overwriting one slot.
 	const statusContainer = new Container();
+	const setStatusScrollbackPinned = vi.fn();
 	const ctx = {
 		isInitialized: true,
 		focusedAgentId: undefined,
 		effectiveHideThinkingBlock: false,
 		proseOnlyThinking: true,
 		settings,
-		viewSession: { isStreaming: false },
+		session: { isCompacting: false },
+		viewSession: { isStreaming: false, isCompacting: false },
+		setStatusScrollbackPinned,
 		statusContainer,
 		loadingAnimation: undefined,
 		statusLine: { invalidate: vi.fn() },

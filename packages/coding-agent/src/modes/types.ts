@@ -279,6 +279,7 @@ export interface InteractiveModeContext {
 	setWorkingMessage(message?: string): void;
 	applyPendingWorkingMessage(): void;
 	ensureLoadingAnimation(): void;
+	setStatusScrollbackPinned(pinned: boolean): void;
 	startPendingSubmission(input: {
 		text: string;
 		images?: ImageContent[];

@@ -426,16 +426,18 @@ export class EventController {
 		this.#pinnedErrorComponent?.setErrorPinned(false);
 		this.#pinnedErrorComponent = undefined;
 		this.ctx.clearPinnedError();
-		if (this.ctx.retryLoader) {
-			this.ctx.retryLoader.stop();
-			this.ctx.retryLoader = undefined;
-			this.ctx.statusContainer.disposeChildren();
+		if (!this.ctx.session.isCompacting) {
+			if (this.ctx.retryLoader) {
+				this.ctx.retryLoader.stop();
+				this.ctx.retryLoader = undefined;
+				this.ctx.statusContainer.disposeChildren();
+			}
+			this.ctx.statusLine.markActivityStart();
+			this.#setTerminalProgress(true);
+			this.ctx.ensureLoadingAnimation();
 		}
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
-		this.ctx.statusLine.markActivityStart();
-		this.#setTerminalProgress(true);
-		this.ctx.ensureLoadingAnimation();
 		this.ctx.ui.requestRender();
 	}
 
@@ -1157,7 +1159,7 @@ export class EventController {
 		this.ctx.statusLine.markActivityEnd();
 		this.#streamingReveal.stop();
 		this.#toolArgsReveal.flushAll();
-		if (this.ctx.loadingAnimation) {
+		if (this.ctx.loadingAnimation && !this.ctx.session.isCompacting) {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
 			this.ctx.statusContainer.disposeChildren();
@@ -1226,6 +1228,7 @@ export class EventController {
 	 */
 	#ensureWorkingLoaderWhileStreaming(): void {
 		if (!this.ctx.viewSession.isStreaming) return;
+		if (this.ctx.viewSession.isCompacting) return;
 		if (this.ctx.retryLoader) return;
 		this.ctx.ensureLoadingAnimation();
 	}
@@ -1248,7 +1251,6 @@ export class EventController {
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(true);
 		this.#stopWorkingLoader();
-		this.ctx.statusContainer.disposeChildren();
 		this.#compactionController.handleAutoCompactionStart(event);
 		this.ctx.ui.requestRender();
 	}
@@ -1260,7 +1262,6 @@ export class EventController {
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(true);
 		this.#stopWorkingLoader();
-		this.ctx.statusContainer.disposeChildren();
 		this.#compactionController.handlePreparingStart(event.trigger);
 		this.ctx.ui.requestRender();
 	}
