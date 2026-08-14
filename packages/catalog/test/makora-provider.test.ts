@@ -50,7 +50,7 @@ describe("Makora provider support", () => {
 		expect(flash?.api).toBe("openai-completions");
 		expect(flash?.baseUrl).toBe("https://inference.makora.com/v1");
 		expect(flash?.reasoning).toBe(true);
-		expect(flash?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		expect(flash?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(flash?.compat?.supportsReasoningEffort).toBe(true);
 
 		const provider = getOAuthProviders().find(item => item.id === "makora");
@@ -83,6 +83,6 @@ describe("Makora provider support", () => {
 		);
 		const flash = models?.find(model => model.id === "deepseek-ai/DeepSeek-V4-Flash");
 		expect(flash?.reasoning).toBe(true);
-		expect(flash?.thinking?.efforts).toEqual([Effort.High, Effort.Max]);
+		expect(flash?.thinking?.efforts).toEqual([Effort.Low, Effort.High, Effort.Max]);
 	});
 });

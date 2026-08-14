@@ -111,6 +111,10 @@ async function createInteractiveGoalHarness(): Promise<{
 	vi.spyOn(mode, "addMessageToChat").mockReturnValue([]);
 	vi.spyOn(mode, "ensureLoadingAnimation").mockImplementation(() => {});
 	mode.ui.requestRender = vi.fn();
+	// The confirmed objective flows into goal creation, which opens the search-mode selector first.
+	vi.spyOn(mode, "showHookSelector").mockImplementation(async title =>
+		title.startsWith("Goal search mode") ? "Standard goal loop" : undefined,
+	);
 	return {
 		mode,
 		session,

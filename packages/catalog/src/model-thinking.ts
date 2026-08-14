@@ -64,6 +64,8 @@ const GPT_5_1_CODEX_MINI_EFFORTS: readonly Effort[] = [Effort.Medium, Effort.Hig
 const LOW_MEDIUM_HIGH_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.Medium, Effort.High];
 /** Kimi K3's wire-exact mandatory reasoning scale. */
 const KIMI_K3_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
+/** DeepSeek's reasoning_effort tier scale (official docs + live verification): low/high/max. */
+const DEEPSEEK_REASONING_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
 /** Wire-exact two-tier scale (`high`/`max`): GLM-5.2 on Z.ai/Umans/Ollama Cloud/Baseten, Sakana Fugu, DeepSeek. */
 const HIGH_MAX_REASONING_EFFORTS: readonly Effort[] = [Effort.High, Effort.Max];
 /** OpenRouter's DeepSeek route accepts only `high`. */
@@ -366,9 +368,10 @@ function getModelDefinedEfforts<TApi extends Api>(
 		return OLLAMA_REASONING_EFFORTS;
 	}
 	if (isOpenAICompatReasoningApi(spec.api) && isDeepseekReasoningModel(spec)) {
-		// DeepSeek's reasoning_effort accepts only high/max; OpenRouter's
-		// DeepSeek route tops out at high.
-		return isOpenRouterThinkingFormat(compat) ? HIGH_ONLY_REASONING_EFFORTS : HIGH_MAX_REASONING_EFFORTS;
+		// DeepSeek's reasoning_effort accepts low/high/max (official docs;
+		// medium/xhigh map to high on the wire, max is the top tier).
+		// OpenRouter's DeepSeek route tops out at high.
+		return isOpenRouterThinkingFormat(compat) ? HIGH_ONLY_REASONING_EFFORTS : DEEPSEEK_REASONING_EFFORTS;
 	}
 	if (spec.provider === "baseten" && isOpenAIGptOssModelId(spec.id)) {
 		// Baseten's gpt-oss router mirrors its GLM route: high/max only.

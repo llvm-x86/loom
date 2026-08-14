@@ -250,6 +250,7 @@ import type { HookCommandContext } from "../extensibility/hooks/types";
 import type { RecoveredRetryError } from "../extensibility/shared-events";
 import { loadSkills, type Skill, type SkillWarning, setActiveSkills } from "../extensibility/skills";
 import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slash-commands";
+import { runOuterAnalysis } from "../goals/bilevel/analyst";
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
@@ -3025,7 +3026,7 @@ export class AgentSession {
 				if (mode === "none") {
 					this.sessionManager.appendModeChange("none");
 				} else if (state) {
-					this.sessionManager.appendModeChange(mode, { goal: state.goal });
+					this.sessionManager.appendModeChange(mode, { goal: state.goal, bilevel: state.bilevel });
 				}
 			},
 			sendHiddenMessage: async message => {
@@ -3039,6 +3040,11 @@ export class AgentSession {
 					{ deliverAs: message.deliverAs },
 				);
 			},
+			bilevelSettings: () => ({
+				enabled: this.settings.get("goal.bilevel.enabled") as boolean,
+				innerBudget: Math.max(1, this.settings.get("goal.bilevel.innerBudget") as number),
+			}),
+			analyzeGoalSearch: request => runOuterAnalysis(this, request),
 		});
 		this.#cancelExitRecorder = postmortem.register(`agent-session:${this.sessionManager.getSessionId()}`, reason => {
 			this.#recordSessionExit(reason);
@@ -4783,7 +4789,7 @@ export class AgentSession {
 			if (event.toolName === "goal") {
 				await this.#goalRuntime.onGoalToolCompleted();
 			} else {
-				await this.#goalRuntime.onToolCompleted(event.toolName);
+				await this.#goalRuntime.onToolCompleted(event.toolName, event.isError);
 			}
 			this.#planModeReminderAwaitingProgress = false;
 			if (

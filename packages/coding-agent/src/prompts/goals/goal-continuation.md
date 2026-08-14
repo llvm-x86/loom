@@ -11,6 +11,10 @@ Budget:
 - Token budget: {{tokenBudget}}
 - Tokens remaining: {{remainingTokens}}
 - Time used: {{timeUsedSeconds}} seconds
+{{#if outerDirective}}
+
+{{outerDirective}}
+{{/if}}
 
 This is an autonomous continuation. The objective persists across turns; NEVER redefine success around a smaller, easier, or already-completed subset.
 

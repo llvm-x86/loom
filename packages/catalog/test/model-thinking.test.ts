@@ -212,9 +212,9 @@ describe("model thinking derivation", () => {
 			medium: "default",
 			high: "default",
 		});
-		// DeepSeek's ladder is the wire-exact high/max pair; explicit compat
+		// DeepSeek's ladder is the wire-exact low/high/max scale; explicit compat
 		// overrides still win over the identity wire values.
-		expect(getSupportedEfforts(deepseek)).toEqual([Effort.High, Effort.Max]);
+		expect(getSupportedEfforts(deepseek)).toEqual([Effort.Low, Effort.High, Effort.Max]);
 		expect(deepseek.thinking?.effortMap).toEqual({ max: "max-plus" });
 		// OpenRouter-hosted Anthropic adaptive models carry the wire-exact
 		// five-tier ladder with no remapping.

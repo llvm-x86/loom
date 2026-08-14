@@ -16443,6 +16443,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -18245,12 +18246,14 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
 			},
 			"compat": {
 				"supportsToolChoice": false,
+				"supportsReasoningEffort": true,
 				"requiresAssistantContentForToolCalls": true
 			}
 		},
@@ -36573,6 +36576,7 @@
 			"maxTokens": 16384,
 			"compat": {
 				"supportsToolChoice": false,
+				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -36580,6 +36584,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -36605,6 +36610,7 @@
 			"maxTokens": 16384,
 			"compat": {
 				"supportsToolChoice": false,
+				"supportsReasoningEffort": true,
 				"maxTokensField": "max_tokens",
 				"reasoningContentField": "reasoning_content",
 				"requiresReasoningContentForToolCalls": true
@@ -36612,6 +36618,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]

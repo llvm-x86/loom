@@ -293,6 +293,14 @@
       "types": "./src/extensibility/*.ts",
       "import": "./src/extensibility/*.ts"
     },
+    "./goals/bilevel": {
+      "types": "./src/goals/bilevel/index.ts",
+      "import": "./src/goals/bilevel/index.ts"
+    },
+    "./goals/bilevel/*": {
+      "types": "./src/goals/bilevel/*.ts",
+      "import": "./src/goals/bilevel/*.ts"
+    },
     "./extensibility/custom-commands": {
       "types": "./src/extensibility/custom-commands/index.ts",
       "import": "./src/extensibility/custom-commands/index.ts"
