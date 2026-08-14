@@ -284,17 +284,36 @@ export class CompactionController {
 			// UI failures must not propagate.
 		}
 	}
+	/**
+	 * Whether our surface is still attached to the status container. Asks the
+	 * container's real child list rather than trusting a local flag, because a
+	 * third party (auto-retry, transient-UI teardown) can detach us without
+	 * telling us.
+	 */
+	#surfaceIsMounted(): boolean {
+		if (!this.#root) return false;
+		const children = (this.#ctx.statusContainer as { children?: unknown[] } | undefined)?.children;
+		return Array.isArray(children) && children.includes(this.#root);
+	}
 
 	#ensureSurface(): void {
+		const status = this.#ctx.statusContainer;
+		if (!status) return;
 		if (this.#root) {
-			this.#active = true;
-			// EventController clears status children before preparing; re-mount our surface.
-			this.#ctx.statusContainer?.addChild?.(this.#root);
-			return;
+			// `addChild` is an unconditional push, so re-adding a surface that is
+			// still mounted stacks a whole duplicate copy of it — once per progress
+			// tick, which is every LLM step of every compaction.
+			if (this.#surfaceIsMounted()) {
+				this.#active = true;
+				return;
+			}
+			// Detached by someone else's `disposeChildren()`, which disposes as it
+			// detaches: our Loader's timer is already dead, so this surface cannot
+			// be remounted. Drop it and build a live one.
+			this.#releaseSurfaceRefs();
 		}
-		if (!this.#ctx.statusContainer) return;
 		this.#active = true;
-		this.#ctx.statusContainer.disposeChildren?.();
+		status.disposeChildren?.();
 		this.#root = new Container();
 		this.#root.addChild(new Spacer(1));
 		this.#headerText = new Text("", 1, 0);
@@ -313,7 +332,7 @@ export class CompactionController {
 			getSymbolTheme().spinnerFrames,
 		);
 		this.#root.addChild(this.#loader);
-		this.#ctx.statusContainer.addChild(this.#root);
+		status.addChild(this.#root);
 	}
 
 	#updateHeader(
@@ -377,7 +396,8 @@ export class CompactionController {
 		}
 	}
 
-	#teardownSurface(): void {
+	/** Drop every component reference without touching the status container. */
+	#releaseSurfaceRefs(): void {
 		this.#clearStallTimer();
 		this.#streamingReveal.stop();
 		if (this.#loader) {
@@ -390,6 +410,10 @@ export class CompactionController {
 		this.#progressText = undefined;
 		this.#stallText = undefined;
 		this.#assistantComponent = undefined;
+	}
+
+	#teardownSurface(): void {
+		this.#releaseSurfaceRefs();
 		this.#ctx.statusContainer?.disposeChildren?.();
 	}
 }

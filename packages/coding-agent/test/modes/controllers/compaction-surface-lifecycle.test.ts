@@ -6,7 +6,7 @@ import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import { CompactionLiveReporter } from "@oh-my-pi/pi-coding-agent/session/context/compaction/live-reporter";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Container, Text } from "@oh-my-pi/pi-tui";
 
 const STALL_NOTICE_SNIPPET = "Compaction still running";
 
@@ -25,16 +25,12 @@ function collectText(component: Component): string[] {
 function createContext(): {
 	ctx: InteractiveModeContext;
 	root: () => Component | undefined;
+	statusChildren: () => Component[];
 } {
-	let mountedRoot: Component | undefined;
-	const statusContainer = {
-		disposeChildren: vi.fn(() => {
-			mountedRoot = undefined;
-		}),
-		addChild: vi.fn((child: Component) => {
-			mountedRoot = child;
-		}),
-	};
+	// A real Container, not a single-slot fake: `addChild` appends, so a surface
+	// re-mounted per progress tick shows up as duplicate children rather than
+	// silently overwriting one slot.
+	const statusContainer = new Container();
 	const ctx = {
 		isInitialized: true,
 		focusedAgentId: undefined,
@@ -60,7 +56,11 @@ function createContext(): {
 			terminal: { setProgress: vi.fn() },
 		},
 	} as unknown as InteractiveModeContext;
-	return { ctx, root: () => mountedRoot };
+	return {
+		ctx,
+		root: () => statusContainer.children[0],
+		statusChildren: () => statusContainer.children,
+	};
 }
 
 async function flushMicrotasks(): Promise<void> {

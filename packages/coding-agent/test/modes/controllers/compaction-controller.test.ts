@@ -7,7 +7,7 @@ import { CompactionController } from "@oh-my-pi/pi-coding-agent/modes/controller
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Text } from "@oh-my-pi/pi-tui";
+import { Container, Text } from "@oh-my-pi/pi-tui";
 
 /** Exact stall-notice copy from CompactionController.#startStallTimer (minus theme wrappers). */
 const STALL_NOTICE_SNIPPET = "Compaction still running";
@@ -32,16 +32,12 @@ function collectText(component: Component): string[] {
 function createContext(options: { showStatus?: (message: string, opts?: { dim?: boolean }) => void } = {}): {
 	ctx: InteractiveModeContext;
 	root: () => Component | undefined;
+	statusChildren: () => Component[];
 } {
-	let mountedRoot: Component | undefined;
-	const statusContainer = {
-		disposeChildren: vi.fn(() => {
-			mountedRoot = undefined;
-		}),
-		addChild: vi.fn((child: Component) => {
-			mountedRoot = child;
-		}),
-	};
+	// A real Container, not a single-slot fake: `addChild` appends, so a surface
+	// that gets re-mounted per progress tick shows up here as duplicate children
+	// instead of silently overwriting one slot.
+	const statusContainer = new Container();
 	const ctx = {
 		isInitialized: true,
 		focusedAgentId: undefined,
@@ -56,7 +52,11 @@ function createContext(options: { showStatus?: (message: string, opts?: { dim?: 
 			requestComponentRender: vi.fn(),
 		},
 	} as unknown as InteractiveModeContext;
-	return { ctx, root: () => mountedRoot };
+	return {
+		ctx,
+		root: () => statusContainer.children[0],
+		statusChildren: () => statusContainer.children,
+	};
 }
 
 function getStallTimerId(setIntervalSpy: ReturnType<typeof vi.spyOn>): ReturnType<typeof setInterval> | undefined {
@@ -109,7 +109,9 @@ function createStallNoticeObserver(
 		return originalSetText.call(this, value);
 	};
 
-	const originalAddChild = ctx.statusContainer!.addChild as (child: Component) => void;
+	// Bound: `statusContainer` is a real Container whose `addChild` touches
+	// `this.children`, so an unbound call throws (and the controller swallows it).
+	const originalAddChild = ctx.statusContainer!.addChild.bind(ctx.statusContainer) as (child: Component) => void;
 	ctx.statusContainer!.addChild = vi.fn((child: Component) => {
 		retainedSurfaces.push(child);
 		originalAddChild(child);
@@ -245,6 +247,84 @@ describe("CompactionController", () => {
 		expect(text).toContain("1/3");
 		expect(text).toContain("anthropic/claude-sonnet-4-5:medium");
 	});
+	// Regression: `Container.addChild` is an unconditional push and every event
+	// handler calls `#ensureSurface()`, so re-mounting an already-mounted surface
+	// stacked one full copy of the header/model/progress/spinner block per tick.
+	// Operators saw the "Auto context-full maintenance…" block repeated dozens of
+	// times per compaction.
+	it("mounts exactly one surface across preparing, start and repeated progress", () => {
+		const { ctx, statusChildren } = createContext();
+		const controller = new CompactionController(ctx);
+
+		controller.handlePreparingStart("manual");
+		expect(statusChildren().length).toBe(1);
+
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "manual",
+			phase: "preparing",
+			messagesTotal: 65,
+			tokensBefore: 120_000,
+		});
+		expect(statusChildren().length).toBe(1);
+
+		for (let step = 1; step <= 12; step++) {
+			controller.handleProgress({
+				type: "compaction_live_progress",
+				phase: "turn_prefix",
+				stepsDone: step,
+				stepsTotal: 12,
+				messagesTotal: 65,
+			});
+			controller.handleModel({
+				type: "compaction_live_model",
+				model: {
+					id: "claude-opus-4-8",
+					provider: "cursor",
+					api: "anthropic-messages",
+					contextWindow: 200_000,
+					input: ["text"],
+				} as Model,
+				thinkingLevel: ThinkingLevel.Medium,
+			});
+		}
+
+		expect(statusChildren().length).toBe(1);
+		// One header, not twelve stacked copies of it.
+		const occurrences = collectText(statusChildren()[0]!).join("\n").split("Compacting context").length - 1;
+		expect(occurrences).toBeLessThanOrEqual(1);
+	});
+
+	// A surface detached by an unrelated `disposeChildren()` (auto-retry banner,
+	// transient-UI teardown) has already been disposed, so its spinner is dead;
+	// it must be rebuilt rather than re-attached.
+	it("rebuilds the surface after a third party detaches it", () => {
+		const { ctx, statusChildren } = createContext();
+		const controller = new CompactionController(ctx);
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			phase: "preparing",
+			messagesTotal: 4,
+			tokensBefore: 90_000,
+		});
+		const first = statusChildren()[0];
+
+		ctx.statusContainer.disposeChildren();
+		expect(statusChildren().length).toBe(0);
+
+		controller.handleProgress({
+			type: "compaction_live_progress",
+			phase: "history_summary",
+			messagesDone: 2,
+			messagesTotal: 4,
+		});
+
+		expect(statusChildren().length).toBe(1);
+		expect(statusChildren()[0]).not.toBe(first);
+		expect(collectText(statusChildren()[0]!).join("\n")).toContain("Summarizing history");
+	});
+
 
 	it("does not attribute a later run to an earlier compaction model", () => {
 		const showStatus = vi.fn();
