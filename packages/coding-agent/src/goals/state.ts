@@ -1,4 +1,5 @@
 import type { UsageStatistics } from "../session/session-entries";
+import type { GoalBilevelState } from "./bilevel/state";
 
 export type GoalStatus = "active" | "paused" | "budget-limited" | "complete" | "dropped";
 
@@ -18,6 +19,11 @@ export interface GoalModeState {
 	mode: "active" | "exiting";
 	reason?: "completed";
 	goal: Goal;
+	/**
+	 * Bilevel outer-loop state. Present only while `goal.bilevel.enabled` is set; absent state
+	 * means the goal runs as a plain single-level loop, so existing goals are unaffected.
+	 */
+	bilevel?: GoalBilevelState;
 }
 
 export interface GoalToolDetails {

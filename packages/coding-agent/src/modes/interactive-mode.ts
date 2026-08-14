@@ -57,6 +57,7 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -78,6 +79,7 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
+import { parseBilevelState } from "../goals/bilevel";
 import { type GuidedGoalMessage, newGuidedGoalSessionId, runGuidedGoalTurn } from "../goals/guided-setup";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
@@ -2294,6 +2296,12 @@ export class InteractiveMode implements InteractiveModeContext {
 				enabled: sessionContext.mode === "goal",
 				mode: "active",
 				goal,
+				bilevel: this.session.settings.get("goal.bilevel.enabled")
+					? parseBilevelState(
+							sessionContext.modeData?.bilevel,
+							this.session.settings.get("goal.bilevel.innerBudget"),
+						)
+					: undefined,
 			});
 			const restored = await this.session.goalRuntime.onThreadResumed({
 				preserveActiveGoal: options?.preserveActiveGoal,
@@ -3353,8 +3361,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
 		const items =
 			state === "active"
-				? ["Show details", "Adjust budget…", "Pause", "Drop"]
-				: ["Resume", "Show details", "Adjust budget…", "Drop"];
+				? ["Show details", "Adjust budget…", "Search mode…", "Pause", "Drop"]
+				: ["Resume", "Show details", "Adjust budget…", "Search mode…", "Drop"];
 		const choice = await this.showHookSelector(title, items);
 		if (!choice) return;
 		switch (choice) {
@@ -3363,6 +3371,11 @@ export class InteractiveMode implements InteractiveModeContext {
 				return;
 			case "Adjust budget…":
 				await this.#promptGoalBudgetEdit();
+				return;
+			case "Search mode…":
+				// The runtime reads `goal.bilevel.*` live on every cadence check, so switching the
+				// search shape mid-goal takes effect at the next outer-cycle boundary.
+				await this.#promptGoalSearchSetup();
 				return;
 			case "Pause":
 				await this.#pauseGoalAction();
@@ -3443,11 +3456,112 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #startGoalFromObjective(objective: string): Promise<void> {
+		if (!(await this.#promptGoalSearchSetup())) return;
 		await this.#enterGoalMode({ objective, silent: true });
 		this.#resetGoalContinuationSuppression();
 		if (!this.session.isStreaming && this.onInputCallback) {
 			this.onInputCallback(this.startPendingSubmission({ text: objective }));
 		}
+	}
+
+	/**
+	 * Configured role models offered as a level's model, newest-configured last. Built from the
+	 * *raw* role selectors rather than resolved ids so a role's thinking suffix
+	 * (`anthropic/claude-opus-5:xhigh`) survives being copied onto another role.
+	 */
+	#goalLevelModelChoices(): { label: string; description: string; selector: string; entry: ResolvedRoleModel }[] {
+		const cycle = this.session.getRoleModelCycle(getKnownRoleIds(this.session.settings));
+		const seen = new Set<string>();
+		const choices: { label: string; description: string; selector: string; entry: ResolvedRoleModel }[] = [];
+		for (const entry of cycle?.models ?? []) {
+			const selector = this.session.settings.getModelRole(entry.role) ?? `${entry.model.provider}/${entry.model.id}`;
+			if (seen.has(selector)) continue;
+			seen.add(selector);
+			choices.push({
+				label: `${getRoleInfo(entry.role, this.session.settings).name} · ${entry.model.id}`,
+				description: selector,
+				selector,
+				entry,
+			});
+		}
+		return choices;
+	}
+
+	/**
+	 * Guide the operator through the goal's search shape before the objective is submitted:
+	 * standard single loop vs. the bilevel outer loop, and which model runs each level.
+	 *
+	 * The mode answer is written to `goal.bilevel.enabled`, so it is both the per-goal decision and
+	 * the remembered default for the next `/goal`. The inner-loop pick is session-only (it is the
+	 * session's own model); the outer-loop pick persists to the `goalOuter` model role, which
+	 * {@link runOuterAnalysis} prefers over `plan`/`slow`.
+	 *
+	 * Returns `false` when the operator escapes out, which aborts goal creation — the same
+	 * cancellation contract as the objective editor that precedes it.
+	 */
+	async #promptGoalSearchSetup(): Promise<boolean> {
+		const bilevelDefault = this.session.settings.get("goal.bilevel.enabled") === true;
+		const innerBudget = this.session.settings.get("goal.bilevel.innerBudget");
+		const standard = "Standard goal loop";
+		const bilevel = "Bilevel loop (outer loop tunes the search)";
+		const mode = await this.showHookSelector(
+			"Goal search mode",
+			[
+				{ label: standard, description: "One loop. The agent continues until the objective is met." },
+				{
+					label: bilevel,
+					description: `A second model reviews process signals every ${innerBudget} iterations — which tools ran, what failed, tokens spent — and rewrites the search strategy. It never sees your files.`,
+				},
+			],
+			{ initialIndex: bilevelDefault ? 1 : 0 },
+		);
+		if (!mode) return false;
+		this.session.settings.set("goal.bilevel.enabled", mode === bilevel);
+		if (mode !== bilevel) {
+			this.showStatus("Goal: standard loop.");
+			return true;
+		}
+
+		const choices = this.#goalLevelModelChoices();
+		const current = this.session.model;
+		const keepInner = `Keep current · ${current ? current.id : "session model"}`;
+		const inner = await this.showHookSelector(
+			"Inner loop model — does the work",
+			[
+				{ label: keepInner, description: "Leave the session model alone." },
+				...choices.filter(choice => !current || choice.entry.model.id !== current.id),
+			],
+			{ initialIndex: 0 },
+		);
+		if (!inner) return false;
+		const innerChoice = choices.find(choice => choice.label === inner);
+		if (innerChoice) await this.session.applyRoleModel(innerChoice.entry);
+
+		const configuredOuter = this.session.settings.getModelRole("goalOuter");
+		const keepOuter = configuredOuter
+			? `Keep current · ${configuredOuter}`
+			: "Auto · reuse the Architect/Thinking role";
+		const outer = await this.showHookSelector(
+			"Outer loop model — reviews the search",
+			[
+				{
+					label: keepOuter,
+					description: configuredOuter
+						? "Keep the model already assigned to the Goal Outer Loop role."
+						: "No dedicated model: fall back to the plan, then slow, then session model.",
+				},
+				...choices,
+			],
+			{ initialIndex: 0 },
+		);
+		if (!outer) return false;
+		const outerChoice = choices.find(choice => choice.label === outer);
+		if (outerChoice) this.session.settings.setModelRole("goalOuter", outerChoice.selector);
+
+		const outerLabel = outerChoice?.selector ?? configuredOuter ?? "auto (plan/slow)";
+		const innerLabel = innerChoice?.entry.model.id ?? current?.id ?? "session model";
+		this.showStatus(`Goal: bilevel every ${innerBudget} iterations. Inner ${innerLabel} · outer ${outerLabel}.`);
+		return true;
 	}
 
 	async #replaceGoalFromObjective(objective: string): Promise<void> {

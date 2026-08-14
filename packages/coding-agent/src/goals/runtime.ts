@@ -2,6 +2,12 @@ import { escapeXmlText, prompt, Snowflake } from "@oh-my-pi/pi-utils";
 import goalBudgetLimitPrompt from "../prompts/goals/goal-budget-limit.md" with { type: "text" };
 import goalContinuationPrompt from "../prompts/goals/goal-continuation.md" with { type: "text" };
 import goalModeActivePrompt from "../prompts/goals/goal-mode-active.md" with { type: "text" };
+import type { OuterAnalysisResult } from "./bilevel/analysis";
+import { applyOuterAnalysis } from "./bilevel/analysis";
+import { renderOuterDirective } from "./bilevel/directive";
+import type { GoalBilevelState } from "./bilevel/state";
+import { defaultBilevelState } from "./bilevel/state";
+import { isOuterCycleDue, recordIteration } from "./bilevel/trace";
 import type { Goal, GoalBudgetSteering, GoalModeState, GoalRuntimeEvent, GoalTokenUsage } from "./state";
 
 export interface GoalRuntimeHost {
@@ -16,6 +22,18 @@ export interface GoalRuntimeHost {
 		deliverAs?: "steer" | "followUp" | "nextTurn";
 	}): Promise<void>;
 	now?(): number;
+	/**
+	 * Bilevel outer-loop settings. Absent or disabled keeps goal mode single-level.
+	 */
+	bilevelSettings?(): { enabled: boolean; innerBudget: number };
+	/**
+	 * Run one Level 1.5 analysis. Injected rather than called directly so `GoalRuntime` stays
+	 * free of the session/provider stack and the loop remains testable with a stub analyst.
+	 */
+	analyzeGoalSearch?(request: {
+		objective: string;
+		state: GoalBilevelState;
+	}): Promise<OuterAnalysisResult | undefined>;
 }
 
 export interface GoalTurnSnapshot {
@@ -42,7 +60,13 @@ function cloneGoal(goal: Goal): Goal {
 }
 
 function cloneState(state: GoalModeState): GoalModeState {
-	return { ...state, goal: cloneGoal(state.goal) };
+	// `bilevel` is deep-copied: the outer loop mutates its config and trace in place, and a
+	// shared reference would let a stale snapshot observe (or clobber) a later cycle's writes.
+	return {
+		...state,
+		goal: cloneGoal(state.goal),
+		...(state.bilevel ? { bilevel: structuredClone(state.bilevel) } : {}),
+	};
 }
 
 function budgetValue(goal: Goal): string {
@@ -76,7 +100,7 @@ export function goalTokenDelta(current: GoalTokenUsage, baseline: GoalTokenUsage
 	);
 }
 
-export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
+export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal, outerDirective?: string): string {
 	const template =
 		kind === "active"
 			? goalModeActivePrompt
@@ -89,6 +113,7 @@ export function renderGoalPrompt(kind: GoalPromptKind, goal: Goal): string {
 		tokenBudget: budgetValue(goal),
 		remainingTokens: remainingValue(goal),
 		timeUsedSeconds: String(goal.timeUsedSeconds),
+		outerDirective: outerDirective ?? "",
 	});
 }
 
@@ -120,6 +145,13 @@ export class GoalRuntime {
 	#wallClock: GoalWallClockSnapshot;
 	#budgetReportedFor: string | undefined;
 	#accountingTail: Promise<void> = Promise.resolve();
+	// Per-iteration accumulators. One inner-loop iteration spans onTurnStart..onAgentEnd.
+	#iterationTools: string[] = [];
+	#iterationFailedTools: string[] = [];
+	#iterationGoalToolUsed = false;
+	#iterationStartedAt = 0;
+	#iterationBaselineTokens = 0;
+	#outerCycleTail: Promise<void> = Promise.resolve();
 
 	constructor(host: GoalRuntimeHost) {
 		this.#host = host;
@@ -203,7 +235,12 @@ export class GoalRuntime {
 
 	onTurnStart(turnId: string, baselineUsage: GoalTokenUsage): void {
 		this.#turnSnapshot = { turnId, baselineUsage: { ...baselineUsage } };
+		this.#iterationTools = [];
+		this.#iterationFailedTools = [];
+		this.#iterationGoalToolUsed = false;
+		this.#iterationStartedAt = this.#now();
 		const state = this.#host.getState();
+		this.#iterationBaselineTokens = state?.goal.tokensUsed ?? 0;
 		if (state?.enabled && isAccountingStatus(state.goal)) {
 			this.#turnSnapshot.activeGoalId = state.goal.id;
 			if (this.#wallClock.activeGoalId !== state.goal.id) {
@@ -212,14 +249,17 @@ export class GoalRuntime {
 		}
 	}
 
-	async onToolCompleted(toolName: string): Promise<void> {
+	async onToolCompleted(toolName: string, isError?: boolean): Promise<void> {
 		if (toolName === "goal") return;
 		if (!this.#hasAccountingState()) return;
+		this.#iterationTools.push(toolName);
+		if (isError) this.#iterationFailedTools.push(toolName);
 		await this.flushUsage("allowed");
 	}
 
 	async onGoalToolCompleted(): Promise<void> {
 		if (!this.#hasAccountingState()) return;
+		this.#iterationGoalToolUsed = true;
 		await this.flushUsage("suppressed");
 	}
 
@@ -230,6 +270,64 @@ export class GoalRuntime {
 		}
 		await this.flushUsage("suppressed", options?.currentUsage);
 		this.#turnSnapshot = undefined;
+		await this.#runBilevelCycle();
+	}
+
+	/**
+	 * Close out one inner-loop iteration and, when the cadence is due, run the Level 1.5 analysis.
+	 *
+	 * Runs after usage has been flushed so the recorded token delta is final, and serialized on
+	 * `#outerCycleTail` so a slow analyst cannot overlap with the next iteration's cycle.
+	 */
+	async #runBilevelCycle(): Promise<void> {
+		const settings = this.#host.bilevelSettings?.();
+		if (!settings?.enabled) return;
+		const previous = this.#outerCycleTail;
+		const { promise, resolve } = Promise.withResolvers<void>();
+		this.#outerCycleTail = previous.then(
+			() => promise,
+			() => promise,
+		);
+		await previous.catch(() => {});
+		try {
+			const state = this.#getStateClone();
+			if (!state?.enabled || state.goal.status !== "active") return;
+			const bilevel = state.bilevel ?? defaultBilevelState(settings.innerBudget);
+			// Track live settings so a mid-goal `goal.bilevel.innerBudget` change takes effect
+			// on the next cadence check instead of being pinned at goal creation.
+			bilevel.config.innerBudget = settings.innerBudget;
+			recordIteration(bilevel, {
+				tools: this.#iterationTools,
+				failedTools: this.#iterationFailedTools,
+				tokens: Math.max(0, state.goal.tokensUsed - this.#iterationBaselineTokens),
+				durationMs: Math.max(0, this.#now() - this.#iterationStartedAt),
+				goalToolUsed: this.#iterationGoalToolUsed,
+			});
+			state.bilevel = bilevel;
+			if (!isOuterCycleDue(bilevel)) {
+				await this.#commitState(state, { persist: "goal", emit: false });
+				return;
+			}
+			const result = await this.#host.analyzeGoalSearch?.({
+				objective: state.goal.objective,
+				state: bilevel,
+			});
+			// A missing or unusable analysis leaves the config untouched but still advances the
+			// cadence marker, so a persistently failing analyst cannot re-run on every iteration.
+			if (result) {
+				applyOuterAnalysis(bilevel, result.analysis, { stagnation: result.stagnation });
+			} else {
+				bilevel.lastAnalyzedIteration = bilevel.iterationCount;
+			}
+			const latest = this.#getStateClone();
+			// The turn that just ended may have completed, dropped, or paused the goal while the
+			// analyst was in flight; committing then would resurrect a stale `active` snapshot.
+			if (!latest?.enabled || latest.goal.status !== "active") return;
+			latest.bilevel = bilevel;
+			await this.#commitState(latest, { persist: "goal", emit: false });
+		} finally {
+			resolve();
+		}
 	}
 
 	async onTaskAborted(options?: { reason?: "interrupted" | "internal" }): Promise<void> {
@@ -505,7 +603,7 @@ export class GoalRuntime {
 	buildContinuationPrompt(): string | undefined {
 		const state = this.#host.getState();
 		return state?.enabled && state.goal.status === "active"
-			? renderGoalPrompt("continuation", state.goal)
+			? renderGoalPrompt("continuation", state.goal, renderOuterDirective(state.bilevel))
 			: undefined;
 	}
 

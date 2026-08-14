@@ -4186,6 +4186,29 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"goal.bilevel.enabled": {
+		type: "boolean",
+		default: false,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Bilevel Outer Loop",
+			description:
+				"Periodically analyze an active goal's own search behavior and rewrite the strategy, ruled-out approaches, and guidance injected into its continuations. `/goal` asks per goal and remembers the answer here; the analyst runs on the Goal Outer Loop model role, falling back to the plan and slow roles",
+		},
+	},
+
+	"goal.bilevel.innerBudget": {
+		type: "number",
+		default: 5,
+		ui: {
+			tab: "tasks",
+			group: "Modes",
+			label: "Goal Bilevel Inner Budget",
+			description: "Goal continuations to run between outer-loop analyses",
+		},
+	},
+
 	"title.refreshOnReplan": {
 		type: "boolean",
 		default: true,
@@ -4863,7 +4886,7 @@ export const SETTINGS_SCHEMA = {
 		default: "standard",
 		ui: {
 			tab: "providers",
-			group: "DeepInfra",
+			group: "Services",
 			label: "DeepInfra Tier",
 			description:
 				'Serving path for DeepInfra requests. Priority sends `service_tier: "priority"` (1.5x price, skips the public queue, prioritizes GPU allocation); Flex sends `service_tier: "flex"` (20% discount, best-effort, may queue). Standard omits the field and uses real-time scheduling.',

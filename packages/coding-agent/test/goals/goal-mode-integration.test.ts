@@ -91,6 +91,12 @@ async function createGoalHarness(shared: SharedFixture): Promise<GoalHarness> {
 		rebuildSystemPrompt: async () => ({ systemPrompt: ["Test"] }),
 	});
 	const mode = new InteractiveMode(session, "test");
+	// Goal creation now opens the search-mode selector first (standard loop vs. the bilevel outer
+	// loop). Tests that are not about that flow answer it with the standard loop so `/goal
+	// <objective>` stays one call; per-test spies replace this implementation freely.
+	vi.spyOn(mode, "showHookSelector").mockImplementation(async title =>
+		title.startsWith("Goal search mode") ? "Standard goal loop" : undefined,
+	);
 	const toolSession = createToolSession(tempDir.path(), settings, {
 		getGoalModeState: () => session.getGoalModeState(),
 		getGoalRuntime: () => session.goalRuntime,
@@ -489,5 +495,54 @@ describe("InteractiveMode goal mode integration", () => {
 
 		harness.mode.onInputCallback?.(harness.mode.startPendingSubmission({ text: "next turn" }));
 		await nextTurn;
+	});
+
+	it("records the standard loop choice and starts the goal", async () => {
+		const selector = vi
+			.spyOn(harness.mode, "showHookSelector")
+			.mockImplementation(async title => (title.startsWith("Goal search mode") ? "Standard goal loop" : undefined));
+
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		// Only the mode question is asked - the model prompts belong to the bilevel branch.
+		expect(selector).toHaveBeenCalledTimes(1);
+		expect(harness.settings.get("goal.bilevel.enabled")).toBe(false);
+		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Ship the release");
+	});
+
+	it("persists the outer-loop model role when the bilevel loop is chosen", async () => {
+		// No provider is authed in the harness, so the registry offers no models of its own. Stand in
+		// a resolvable `plan` role whose selector carries a thinking suffix - the outer role must be
+		// stored verbatim, not collapsed to `provider/id`.
+		harness.settings.setModelRole("plan", `${shared.model.provider}/${shared.model.id}:high`);
+		vi.spyOn(harness.session, "getRoleModelCycle").mockReturnValue({
+			models: [{ role: "plan", model: shared.model, explicitThinkingLevel: false }],
+			currentIndex: 0,
+		});
+		const titles: string[] = [];
+		vi.spyOn(harness.mode, "showHookSelector").mockImplementation(async (title, options) => {
+			titles.push(title);
+			const labels = options.map(option => (typeof option === "string" ? option : option.label));
+			if (title.startsWith("Goal search mode")) return labels[1];
+			if (title.startsWith("Inner loop model")) return labels[0];
+			return labels.at(-1);
+		});
+
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		expect(titles.map(title => title.split(" ")[0])).toEqual(["Goal", "Inner", "Outer"]);
+		expect(harness.settings.get("goal.bilevel.enabled")).toBe(true);
+		expect(harness.settings.getModelRole("goalOuter")).toBe(`${shared.model.provider}/${shared.model.id}:high`);
+		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Ship the release");
+	});
+
+	it("abandons goal creation when the search mode prompt is escaped", async () => {
+		vi.spyOn(harness.mode, "showHookSelector").mockResolvedValue(undefined);
+
+		await harness.mode.handleGoalModeCommand("Ship the release");
+
+		expect(harness.session.getGoalModeState()).toBeUndefined();
+		expect(harness.mode.goalModeEnabled).toBe(false);
+		expect(await toolNamesFor(harness)).not.toContain("goal");
 	});
 });
