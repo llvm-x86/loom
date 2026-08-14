@@ -325,7 +325,6 @@ describe("CompactionController", () => {
 		expect(collectText(statusChildren()[0]!).join("\n")).toContain("Summarizing history");
 	});
 
-
 	it("does not attribute a later run to an earlier compaction model", () => {
 		const showStatus = vi.fn();
 		const { ctx } = createContext({ showStatus });
