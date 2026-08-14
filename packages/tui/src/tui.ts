@@ -1421,6 +1421,15 @@ export class TUI extends Container {
 			offset += childLines.length;
 		}
 		this.#frameSegments = segments;
+		// Host pin (compaction) is independent of which child owns the seam.
+		// Without this, a frame with no live child leaves the pin bit false and
+		// growing HUD rows commit, then a markdown reflow ED3-resets the screen.
+		if (this.#hostNativeScrollbackPinned) {
+			this.#nativeScrollbackLiveRegionPinned = true;
+			if (this.#nativeScrollbackLiveRegionStart === undefined) {
+				this.#nativeScrollbackLiveRegionStart = 0;
+			}
+		}
 
 		const frame = this.#composedFrame;
 		// Defensive clamp: stable rows can never exceed what the previous
@@ -3198,6 +3207,7 @@ export class TUI extends Container {
 			!replaceRequested &&
 			!geometryChanged &&
 			!isMultiplexerSession() &&
+			!liveRegionPinned &&
 			(committedRowsResynced || frameLength <= this.#committedRows);
 		const fullPaint = firstPaint || replaceRequested || geometryRebuild || divergenceRebuild;
 		let windowTop: number;

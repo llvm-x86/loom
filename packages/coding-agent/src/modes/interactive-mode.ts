@@ -4191,9 +4191,15 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	setStatusScrollbackPinned(pinned: boolean): void {
-		(this.statusContainer as AnchoredLiveContainer).setNativeScrollbackPinned(pinned);
-		(this.todoContainer as AnchoredLiveContainer).setNativeScrollbackPinned(pinned);
-		(this.pendingMessagesContainer as AnchoredLiveContainer).setNativeScrollbackPinned(pinned);
+		const pin = (container: Container) => (container as AnchoredLiveContainer).setNativeScrollbackPinned(pinned);
+		pin(this.statusContainer);
+		pin(this.pendingMessagesContainer);
+		pin(this.todoContainer);
+		pin(this.subagentContainer);
+		pin(this.btwContainer);
+		pin(this.omfgContainer);
+		pin(this.errorBannerContainer);
+		pin(this.modelCycleContainer);
 		this.ui.setNativeScrollbackPinned(pinned);
 	}
 
