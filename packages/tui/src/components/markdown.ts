@@ -9,6 +9,7 @@ import {
 	applyBackgroundToLine,
 	Ellipsis,
 	encodeTextSized,
+	formatHyperlink,
 	getPaddingX,
 	getSegmenter,
 	padding,
@@ -748,18 +749,6 @@ type ListToken = Token & { items: Array<{ tokens?: Token[] }>; ordered: boolean;
 type TableCellToken = { tokens?: Token[] };
 type TableToken = Token & { header: TableCellToken[]; rows: TableCellToken[][]; raw?: string };
 
-function formatHyperlink(text: string, target: string): string {
-	if (!TERMINAL.hyperlinks || !target) {
-		return text;
-	}
-
-	const safeTarget = target.replaceAll("\x1b", "").replaceAll("\x07", "");
-	if (!safeTarget) {
-		return text;
-	}
-
-	return `\x1b]8;;${safeTarget}\x07${text}\x1b]8;;\x07`;
-}
 
 function isAsciiTextSizingPayload(text: string): boolean {
 	for (let i = 0; i < text.length; i++) {

@@ -1,5 +1,5 @@
 import { getOAuthProviders } from "@oh-my-pi/pi-ai/oauth";
-import { Container, getKeybindings, Input, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
+import { Container, formatHyperlink, getKeybindings, Input, Spacer, Text, type TUI } from "@oh-my-pi/pi-tui";
 import { theme } from "../../modes/theme/theme";
 import { openPath } from "../../utils/open";
 import { DynamicBorder } from "./dynamic-border";
@@ -81,15 +81,15 @@ export class LoginDialogComponent extends Container {
 	showAuth(url: string, instructions?: string, launchUrl?: string): void {
 		this.#contentContainer.clear();
 		this.#contentContainer.addChild(new Spacer(1));
-		this.#contentContainer.addChild(new Text(theme.fg("accent", url), 1, 0));
+		this.#contentContainer.addChild(new Text(formatHyperlink(theme.fg("accent", url), url), 1, 0));
 
 		const clickHint = process.platform === "darwin" ? "Cmd+click to open" : "Ctrl+click to open";
-		const hyperlink = `\x1b]8;;${url}\x07${clickHint}\x1b]8;;\x07`;
-		this.#contentContainer.addChild(new Text(theme.fg("dim", hyperlink), 1, 0));
+		this.#contentContainer.addChild(new Text(formatHyperlink(theme.fg("dim", clickHint), url), 1, 0));
 
 		if (launchUrl && launchUrl !== url) {
+			const shortcutText = `Local shortcut (this machine only): ${launchUrl}`;
 			this.#contentContainer.addChild(
-				new Text(theme.fg("dim", `Local shortcut (this machine only): ${launchUrl}`), 1, 0),
+				new Text(formatHyperlink(theme.fg("dim", shortcutText), launchUrl), 1, 0),
 			);
 		}
 

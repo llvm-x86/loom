@@ -1,3 +1,4 @@
+import { TERMINAL } from "./terminal-capabilities";
 import {
 	Ellipsis,
 	type ExtractSegmentsResult,
@@ -173,6 +174,24 @@ export function truncateToWidth(
 		pad ?? false,
 		DEFAULT_TAB_WIDTH,
 	);
+}
+
+/**
+ * Wrap visible text in an OSC 8 hyperlink when the terminal supports it.
+ * Each wrapped fragment must carry the full target URL so click-through works
+ * even when {@link wrapTextWithAnsi} splits the line at column boundaries.
+ */
+export function formatHyperlink(text: string, target: string): string {
+	if (!TERMINAL.hyperlinks || !target) {
+		return text;
+	}
+
+	const safeTarget = target.replaceAll("\x1b", "").replaceAll("\x07", "");
+	if (!safeTarget) {
+		return text;
+	}
+
+	return `\x1b]8;;${safeTarget}\x07${text}\x1b]8;;\x07`;
 }
 
 export function wrapTextWithAnsi(text: string, width: number): string[] {
