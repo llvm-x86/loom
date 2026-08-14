@@ -253,6 +253,8 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { runOuterAnalysis } from "../goals/bilevel/analyst";
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
+import { CompactionLiveReporter } from "./context/compaction/live-reporter";
+import type { CompactionLiveEvent } from "./context/compaction/live-events";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
@@ -675,6 +677,7 @@ export type AgentSessionEvent =
 			reason: "threshold" | "overflow" | "idle" | "incomplete";
 			action: "context-full" | "handoff" | "shake" | "snapcompact";
 	  }
+	| { type: "compaction_preparing"; trigger: "manual" | "auto" }
 	| {
 			type: "auto_compaction_end";
 			action: "context-full" | "handoff" | "shake" | "snapcompact";
@@ -715,6 +718,7 @@ export type AgentSessionEvent =
 			/** The level `auto` resolved to this turn, once classified. */
 			resolved?: Effort;
 	  }
+	| CompactionLiveEvent
 	| { type: "goal_updated"; goal: Goal | null; state?: GoalModeState };
 /** Listener function for agent session events */
 export type AgentSessionEventListener = (event: AgentSessionEvent) => void;
@@ -1969,6 +1973,7 @@ export class AgentSession {
 
 	// Compaction state
 	#compactionAbortController: AbortController | undefined = undefined;
+	#compactionLiveReporter: CompactionLiveReporter | undefined;
 	#autoCompactionAbortController: AbortController | undefined = undefined;
 
 	// Branch summarization state
@@ -11092,6 +11097,40 @@ export class AgentSession {
 	 * @param customInstructions Optional instructions for the compaction summary
 	 * @param options Optional callbacks for completion/error handling
 	 */
+
+	#createCompactionLiveReporter(trigger: "manual" | "auto"): CompactionLiveReporter {
+		const displaced = this.#compactionLiveReporter;
+		if (displaced?.isActive) {
+			displaced.deactivate();
+		}
+		const reporter = new CompactionLiveReporter({
+			trigger,
+			sideStreamFn: this.#sideStreamFn,
+			emit: event => this.#emitSessionEvent(event),
+		});
+		this.#compactionLiveReporter = reporter;
+		return reporter;
+	}
+
+	async #finishCompactionLive(
+		reporter: CompactionLiveReporter | undefined,
+		options: {
+			aborted?: boolean;
+			errorMessage?: string;
+			result?: CompactionResult;
+		},
+	): Promise<void> {
+		if (!reporter?.isActive) return;
+		if (this.#compactionLiveReporter === reporter) {
+			this.#compactionLiveReporter = undefined;
+		}
+		await reporter.end({
+			aborted: options.aborted ?? false,
+			errorMessage: options.errorMessage,
+			result: options.result,
+		});
+	}
+
 	async compact(customInstructions?: string, options?: CompactOptions): Promise<CompactionResult> {
 		if (this.#compactionAbortController) {
 			throw new Error("Compaction already in progress");
@@ -11111,8 +11150,10 @@ export class AgentSession {
 		}
 		const compactionAbortController = new AbortController();
 		this.#compactionAbortController = compactionAbortController;
+		let liveReporter: CompactionLiveReporter | undefined;
 
 		try {
+			await this.#emitSessionEvent({ type: "compaction_preparing", trigger: "manual" });
 			this.#disconnectFromAgent();
 			await this.abort({ goalReason: "internal", preserveCompaction: true });
 			if (!this.model) {
@@ -11161,6 +11202,9 @@ export class AgentSession {
 				}
 				throw new Error("Nothing to compact (session too small)");
 			}
+
+			liveReporter = this.#createCompactionLiveReporter("manual");
+			liveReporter.start({ preparation, phase: "preparing" });
 
 			let hookCompaction: CompactionResult | undefined;
 			let fromExtension = false;
@@ -11233,6 +11277,7 @@ export class AgentSession {
 			// the snapcompact request locally rather than falling back to an LLM call.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (snapcompactReady) {
+				liveReporter.progress({ phase: "snapcompact", detail: "archiving transcript frames" });
 				const attempt = await this.#attemptSnapcompact(preparation, effectiveSettings);
 				if (attempt.blocker) {
 					this.emitNotice("warning", `${attempt.blocker.notice}. No LLM fallback was attempted.`, "compaction");
@@ -11376,13 +11421,21 @@ export class AgentSession {
 				preserveData,
 			};
 			void maybeSyncSessionContext(this.#sessionContextSyncHandle(), "compaction");
+			await this.#finishCompactionLive(liveReporter, { result: compactionResult });
 			options?.onComplete?.(compactionResult);
 			return compactionResult;
 		} catch (error) {
 			const err = error instanceof Error ? error : new Error(String(error));
+			await this.#finishCompactionLive(liveReporter, {
+				aborted: error instanceof CompactionCancelledError || compactionAbortController.signal.aborted,
+				errorMessage: error instanceof CompactionCancelledError ? undefined : err.message,
+			});
 			options?.onError?.(err);
 			throw error;
 		} finally {
+			await this.#finishCompactionLive(liveReporter, {
+				aborted: compactionAbortController.signal.aborted,
+			});
 			if (this.#compactionAbortController === compactionAbortController) {
 				this.#compactionAbortController = undefined;
 			}
@@ -13726,6 +13779,7 @@ export class AgentSession {
 			if (!apiKey) continue;
 
 			try {
+				this.#compactionLiveReporter?.model(candidate, this.thinkingLevel);
 				return await compact(
 					this.#obfuscatePreparationForProvider(preparation),
 					candidate,
@@ -13754,10 +13808,13 @@ export class AgentSession {
 						// subagents auto/manually compacting issued uncapped
 						// summary requests in parallel (chatgpt-codex review on
 						// #3751).
-						completeImpl: async (requestModel, requestContext, requestOptions) => {
-							const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
-							return stream.result();
-						},
+						onProgress: this.#compactionLiveReporter?.onProgress,
+						completeImpl:
+							this.#compactionLiveReporter?.createCompleteImpl() ??
+							(async (requestModel, requestContext, requestOptions) => {
+								const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
+								return stream.result();
+							}),
 					},
 				);
 			} catch (error) {
@@ -14218,6 +14275,7 @@ export class AgentSession {
 		const autoCompactionAbortController = new AbortController();
 		this.#autoCompactionAbortController = autoCompactionAbortController;
 		const autoCompactionSignal = autoCompactionAbortController.signal;
+		let autoLiveReporter: CompactionLiveReporter | undefined;
 
 		try {
 			// Emit start AFTER the controller is installed so isCompacting is already true
@@ -14414,6 +14472,13 @@ export class AgentSession {
 			}
 
 			const compactionPrep = await this.#prepareCompactionFromHooks(preparation, hookCompaction);
+			autoLiveReporter = this.#createCompactionLiveReporter("auto");
+			autoLiveReporter.start({
+				preparation,
+				action,
+				reason,
+				phase: action === "snapcompact" ? "snapcompact" : "preparing",
+			});
 
 			let summary: string;
 			let shortSummary: string | undefined;
@@ -14433,6 +14498,7 @@ export class AgentSession {
 			// local-only contract (#3599): the user explicitly picked it.
 			let snapcompactResult: snapcompact.CompactionResult | undefined;
 			if (action === "snapcompact" && compactionPrep.kind !== "fromHook") {
+				autoLiveReporter.progress({ phase: "snapcompact", detail: "archiving transcript frames" });
 				const attempt = await this.#attemptSnapcompact(preparation, compactionSettings);
 				snapcompactResult = attempt.result;
 				if (attempt.blocker) {
@@ -14490,6 +14556,7 @@ export class AgentSession {
 					let attempt = 0;
 					while (true) {
 						try {
+							this.#compactionLiveReporter?.model(candidate, this.thinkingLevel);
 							compactResult = await compact(
 								this.#obfuscatePreparationForProvider(preparation),
 								candidate,
@@ -14513,6 +14580,13 @@ export class AgentSession {
 									sessionId: this.sessionId,
 									promptCacheKey: this.sessionId,
 									providerSessionState: this.#providerSessionState,
+									onProgress: this.#compactionLiveReporter?.onProgress,
+									completeImpl:
+										this.#compactionLiveReporter?.createCompleteImpl() ??
+										(async (requestModel, requestContext, requestOptions) => {
+											const stream = await this.#sideStreamFn(requestModel, requestContext, requestOptions);
+											return stream.result();
+										}),
 									codexCompaction,
 								},
 							);
@@ -14648,6 +14722,7 @@ export class AgentSession {
 			}
 
 			if (autoCompactionSignal.aborted) {
+				await this.#finishCompactionLive(autoLiveReporter, { aborted: true });
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -14789,6 +14864,7 @@ export class AgentSession {
 				await this.sessionManager.rewriteEntries();
 			}
 
+			await this.#finishCompactionLive(autoLiveReporter, { result });
 			await this.#emitSessionEvent({ type: "auto_compaction_end", action, result, aborted: false, willRetry });
 
 			if (retryFits) {
@@ -14810,6 +14886,7 @@ export class AgentSession {
 			return noProgressDeadEnd ? COMPACTION_CHECK_BLOCK_AUTOMATIC_CONTINUATION : COMPACTION_CHECK_NONE;
 		} catch (error) {
 			if (autoCompactionSignal.aborted) {
+				await this.#finishCompactionLive(autoLiveReporter, { aborted: true });
 				await this.#emitSessionEvent({
 					type: "auto_compaction_end",
 					action,
@@ -14834,6 +14911,9 @@ export class AgentSession {
 							: `Auto-compaction failed: ${errorMessage}`,
 			});
 		} finally {
+			await this.#finishCompactionLive(autoLiveReporter, {
+				aborted: autoCompactionAbortController.signal.aborted,
+			});
 			if (this.#autoCompactionAbortController === autoCompactionAbortController) {
 				this.#autoCompactionAbortController = undefined;
 			}

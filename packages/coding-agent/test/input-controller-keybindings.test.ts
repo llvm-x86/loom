@@ -139,7 +139,6 @@ async function createContext() {
 			terminal: { write: terminalWrite, refreshAppearance },
 		} as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		autoCompactionEscapeHandler: undefined,
 		retryEscapeHandler: undefined,

@@ -2165,6 +2165,25 @@ export const SETTINGS_SCHEMA = {
 
 	"compaction.v2RetainedMessageBudget": { type: "number", default: 64000 },
 
+	"compaction.stallNoticeSeconds": {
+		type: "number",
+		default: 30,
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Compaction Stall Notice",
+			description:
+				"Seconds without compaction progress before showing a still-running notice in the status area. Set to 0 to disable (the stall timer is never armed).",
+			options: [
+				{ value: "0", label: "Off" },
+				{ value: "15", label: "15 seconds" },
+				{ value: "30", label: "30 seconds" },
+				{ value: "60", label: "1 minute" },
+				{ value: "120", label: "2 minutes" },
+			],
+		},
+	},
+
 	// Idle compaction
 	"compaction.idleEnabled": {
 		type: "boolean",
@@ -4329,7 +4348,11 @@ export const SETTINGS_SCHEMA = {
 			description:
 				'How an isolated worktree inherits gitignored build outputs from the parent checkout. Each ecosystem is gated on a marker file in the repo root, so only what the repo actually uses is considered: package.json, Cargo.toml, pyproject.toml/requirements.txt/setup.py/Pipfile, go.mod, Gemfile, composer.json, build.gradle/pom.xml. "readonly" (default) copies only small generated binaries (native addons and generated JS in loom\'s own checkout) so tests can run without sharing mutable stores. "full" additionally symlinks that ecosystem\'s dependency store — node_modules, target, venv/.venv, vendor, .bundle, .gradle — which is opt-in only: an install in a linked worktree mutates the parent. A path already present in the worktree is never replaced, so a committed vendor/ stays real source. "off" leaves the worktree bare apart from anything listed in "Link Paths Into Worktree", which is honoured regardless of this setting.',
 			options: [
-				{ value: "off", label: "Off", description: "No automatic inheritance — only explicitly configured link paths" },
+				{
+					value: "off",
+					label: "Off",
+					description: "No automatic inheritance — only explicitly configured link paths",
+				},
 				{
 					value: "readonly",
 					label: "Read-only",
@@ -5513,6 +5536,48 @@ export function getEnumValues(path: SettingPath): readonly string[] | undefined 
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// Compaction / recap timing resolution (single chokepoints for clamping)
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const COMPACTION_STALL_NOTICE_SECONDS_DEFAULT = 30;
+export const COMPACTION_STALL_NOTICE_SECONDS_MIN = 1;
+export const COMPACTION_STALL_NOTICE_SECONDS_MAX = 3600;
+
+export const COMPACTION_IDLE_TIMEOUT_SECONDS_DEFAULT = 300;
+export const COMPACTION_IDLE_TIMEOUT_SECONDS_MIN = 60;
+export const COMPACTION_IDLE_TIMEOUT_SECONDS_MAX = 3600;
+
+export const RECAP_IDLE_SECONDS_DEFAULT = 240;
+export const RECAP_IDLE_SECONDS_MIN = 1;
+export const RECAP_IDLE_SECONDS_MAX = 3600;
+
+/** 0 disables the stall notice (timer must not be armed). */
+export function resolveCompactionStallNoticeSeconds(raw: unknown): number {
+	if (raw === 0) return 0;
+	const numeric = typeof raw === "number" ? raw : Number(raw);
+	if (!Number.isFinite(numeric)) return COMPACTION_STALL_NOTICE_SECONDS_DEFAULT;
+	if (numeric <= 0) return COMPACTION_STALL_NOTICE_SECONDS_DEFAULT;
+	const floored = Math.floor(numeric);
+	if (floored <= 0) return COMPACTION_STALL_NOTICE_SECONDS_MIN;
+	return Math.min(COMPACTION_STALL_NOTICE_SECONDS_MAX, Math.max(COMPACTION_STALL_NOTICE_SECONDS_MIN, floored));
+}
+
+export function resolveCompactionIdleTimeoutSeconds(raw: unknown): number {
+	const numeric = typeof raw === "number" ? raw : Number(raw);
+	if (!Number.isFinite(numeric)) return COMPACTION_IDLE_TIMEOUT_SECONDS_DEFAULT;
+	return Math.min(
+		COMPACTION_IDLE_TIMEOUT_SECONDS_MAX,
+		Math.max(COMPACTION_IDLE_TIMEOUT_SECONDS_MIN, Math.floor(numeric)),
+	);
+}
+
+export function resolveRecapIdleSeconds(raw: unknown): number {
+	const numeric = typeof raw === "number" ? raw : Number(raw);
+	if (!Number.isFinite(numeric)) return RECAP_IDLE_SECONDS_DEFAULT;
+	return Math.min(RECAP_IDLE_SECONDS_MAX, Math.max(RECAP_IDLE_SECONDS_MIN, Math.floor(numeric)));
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // Derived Types from Schema
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -5547,6 +5612,7 @@ export interface CompactionSettings {
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
 	v2RetainedMessageBudget: number;
+	stallNoticeSeconds: number;
 	idleEnabled: boolean;
 	idleThresholdTokens: number;
 	idleTimeoutSeconds: number;

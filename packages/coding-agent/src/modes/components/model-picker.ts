@@ -41,6 +41,10 @@ export interface ModelPickerOptions {
 	quickRoleOrder?: ReadonlyArray<string>;
 	/** Active quick role, highlighted when the search begins with `@`. */
 	currentQuickRole?: string;
+	/** Status-line hint when browsing models; defaults to the session-only switch copy. */
+	statusHint?: string;
+	/** Footer hint when browsing models; defaults to the alt+p keybinding copy. */
+	footerHint?: string;
 }
 
 /** Fixed chrome rows: top border, status row, footer, bottom border. */
@@ -71,6 +75,8 @@ export class ModelPickerComponent implements Component {
 	#configError: string | undefined;
 	#currentSelector: string | undefined;
 	#currentQuickRoleSelector: string | undefined;
+	#statusHint: string;
+	#footerHint: string;
 	#modelItems: ModelBrowserItem[] = [];
 	#quickRoleItems: ModelBrowserItem[] = [];
 	#quickRoles = new Map<string, ResolvedRoleModel>();
@@ -90,6 +96,8 @@ export class ModelPickerComponent implements Component {
 		this.#scopedModels = scopedModels;
 		this.#currentSelector = options.currentSelector;
 		this.#currentQuickRoleSelector = options.currentQuickRole ? `@${options.currentQuickRole}` : undefined;
+		this.#statusHint = options.statusHint ?? STATUS_HINT;
+		this.#footerHint = options.footerHint ?? FOOTER_HINT;
 		this.#quickRoleItems = this.#buildQuickRoleItems(
 			options.quickRoles ?? [],
 			options.quickRoleOrder ?? options.quickRoles?.map(entry => entry.role) ?? [],
@@ -187,7 +195,7 @@ export class ModelPickerComponent implements Component {
 
 	/** Switch browser content only when a leading `@` changes the search mode. */
 	#syncItemsForQuery(query: string, refresh = false): void {
-		const roleMode = query.startsWith("@");
+		const roleMode = query.startsWith("@") && this.#quickRoleItems.length > 0;
 		const modeChanged = roleMode !== this.#roleMode;
 		if (!modeChanged && !refresh) return;
 
@@ -218,7 +226,7 @@ export class ModelPickerComponent implements Component {
 		const inner = Math.max(1, width - 4);
 		const status = this.#configError
 			? theme.fg("error", ` ${this.#configError}`)
-			: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : STATUS_HINT}`);
+			: theme.fg("muted", ` ${this.#roleMode ? QUICK_ROLE_STATUS_HINT : this.#statusHint}`);
 
 		const out: string[] = [];
 		out.push(topBorder(width, "Switch Model"));
@@ -226,7 +234,7 @@ export class ModelPickerComponent implements Component {
 		for (const line of this.#browser.render(inner)) {
 			out.push(row(line, width));
 		}
-		out.push(row(theme.fg("dim", this.#roleMode ? QUICK_ROLE_FOOTER_HINT : FOOTER_HINT), width));
+		out.push(row(theme.fg("dim", this.#roleMode ? QUICK_ROLE_FOOTER_HINT : this.#footerHint), width));
 		out.push(bottomBorder(width));
 		return out;
 	}

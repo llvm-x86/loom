@@ -1,6 +1,6 @@
 import type { AgentMessage } from "@oh-my-pi/pi-agent-core";
 import type { CompactionOutcome } from "@oh-my-pi/pi-agent-core/compaction";
-import type { AssistantMessage, ImageContent, Message, Usage, UsageReport } from "@oh-my-pi/pi-ai";
+import type { AssistantMessage, ImageContent, Message, Model, Usage, UsageReport } from "@oh-my-pi/pi-ai";
 import type { Component, Container, EditorTheme, Loader, Spacer, Text, TUI } from "@oh-my-pi/pi-tui";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
@@ -91,6 +91,11 @@ export interface InteractiveModeInitOptions {
 }
 
 export type InteractiveSelectorDialogOptions = ExtensionUIDialogOptions & Pick<HookSelectorOptions, "disabledIndices">;
+
+export interface ModelPickResult {
+	readonly model: Model;
+	readonly selector: string;
+}
 
 export interface InteractiveModeContext {
 	// UI access
@@ -191,7 +196,6 @@ export interface InteractiveModeContext {
 	 */
 	lastAssistantUsage: Usage | undefined;
 	loadingAnimation: Loader | undefined;
-	autoCompactionLoader: Loader | undefined;
 	retryLoader: Loader | undefined;
 	unsubscribe?: () => void;
 	onInputCallback?: (input: SubmittedUserInput) => void;
@@ -357,10 +361,7 @@ export interface InteractiveModeContext {
 	handleRenameCommand(title: string): Promise<void>;
 	handleMemoryCommand(text: string): Promise<void>;
 	handleSTTToggle(): Promise<void>;
-	executeCompaction(
-		customInstructionsOrOptions?: string | CompactOptions,
-		isAuto?: boolean,
-	): Promise<CompactionOutcome>;
+	executeCompaction(customInstructionsOrOptions?: string | CompactOptions): Promise<CompactionOutcome>;
 	openInBrowser(urlOrPath: string): void;
 	refreshSlashCommandState(cwd?: string): Promise<void>;
 	/** Reload session skills and derived `/skill:<name>` commands. */
@@ -374,6 +375,12 @@ export interface InteractiveModeContext {
 	showExtensionsDashboard(): void;
 	showAgentsDashboard(): void;
 	showModelSelector(options?: { temporaryOnly?: boolean }): void;
+	/** Awaitable model picker overlay; resolves the chosen model or undefined when dismissed. */
+	pickModel(options?: {
+		statusHint?: string;
+		footerHint?: string;
+		currentSelector?: string;
+	}): Promise<ModelPickResult | undefined>;
 	showEffortSelector(): void;
 	showPluginSelector(mode?: "install" | "uninstall"): void;
 	showUserMessageSelector(): void;

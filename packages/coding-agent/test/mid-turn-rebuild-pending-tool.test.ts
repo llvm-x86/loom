@@ -71,7 +71,6 @@ function createFixture(opts: { isStreaming: boolean }) {
 		clearTransientSessionUi: () => {},
 		ensureLoadingAnimation: vi.fn(),
 		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		setTodos: vi.fn(),
 		showWarning: vi.fn(),

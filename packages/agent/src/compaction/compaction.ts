@@ -339,10 +339,7 @@ export function resolveCompactionThresholdMode(settings: CompactionSettings): Co
 }
 
 function resolveReserveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
-	return Math.max(
-		0,
-		Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)),
-	);
+	return Math.max(0, Math.min(contextWindow - 1, contextWindow - resolveBudgetReserveTokens(contextWindow, settings)));
 }
 
 export function resolveThresholdTokens(contextWindow: number, settings: CompactionSettings): number {
@@ -804,6 +801,15 @@ export interface SummaryOptions {
 		ctx: Context,
 		options: SimpleStreamOptions,
 	) => Promise<AssistantMessage>;
+	/** Optional progress hook for compaction UI surfaces. */
+	onProgress?: (update: {
+		phase: string;
+		messagesDone?: number;
+		messagesTotal?: number;
+		stepsDone?: number;
+		stepsTotal?: number;
+		detail?: string;
+	}) => void;
 }
 
 function localCodexCompaction(options: SummaryOptions | undefined) {
@@ -1390,6 +1396,7 @@ export async function compact(
 		tools: options?.tools,
 		fetch: options?.fetch,
 		completeImpl: options?.completeImpl,
+		onProgress: options?.onProgress,
 	};
 
 	const previousSnapcompactArchive = snapcompact.getPreservedArchive(previousPreserveData);
@@ -1519,6 +1526,27 @@ export async function compact(
 		}
 	}
 
+	const reportProgress = (update: {
+		phase: string;
+		messagesDone?: number;
+		messagesTotal?: number;
+		stepsDone?: number;
+		stepsTotal?: number;
+		detail?: string;
+	}) => {
+		try {
+			summaryOptions.onProgress?.(update);
+		} catch {
+			// Host UI hooks must never abort compaction.
+		}
+	};
+	const llmSteps = usedRemoteCompaction
+		? 1
+		: (messagesToSummarize.length > 0 || previousSummaryForCompaction ? 1 : 0) +
+			(isSplitTurn && turnPrefixMessages.length > 0 ? 1 : 0) +
+			(recentMessages.length > 0 ? 1 : 0);
+	let llmStep = 0;
+
 	// Generate summaries (can be parallel if both needed) and merge into one
 	let summary: string;
 
@@ -1529,11 +1557,26 @@ export async function compact(
 		// redundant LLM round. If a LATER compaction cannot reuse this payload,
 		// prepareCompaction re-expands the original messages and summarizes them
 		// locally then (see remotePreserveReusableByAny).
+		reportProgress({ phase: "remote_compaction", stepsDone: llmSteps, stepsTotal: llmSteps || undefined });
 		const usedTokens = getCompactionV2PreserveData(preserveData)?.usedTokens ?? 0;
 		summary =
 			"Remote compaction preserved provider-native history for this session." +
 			(usedTokens > 0 ? ` Retained ${usedTokens} tokens in the provider replay payload.` : "");
 	} else if (isSplitTurn && turnPrefixMessages.length > 0) {
+		reportProgress({
+			phase: "history_summary",
+			stepsDone: llmStep,
+			stepsTotal: llmSteps,
+			detail: `${messagesToSummarize.length} messages`,
+		});
+		llmStep++;
+		reportProgress({
+			phase: "turn_prefix",
+			stepsDone: llmStep,
+			stepsTotal: llmSteps,
+			detail: `${turnPrefixMessages.length} messages`,
+		});
+		llmStep++;
 		// Generate both summaries in parallel
 		const [historyResult, turnPrefixResult] = await Promise.all([
 			messagesToSummarize.length > 0 || previousSummaryForCompaction
@@ -1553,6 +1596,13 @@ export async function compact(
 		// Merge into single summary
 		summary = `${historyResult}\n\n---\n\n**Turn Context (split turn):**\n\n${turnPrefixResult}`;
 	} else if (messagesToSummarize.length > 0) {
+		reportProgress({
+			phase: "history_summary",
+			stepsDone: llmStep,
+			stepsTotal: llmSteps,
+			detail: `${messagesToSummarize.length} messages`,
+		});
+		llmStep++;
 		// Generate history summary from messages to summarize
 		summary = await generateSummary(
 			messagesToSummarize,
@@ -1572,6 +1622,14 @@ export async function compact(
 		summary = "No prior history.";
 	}
 
+	if (!usedRemoteCompaction && recentMessages.length > 0) {
+		reportProgress({
+			phase: "short_summary",
+			stepsDone: llmStep,
+			stepsTotal: llmSteps,
+			detail: `${recentMessages.length} kept messages`,
+		});
+	}
 	const shortSummary = usedRemoteCompaction
 		? "Remote compaction"
 		: await generateShortSummary(recentMessages, summary, model, reserveTokens, apiKey, signal, {

@@ -1078,7 +1078,7 @@ export class ExtensionUiController {
 		this.ctx.present(errorText);
 	}
 	async #handleInteractiveCompact(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {
-		await this.ctx.executeCompaction(instructionsOrOptions, false);
+		await this.ctx.executeCompaction(instructionsOrOptions);
 	}
 
 	async #compactSession(instructionsOrOptions: string | CompactOptions | undefined): Promise<void> {

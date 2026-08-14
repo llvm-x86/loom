@@ -145,7 +145,6 @@ function createContext(): {
 			addStartListener: vi.fn(),
 		} as unknown as InteractiveModeContext["ui"],
 		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		autoCompactionEscapeHandler: undefined,
 		retryEscapeHandler: undefined,

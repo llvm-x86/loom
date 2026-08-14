@@ -39,7 +39,7 @@ import {
 	setTheme,
 	theme,
 } from "../../modes/theme/theme";
-import type { InteractiveModeContext } from "../../modes/types";
+import type { InteractiveModeContext, ModelPickResult } from "../../modes/types";
 import type { ResetCreditAccountStatus, ResetCreditRedeemOutcome } from "../../session/auth-storage";
 import type { SessionInfo } from "../../session/session-listing";
 import { SessionManager } from "../../session/session-manager";
@@ -753,6 +753,55 @@ export class SelectorController {
 		});
 		this.ctx.ui.setFocus(picker);
 		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * Awaitable model picker overlay: resolves `{ model, selector }` on pick or
+	 * `undefined` on dismiss. Applies nothing — the caller owns the effect.
+	 * No `@` quick roles: a role is not a concrete `provider/id`.
+	 */
+	pickModel(options?: {
+		statusHint?: string;
+		footerHint?: string;
+		currentSelector?: string;
+	}): Promise<ModelPickResult | undefined> {
+		const currentContextTokens = this.ctx.session.getContextUsage()?.tokens ?? 0;
+		return new Promise(resolve => {
+			let overlayHandle: OverlayHandle | undefined;
+			let closed = false;
+			const done = (result?: ModelPickResult) => {
+				if (closed) return;
+				closed = true;
+				overlayHandle?.hide();
+				this.focusActiveEditorArea();
+				this.ctx.ui.requestRender();
+				resolve(result);
+			};
+			const picker = new ModelPickerComponent(
+				this.ctx.ui,
+				this.ctx.settings,
+				this.ctx.session.modelRegistry,
+				this.ctx.session.scopedModels,
+				{
+					onPick: (model, selector) => done({ model, selector }),
+					onCancel: () => done(undefined),
+				},
+				{
+					currentContextTokens,
+					currentSelector: options?.currentSelector,
+					statusHint: options?.statusHint,
+					footerHint: options?.footerHint,
+				},
+			);
+			overlayHandle = this.ctx.ui.showOverlay(picker, {
+				anchor: "bottom-center",
+				width: "100%",
+				maxHeight: "100%",
+				margin: 0,
+			});
+			this.ctx.ui.setFocus(picker);
+			this.ctx.ui.requestRender();
+		});
 	}
 
 	/**

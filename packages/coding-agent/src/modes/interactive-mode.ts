@@ -57,7 +57,6 @@ import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
 import type { ResolvedModelRoleValue } from "../config/model-resolver";
-import { getKnownRoleIds, getRoleInfo } from "../config/model-roles";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -204,6 +203,7 @@ import type {
 	InteractiveModeContext,
 	InteractiveModeInitOptions,
 	InteractiveSelectorDialogOptions,
+	ModelPickResult,
 	SubmittedUserInput,
 	TodoItem,
 	TodoPhase,
@@ -499,7 +499,6 @@ export class InteractiveMode implements InteractiveModeContext {
 	streamingMessage: AssistantMessage | undefined = undefined;
 	lastAssistantUsage: Usage | undefined = undefined;
 	loadingAnimation: Loader | undefined = undefined;
-	autoCompactionLoader: Loader | undefined = undefined;
 	retryLoader: Loader | undefined = undefined;
 	#pendingWorkingMessage: string | undefined;
 	#workingMessageAccentCacheKey?: WorkingMessageAccentCacheKey;
@@ -604,10 +603,6 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (this.loadingAnimation) {
 			this.loadingAnimation.stop();
 			this.loadingAnimation = undefined;
-		}
-		if (this.autoCompactionLoader) {
-			this.autoCompactionLoader.stop();
-			this.autoCompactionLoader = undefined;
 		}
 		if (this.retryLoader) {
 			this.retryLoader.stop();
@@ -3465,31 +3460,12 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	/**
-	 * Configured role models offered as a level's model, newest-configured last. Built from the
-	 * *raw* role selectors rather than resolved ids so a role's thinking suffix
-	 * (`anthropic/claude-opus-5:xhigh`) survives being copied onto another role.
-	 */
-	#goalLevelModelChoices(): { label: string; description: string; selector: string; entry: ResolvedRoleModel }[] {
-		const cycle = this.session.getRoleModelCycle(getKnownRoleIds(this.session.settings));
-		const seen = new Set<string>();
-		const choices: { label: string; description: string; selector: string; entry: ResolvedRoleModel }[] = [];
-		for (const entry of cycle?.models ?? []) {
-			const selector = this.session.settings.getModelRole(entry.role) ?? `${entry.model.provider}/${entry.model.id}`;
-			if (seen.has(selector)) continue;
-			seen.add(selector);
-			choices.push({
-				label: `${getRoleInfo(entry.role, this.session.settings).name} · ${entry.model.id}`,
-				description: selector,
-				selector,
-				entry,
-			});
-		}
-		return choices;
-	}
-
-	/**
 	 * Guide the operator through the goal's search shape before the objective is submitted:
 	 * standard single loop vs. the bilevel outer loop, and which model runs each level.
+	 *
+	 * Bilevel model picks use a keep/auto default plus a searchable catalog (`pickModel`). Escaping
+	 * the catalog re-prompts that level's keep/search step without writing settings; escaping a
+	 * keep/search step aborts goal creation.
 	 *
 	 * The mode answer is written to `goal.bilevel.enabled`, so it is both the per-goal decision and
 	 * the remembered default for the next `/goal`. The inner-loop pick is session-only (it is the
@@ -3506,6 +3482,7 @@ export class InteractiveMode implements InteractiveModeContext {
 			Number.isInteger(rawBudget) && (rawBudget as number) > 0 ? (rawBudget as number) : DEFAULT_INNER_BUDGET;
 		const standard = "Standard goal loop";
 		const bilevel = "Bilevel loop (outer loop tunes the search)";
+		const searchModels = "Search models…";
 		const mode = await this.showHookSelector(
 			"Goal search mode",
 			[
@@ -3524,49 +3501,80 @@ export class InteractiveMode implements InteractiveModeContext {
 			return true;
 		}
 
-		const choices = this.#goalLevelModelChoices();
 		const current = this.session.model;
 		const keepInner = `Keep current · ${current ? current.id : "session model"}`;
-		const inner = await this.showHookSelector(
-			"Inner loop model — does the work",
-			[
-				{ label: keepInner, description: "Leave the session model alone." },
-				...choices.filter(choice => !current || choice.entry.model.id !== current.id),
-			],
-			{ initialIndex: 0 },
-		);
-		if (!inner) return false;
-		const innerChoice = choices.find(choice => choice.label === inner);
+		let innerPick: ModelPickResult | undefined;
+		while (true) {
+			const inner = await this.showHookSelector(
+				"Inner loop model — does the work",
+				[
+					{ label: keepInner, description: "Leave the session model alone." },
+					{ label: searchModels, description: "Search the full model catalog (session-only switch)." },
+				],
+				{ initialIndex: 0 },
+			);
+			if (!inner) return false;
+			if (inner === keepInner) break;
+			if (inner === searchModels) {
+				const pick = await this.pickModel({
+					statusHint: "Session-only switch for this goal's inner loop",
+					footerHint: "↑/↓ models · Enter apply for this session · type to search · Esc back",
+					currentSelector: current ? `${current.provider}/${current.id}` : undefined,
+				});
+				if (!pick) continue;
+				innerPick = pick;
+				break;
+			}
+		}
 
 		const configuredOuter = this.session.settings.getModelRole("goalOuter");
 		const keepOuter = configuredOuter
 			? `Keep current · ${configuredOuter}`
 			: "Auto · reuse the Architect/Thinking role";
-		const outer = await this.showHookSelector(
-			"Outer loop model — reviews the search",
-			[
-				{
-					label: keepOuter,
-					description: configuredOuter
-						? "Keep the model already assigned to the Goal Outer Loop role."
-						: "No dedicated model: fall back to the plan, then slow, then session model.",
-				},
-				...choices,
-			],
-			{ initialIndex: 0 },
-		);
-		if (!outer) return false;
-		const outerChoice = choices.find(choice => choice.label === outer);
+		let outerSearchedSelector: string | undefined;
+		while (true) {
+			const outer = await this.showHookSelector(
+				"Outer loop model — reviews the search",
+				[
+					{
+						label: keepOuter,
+						description: configuredOuter
+							? "Keep the model already assigned to the Goal Outer Loop role."
+							: "No dedicated model: fall back to the plan, then slow, then session model.",
+					},
+					{
+						label: searchModels,
+						description: "Search the full model catalog (persists to the Goal Outer Loop role).",
+					},
+				],
+				{ initialIndex: 0 },
+			);
+			if (!outer) return false;
+			if (outer === keepOuter) break;
+			if (outer === searchModels) {
+				const pick = await this.pickModel({
+					statusHint: "Persists to the Goal Outer Loop role",
+					footerHint: "↑/↓ models · Enter assign Goal Outer Loop role · type to search · Esc back",
+					currentSelector: configuredOuter,
+				});
+				if (!pick) continue;
+				outerSearchedSelector = pick.selector;
+				break;
+			}
+		}
 
-		// Nothing is written until both picks are in: escaping either model prompt has to leave
-		// the previous search shape untouched, the same cancellation contract as the objective
-		// editor that precedes this flow.
+		// Nothing takes effect until both picks are in: escaping either model prompt has to leave
+		// the previous search shape, the session model, and the role untouched — the same
+		// cancellation contract as the objective editor that precedes this flow.
+		if (innerPick) {
+			const level = this.session.resolveTemporaryModelThinkingLevel(innerPick.model);
+			await this.session.setModelTemporary(innerPick.model, level);
+		}
 		this.session.settings.set("goal.bilevel.enabled", true);
-		if (innerChoice) await this.session.applyRoleModel(innerChoice.entry);
-		if (outerChoice) this.session.settings.setModelRole("goalOuter", outerChoice.selector);
+		if (outerSearchedSelector) this.session.settings.setModelRole("goalOuter", outerSearchedSelector);
 
-		const outerLabel = outerChoice?.selector ?? configuredOuter ?? "auto (plan/slow)";
-		const innerLabel = innerChoice?.entry.model.id ?? current?.id ?? "session model";
+		const outerLabel = outerSearchedSelector ?? configuredOuter ?? "auto (plan/slow)";
+		const innerLabel = innerPick?.model.id ?? current?.id ?? "session model";
 		this.showStatus(`Goal: bilevel every ${innerBudget} iterations. Inner ${innerLabel} · outer ${outerLabel}.`);
 		return true;
 	}
@@ -4523,11 +4531,8 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#commandController.handleShakeCommand(mode);
 	}
 
-	executeCompaction(
-		customInstructionsOrOptions?: string | CompactOptions,
-		isAuto?: boolean,
-	): Promise<CompactionOutcome> {
-		return this.#commandController.executeCompaction(customInstructionsOrOptions, isAuto);
+	executeCompaction(customInstructionsOrOptions?: string | CompactOptions): Promise<CompactionOutcome> {
+		return this.#commandController.executeCompaction(customInstructionsOrOptions);
 	}
 
 	openInBrowser(urlOrPath: string): void {
@@ -4557,6 +4562,14 @@ export class InteractiveMode implements InteractiveModeContext {
 
 	showModelSelector(options?: { temporaryOnly?: boolean }): void {
 		this.#selectorController.showModelSelector(options);
+	}
+
+	pickModel(options?: {
+		statusHint?: string;
+		footerHint?: string;
+		currentSelector?: string;
+	}): Promise<ModelPickResult | undefined> {
+		return this.#selectorController.pickModel(options);
 	}
 
 	showEffortSelector(): void {

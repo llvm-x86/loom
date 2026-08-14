@@ -511,28 +511,23 @@ describe("InteractiveMode goal mode integration", () => {
 	});
 
 	it("persists the outer-loop model role when the bilevel loop is chosen", async () => {
-		// No provider is authed in the harness, so the registry offers no models of its own. Stand in
-		// a resolvable `plan` role whose selector carries a thinking suffix - the outer role must be
-		// stored verbatim, not collapsed to `provider/id`.
-		harness.settings.setModelRole("plan", `${shared.model.provider}/${shared.model.id}:high`);
-		vi.spyOn(harness.session, "getRoleModelCycle").mockReturnValue({
-			models: [{ role: "plan", model: shared.model, explicitThinkingLevel: false }],
-			currentIndex: 0,
-		});
+		const outerSelector = `${shared.model.provider}/${shared.model.id}:high`;
 		const titles: string[] = [];
+		vi.spyOn(harness.mode, "pickModel").mockResolvedValue({ model: shared.model, selector: outerSelector });
 		vi.spyOn(harness.mode, "showHookSelector").mockImplementation(async (title, options) => {
 			titles.push(title);
 			const labels = options.map(option => (typeof option === "string" ? option : option.label));
 			if (title.startsWith("Goal search mode")) return labels[1];
 			if (title.startsWith("Inner loop model")) return labels[0];
-			return labels.at(-1);
+			if (title.startsWith("Outer loop model")) return "Search models…";
+			return undefined;
 		});
 
 		await harness.mode.handleGoalModeCommand("Ship the release");
 
 		expect(titles.map(title => title.split(" ")[0])).toEqual(["Goal", "Inner", "Outer"]);
 		expect(harness.settings.get("goal.bilevel.enabled")).toBe(true);
-		expect(harness.settings.getModelRole("goalOuter")).toBe(`${shared.model.provider}/${shared.model.id}:high`);
+		expect(harness.settings.getModelRole("goalOuter")).toBe(outerSelector);
 		expect(harness.session.getGoalModeState()?.goal.objective).toBe("Ship the release");
 	});
 

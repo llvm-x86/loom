@@ -103,7 +103,6 @@ function createFixture(streamingMessage?: AssistantMessage) {
 		ensureLoadingAnimation: vi.fn(),
 		statusContainer,
 		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		editor: {},
 		streamingComponent: streamingMessage ? streamingComponent : undefined,
@@ -268,10 +267,13 @@ describe("EventController thinking visibility", () => {
 });
 
 describe("EventController working loader reconciliation", () => {
+	// Status clearing for auto maintenance now happens on `compaction_preparing`
+	// (see `#handleCompactionPreparing`), not on `auto_compaction_end`; the end
+	// handler only reconciles a live surface. What must still hold here is the
+	// working-loader handoff: a benign skip has to restore "Working…" for a
+	// session that is still streaming, or the UI looks hung.
 	it("restores the working loader after compaction clears status while the focused session streams", async () => {
 		const { controller, ctx } = createFixture();
-		const loader = { stop: vi.fn() } as unknown as InteractiveModeContext["autoCompactionLoader"];
-		ctx.autoCompactionLoader = loader;
 		(ctx.viewSession as unknown as { isStreaming: boolean }).isStreaming = true;
 
 		await controller.handleEvent({
@@ -283,8 +285,6 @@ describe("EventController working loader reconciliation", () => {
 			skipped: true,
 		} as Extract<AgentSessionEvent, { type: "auto_compaction_end" }>);
 
-		expect(loader?.stop).toHaveBeenCalledTimes(1);
-		expect(ctx.statusContainer.disposeChildren).toHaveBeenCalledTimes(1);
 		expect(ctx.flushCompactionQueue).toHaveBeenCalledWith({ willRetry: false });
 		expect(ctx.ensureLoadingAnimation).toHaveBeenCalledTimes(1);
 	});

@@ -6,6 +6,7 @@ import { logger, prompt } from "@oh-my-pi/pi-utils";
 import { INTENT_FIELD } from "@oh-my-pi/pi-wire";
 import { extractTextContent } from "../../commit/utils";
 import { settings } from "../../config/settings";
+import { resolveCompactionIdleTimeoutSeconds, resolveRecapIdleSeconds } from "../../config/settings-schema";
 import { getFileSnapshotStore } from "../../edit/file-snapshot-store";
 import { AssistantMessageComponent } from "../../modes/components/assistant-message";
 import { detectCacheInvalidation } from "../../modes/components/cache-invalidation-marker";
@@ -37,6 +38,7 @@ import {
 	splitAssistantMessageToolTimeline,
 } from "../utils/transcript-render-helpers";
 import { isWarpCliAgentProtocolActive } from "../warp-events";
+import { CompactionController } from "./compaction-controller";
 import { StreamingRevealController } from "./streaming-reveal";
 import { streamingStringKeysForTool, ToolArgsRevealController } from "./tool-args-reveal";
 
@@ -53,9 +55,6 @@ const IRC_MESSAGE_VISIBLE_TTL_MS = 10_000;
  * oldest live-region card retires as soon as a new one would exceed the cap.
  */
 const MAX_LIVE_IRC_CARDS = 4;
-const IDLE_RECAP_MIN_SECONDS = 1;
-const IDLE_RECAP_MAX_SECONDS = 3600;
-
 const RAW_PARTIAL_JSON_RENDERERS: Record<string, true> = { bash: true, edit: true, apply_patch: true };
 
 function exposesRawPartialJson(toolName: string, rawInput: boolean, tool: unknown): boolean {
@@ -115,6 +114,7 @@ export class EventController {
 	// rules into this block while it is still the (live-region) transcript tail.
 	#lastTtsrNotification: TtsrNotificationComponent | undefined = undefined;
 	#streamingReveal: StreamingRevealController;
+	#compactionController: CompactionController;
 	#toolArgsReveal: ToolArgsRevealController;
 	#prevHideThinking = false;
 	#handlers: AgentSessionEventHandlers;
@@ -136,6 +136,7 @@ export class EventController {
 					})
 				: null,
 		);
+		this.#compactionController = new CompactionController(this.ctx);
 		this.#streamingReveal = new StreamingRevealController({
 			getSmoothStreaming: () => this.ctx.settings.get("display.smoothStreaming"),
 			getHideThinkingBlock: () => this.ctx.effectiveHideThinkingBlock,
@@ -157,6 +158,12 @@ export class EventController {
 			tool_execution_start: e => this.#handleToolExecutionStart(e),
 			tool_execution_update: e => this.#handleToolExecutionUpdate(e),
 			tool_execution_end: e => this.#handleToolExecutionEnd(e),
+			compaction_live_start: async e => this.#compactionController.handleStart(e),
+			compaction_live_progress: async e => this.#compactionController.handleProgress(e),
+			compaction_live_model: async e => this.#compactionController.handleModel(e),
+			compaction_live_update: async e => this.#compactionController.handleUpdate(e),
+			compaction_live_end: async e => this.#compactionController.handleEnd(e),
+			compaction_preparing: e => this.#handleCompactionPreparing(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),
 			auto_retry_start: e => this.#handleAutoRetryStart(e),
@@ -198,16 +205,17 @@ export class EventController {
 	}
 
 	dispose(): void {
-		this.#streamingReveal.stop();
-		this.#toolArgsReveal.stop();
-		this.#cancelIdleCompaction();
-		this.#cancelIdleRecap();
-		this.#setTerminalProgress(false);
 		for (const timer of this.#ircExpiryTimers.values()) {
 			clearTimeout(timer);
 		}
 		this.#ircExpiryTimers.clear();
 		this.#liveIrcCards.clear();
+		this.#compactionController.dispose();
+		this.#streamingReveal.stop();
+		this.#toolArgsReveal.stop();
+		this.#cancelIdleCompaction();
+		this.#cancelIdleRecap();
+		this.#setTerminalProgress(false);
 	}
 
 	#resetReadGroup(): void {
@@ -1218,7 +1226,7 @@ export class EventController {
 	 */
 	#ensureWorkingLoaderWhileStreaming(): void {
 		if (!this.ctx.viewSession.isStreaming) return;
-		if (this.ctx.autoCompactionLoader || this.ctx.retryLoader) return;
+		if (this.ctx.retryLoader) return;
 		this.ctx.ensureLoadingAnimation();
 	}
 
@@ -1241,42 +1249,27 @@ export class EventController {
 		this.#setTerminalProgress(true);
 		this.#stopWorkingLoader();
 		this.ctx.statusContainer.disposeChildren();
-		const reasonText =
-			event.reason === "overflow"
-				? "Context overflow detected, "
-				: event.reason === "incomplete"
-					? "Response incomplete, "
-					: event.reason === "idle"
-						? "Idle "
-						: "";
-		const actionLabel =
-			event.action === "handoff"
-				? "Auto-handoff"
-				: event.action === "shake"
-					? "Auto-shake"
-					: event.action === "snapcompact"
-						? "Auto-snapcompact"
-						: "Auto context-full maintenance";
-		this.ctx.autoCompactionLoader = new Loader(
-			this.ctx.ui,
-			spinner => theme.fg("accent", spinner),
-			text => theme.fg("muted", text),
-			`${reasonText}${actionLabel}…${this.#maintenanceEscHint()}`,
-			getSymbolTheme().spinnerFrames,
-		);
-		this.ctx.statusContainer.addChild(this.ctx.autoCompactionLoader);
+		this.#compactionController.handleAutoCompactionStart(event);
+		this.ctx.ui.requestRender();
+	}
+
+	async #handleCompactionPreparing(
+		event: Extract<AgentSessionEvent, { type: "compaction_preparing" }>,
+	): Promise<void> {
+		this.#cancelIdleCompaction();
+		this.#cancelIdleRecap();
+		this.#setTerminalProgress(true);
+		this.#stopWorkingLoader();
+		this.ctx.statusContainer.disposeChildren();
+		this.#compactionController.handlePreparingStart(event.trigger);
 		this.ctx.ui.requestRender();
 	}
 
 	async #handleAutoCompactionEnd(event: Extract<AgentSessionEvent, { type: "auto_compaction_end" }>): Promise<void> {
+		this.#compactionController.reconcileAutoCompactionEnd();
 		this.#cancelIdleCompaction();
 		this.#cancelIdleRecap();
 		this.#setTerminalProgress(false);
-		if (this.ctx.autoCompactionLoader) {
-			this.ctx.autoCompactionLoader.stop();
-			this.ctx.autoCompactionLoader = undefined;
-			this.ctx.statusContainer.disposeChildren();
-		}
 		const isHandoffAction = event.action === "handoff";
 		const isShakeAction = event.action === "shake";
 		const isSnapcompactAction = event.action === "snapcompact";
@@ -1476,7 +1469,7 @@ export class EventController {
 		if (threshold <= 0) return;
 		if (this.#currentContextTokens() < threshold) return;
 
-		const timeoutMs = Math.max(60, Math.min(3600, idleSettings.idleTimeoutSeconds)) * 1000;
+		const timeoutMs = resolveCompactionIdleTimeoutSeconds(idleSettings.idleTimeoutSeconds) * 1000;
 		this.#idleCompactionTimer = setTimeout(() => {
 			this.#idleCompactionTimer = undefined;
 			// Re-check conditions before firing. Pruning may have run between arming
@@ -1498,8 +1491,7 @@ export class EventController {
 		if (!recapSettings.enabled) return;
 		if (this.ctx.editor.getText().trim()) return;
 
-		const timeoutMs =
-			Math.max(IDLE_RECAP_MIN_SECONDS, Math.min(IDLE_RECAP_MAX_SECONDS, recapSettings.idleSeconds)) * 1000;
+		const timeoutMs = resolveRecapIdleSeconds(recapSettings.idleSeconds) * 1000;
 		this.#idleRecapTimer = setTimeout(() => {
 			this.#idleRecapTimer = undefined;
 			void this.#runIdleRecap();

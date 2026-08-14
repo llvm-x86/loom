@@ -58,7 +58,6 @@ function createContext(options: { terminalProgress?: boolean } = {}) {
 		setWorkingMessage: vi.fn(),
 		clearPinnedError: vi.fn(),
 		loadingAnimation: undefined,
-		autoCompactionLoader: undefined,
 		retryLoader: undefined,
 		streamingComponent: undefined,
 		streamingMessage: undefined,

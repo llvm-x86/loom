@@ -1201,9 +1201,9 @@ export class CommandController {
 		// bias the summary toward the plan boilerplate (issue #4359). Ride it
 		// through as a CompactOptions field instead.
 		if (internalGuidance) {
-			return this.executeCompaction({ internalGuidance, ...(mode ? { mode } : {}) }, false, beforeFlush, mode);
+			return this.executeCompaction({ internalGuidance, ...(mode ? { mode } : {}) }, beforeFlush, mode);
 		}
-		return this.executeCompaction(customInstructions, false, beforeFlush, mode);
+		return this.executeCompaction(customInstructions, beforeFlush, mode);
 	}
 
 	/**
@@ -1232,7 +1232,6 @@ export class CommandController {
 
 	async executeCompaction(
 		customInstructionsOrOptions?: string | CompactOptions,
-		isAuto = false,
 		beforeFlush?: (outcome: CompactionOutcome) => void | Promise<void>,
 		mode?: CompactMode,
 	): Promise<CompactionOutcome> {
@@ -1240,18 +1239,6 @@ export class CommandController {
 			this.ctx.loadingAnimation.stop();
 			this.ctx.loadingAnimation = undefined;
 		}
-		this.ctx.statusContainer.disposeChildren();
-
-		const label = isAuto ? "Auto-compacting context... (esc to cancel)" : "Compacting context... (esc to cancel)";
-		const compactingLoader = new Loader(
-			this.ctx.ui,
-			spinner => theme.fg("accent", spinner),
-			text => theme.fg("muted", text),
-			label,
-			getSymbolTheme().spinnerFrames,
-		);
-		this.ctx.statusContainer.addChild(compactingLoader);
-		this.ctx.ui.requestRender();
 
 		let outcome: CompactionOutcome = "ok";
 		try {
@@ -1269,7 +1256,6 @@ export class CommandController {
 					: undefined;
 			await this.ctx.session.compact(instructions, options);
 
-			compactingLoader.stop();
 			this.ctx.statusContainer.disposeChildren();
 			this.ctx.rebuildChatFromMessages();
 
@@ -1293,7 +1279,6 @@ export class CommandController {
 				this.ctx.showError(`Compaction failed: ${message}`);
 			}
 		} finally {
-			compactingLoader.stop();
 			this.ctx.statusContainer.disposeChildren();
 		}
 		// Run the caller's pre-flush hook (e.g. the plan-approval model transition)
