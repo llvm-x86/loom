@@ -48,6 +48,24 @@ describe("compaction model routing", () => {
 		return model;
 	}
 
+	function bundledKimiK3(): Model {
+		const model = getBundledModel("kimi-code", "k3");
+		if (!model) throw new Error("expected bundled kimi-code/k3 model");
+		return model;
+	}
+
+	function bundledKimiK3_256k(): Model {
+		const model = getBundledModel("kimi-code", "k3-256k");
+		if (!model) throw new Error("expected bundled kimi-code/k3-256k model");
+		return model;
+	}
+
+	function bundledCursorComposer(): Model {
+		const model = getBundledModel("cursor", "composer-1");
+		if (!model) throw new Error("expected bundled cursor/composer-1 model");
+		return model;
+	}
+
 	async function firstCompactionCandidateProvider(
 		modelRegistry: ModelRegistry,
 		options: { roleModel?: Model } = {},
@@ -214,5 +232,388 @@ describe("compaction model routing", () => {
 		// candidate is tried and completes the compaction.
 		expect(candidateProviders.length).toBeGreaterThan(1);
 		expect(candidateProviders[0]).toBe("openai");
+	});
+
+	/**
+	 * `kimi-code/k3` declares `compactionModel: "k3-256k"`: the 262144-token
+	 * sibling costs half the quota of the 1048576-token `k3`. When `k3` is the
+	 * active chat model, compaction must try the cheap sibling first and only
+	 * spend the full-price `k3` when the input actually overflows 256k.
+	 */
+	it("routes k3 compaction through the cheaper k3-256k sibling first", async () => {
+		const modelRegistry = await makeRegistry(authStorage => {
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-k3-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledKimiK3(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds.length).toBeGreaterThan(0);
+		expect(candidateIds[0]).toBe("k3-256k");
+	});
+
+	it("falls back from k3-256k to k3 when the input overflows the 256k window", async () => {
+		const modelRegistry = await makeRegistry(authStorage => {
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-k3-overflow-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			if (candidate.id === "k3-256k") {
+				throw new Error(
+					"This model's maximum context length is 262144 tokens, but the request exceeds the context window.",
+				);
+			}
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledKimiK3(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds).toEqual(["k3-256k", "k3"]);
+	});
+
+	it("uses k3-256k directly (no redirection needed) when it is already the active model", async () => {
+		const modelRegistry = await makeRegistry(authStorage => {
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
+		});
+
+		const candidateProviders: string[] = [];
+		const dir = TempDir.createSync("@pi-compaction-routing-k3-256k-active-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			candidateProviders.push(candidate.provider);
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledKimiK3_256k(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds[0]).toBe("k3-256k");
+		expect(candidateProviders[0]).toBe("kimi-code");
+	});
+
+	/**
+	 * Kimi compaction runs on substantially cheaper quota than routing a
+	 * summary through whatever premium model is active for the turn. Unless
+	 * the active model is itself a kimi-code model (or an explicit
+	 * compactionModel override applies), compaction must default to the
+	 * cheap kimi-code/k3-256k candidate ahead of the active model -- e.g. a
+	 * cursor model -- even though cursor declares no compactionModel and the
+	 * active-model candidate would otherwise be tried first.
+	 */
+	it("prefers kimi-code k3-256k over the active cursor model by default", async () => {
+		const modelRegistry = await makeRegistry(authStorage => {
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
+			authStorage.setRuntimeApiKey("cursor", "test-cursor-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-kimi-over-cursor-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		const candidateProviders: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			candidateProviders.push(candidate.provider);
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledCursorComposer(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds[0]).toBe("k3-256k");
+		expect(candidateProviders[0]).toBe("kimi-code");
+		expect(candidateIds).not.toContain("composer-1");
+	});
+
+	it("falls back to k3 before the active cursor model when k3-256k overflows", async () => {
+		const modelRegistry = await makeRegistry(authStorage => {
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
+			authStorage.setRuntimeApiKey("cursor", "test-cursor-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-kimi-overflow-cursor-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			if (candidate.id === "k3-256k") {
+				throw new Error(
+					"This model's maximum context length is 262144 tokens, but the request exceeds the context window.",
+				);
+			}
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledCursorComposer(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds).toEqual(["k3-256k", "k3"]);
+	});
+
+	it("falls back to the active cursor model when kimi-code isn't authenticated", async () => {
+		const modelRegistry = await makeRegistry(authStorage => {
+			authStorage.setRuntimeApiKey("cursor", "test-cursor-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-cursor-no-kimi-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledCursorComposer(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds[0]).toBe("composer-1");
 	});
 });

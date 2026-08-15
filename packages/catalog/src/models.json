@@ -36268,6 +36268,7 @@
 			},
 			"contextWindow": 1048576,
 			"maxTokens": 32000,
+			"compactionModel": "k3-256k",
 			"thinking": {
 				"mode": "effort",
 				"efforts": [

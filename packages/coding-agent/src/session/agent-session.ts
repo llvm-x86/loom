@@ -13541,6 +13541,21 @@ export class AgentSession {
 				exemptFromDefer: true,
 			});
 		}
+		// Default compaction summarizer preference: unless the active chat model
+		// already IS a kimi-code model (or an explicit compactionModel override
+		// resolved above), route summarization through Kimi's k3-256k first and
+		// its wide k3 sibling second — before ever falling back to whatever
+		// premium model (e.g. cursor) happens to be active for the turn. Kimi
+		// compaction runs on substantially cheaper quota than routing a summary
+		// through an unrelated premium provider just because it's the chat model.
+		if (!preferredModel || preferredModel.provider !== "kimi-code") {
+			for (const kimiId of ["k3-256k", "k3"]) {
+				addCandidate(
+					availableModels.find(model => model.provider === "kimi-code" && model.id === kimiId),
+					{ exemptFromDefer: true },
+				);
+			}
+		}
 		addCandidate(preferredModel ?? undefined);
 		for (const role of MODEL_ROLE_IDS) {
 			addCandidate(this.#resolveRoleModelFull(role, availableModels, preferredModel ?? undefined).model);
