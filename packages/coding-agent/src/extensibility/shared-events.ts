@@ -235,6 +235,8 @@ export interface AutoCompactionEndEvent {
 	errorMessage?: string;
 	/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
 	skipped?: boolean;
+	/** Disk path the handoff document was saved to, when `compaction.handoffSaveToDisk` is on. */
+	handoffSavedPath?: string;
 }
 
 /** Fired when auto-retry starts */

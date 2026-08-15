@@ -1331,7 +1331,11 @@ export class EventController {
 			this.ctx.statusLine.invalidate();
 			await this.ctx.reloadTodos();
 			this.ctx.ui.requestRender(true, { clearScrollback: true });
-			this.ctx.showStatus("Auto-handoff completed");
+			this.ctx.showStatus(
+				event.handoffSavedPath
+					? `Auto-handoff completed. Handoff document saved to: ${event.handoffSavedPath}`
+					: "Auto-handoff completed",
+			);
 		} else if (event.skipped) {
 			// Benign skip: no model selected, no candidate models available, or nothing
 			// to compact yet. Not a failure — suppress the warning.

@@ -253,8 +253,6 @@ import { expandSlashCommand, type FileSlashCommand } from "../extensibility/slas
 import { runOuterAnalysis } from "../goals/bilevel/analyst";
 import { GoalRuntime } from "../goals/runtime";
 import type { Goal, GoalModeState } from "../goals/state";
-import { CompactionLiveReporter } from "./context/compaction/live-reporter";
-import type { CompactionLiveEvent } from "./context/compaction/live-events";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
@@ -374,6 +372,8 @@ import {
 	shouldPromptCodexAutoRedeem,
 } from "./codex-auto-reset";
 import { findCompactMode } from "./compact-modes";
+import type { CompactionLiveEvent } from "./context/compaction/live-events";
+import { CompactionLiveReporter } from "./context/compaction/live-reporter";
 import {
 	collectPendingToolCalls,
 	createInterruptedTurnAbortMessage,
@@ -687,6 +687,8 @@ export type AgentSessionEvent =
 			errorMessage?: string;
 			/** True when compaction was skipped for a benign reason (no model, no candidates, nothing to compact). */
 			skipped?: boolean;
+			/** Disk path the handoff document was saved to, when `compaction.handoffSaveToDisk` is on. */
+			handoffSavedPath?: string;
 	  }
 	| {
 			type: "auto_retry_start";
@@ -6696,6 +6698,7 @@ export class AgentSession {
 				willRetry: event.willRetry,
 				errorMessage: event.errorMessage,
 				skipped: event.skipped,
+				handoffSavedPath: event.handoffSavedPath,
 			});
 		} else if (event.type === "auto_retry_start") {
 			await this.#extensionRunner.emit({
@@ -11684,7 +11687,7 @@ export class AgentSession {
 			this.sessionManager.appendCustomMessageEntry("handoff", handoffContent, true, undefined, "agent");
 			await this.sessionManager.ensureOnDisk();
 			let savedPath: string | undefined;
-			if (options?.autoTriggered && this.settings.get("compaction.handoffSaveToDisk")) {
+			if (this.settings.get("compaction.handoffSaveToDisk")) {
 				const artifactsDir = this.sessionManager.getArtifactsDir();
 				if (artifactsDir) {
 					const handoffFilePath = path.join(artifactsDir, createHandoffFileName());
@@ -14332,6 +14335,7 @@ export class AgentSession {
 						result: undefined,
 						aborted: false,
 						willRetry: false,
+						handoffSavedPath: handoffResult.savedPath,
 					});
 					const continuationScheduled =
 						!autoCompactionSignal.aborted &&

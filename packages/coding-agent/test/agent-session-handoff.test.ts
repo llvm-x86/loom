@@ -1943,8 +1943,21 @@ describe("AgentSession handoff", () => {
 		expect(savedText).toContain(handoffText);
 	});
 
-	it("does not save manual handoff document when save setting is enabled", async () => {
+	it("saves manual handoff document to disk when save setting is enabled", async () => {
 		session.settings.set("compaction.handoffSaveToDisk", true);
+
+		const handoffText = "## Goal\nManual handoff";
+		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue(handoffText);
+
+		const result = await session.handoff();
+		expect(result?.savedPath).toBeDefined();
+		if (!result?.savedPath) throw new Error("Expected handoff document path");
+		const savedText = await Bun.file(result.savedPath).text();
+		expect(savedText).toContain(handoffText);
+	});
+
+	it("does not save handoff document when save setting is disabled", async () => {
+		session.settings.set("compaction.handoffSaveToDisk", false);
 
 		vi.spyOn(compactionModule, "generateHandoffFromContext").mockResolvedValue("## Goal\nManual handoff");
 
