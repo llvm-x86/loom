@@ -44,6 +44,24 @@ export type CompactionLiveEvent =
 			errorMessage?: string;
 			result?: CompactionResult;
 			modelLabel?: string;
+	  }
+	| {
+			/**
+			 * A transient failure is being retried — either the same candidate after a
+			 * backoff delay, or the next candidate in the fallback chain. Emitted so the
+			 * UI can replace the generic "no updates" stall notice with the concrete
+			 * reason nothing has streamed yet.
+			 */
+			type: "compaction_live_retry";
+			/** 1-based attempt number for the *current* candidate model. */
+			attempt: number;
+			maxRetries: number;
+			/** Wait before the next attempt, in ms. `0` when moving to the next candidate immediately. */
+			delayMs: number;
+			model: Model;
+			/** `true` when this retry moves on to a different candidate model instead of reusing the current one. */
+			nextModel: boolean;
+			reason: string;
 	  };
 
 export type CompactionProgressUpdate = {

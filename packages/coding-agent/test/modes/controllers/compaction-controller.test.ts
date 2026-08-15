@@ -1,13 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "bun:test";
 import { ThinkingLevel } from "@oh-my-pi/pi-agent-core";
 import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
-import type { Model } from "@oh-my-pi/pi-ai";
-import { resetSettingsForTest, Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+import type { AssistantMessage, Model } from "@oh-my-pi/pi-ai";
+import { resetSettingsForTest, Settings, settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { CompactionController } from "@oh-my-pi/pi-coding-agent/modes/controllers/compaction-controller";
+import { AssistantMessageComponent } from "@oh-my-pi/pi-coding-agent/modes/components/assistant-message";
 import { initTheme } from "@oh-my-pi/pi-coding-agent/modes/theme/theme";
 import type { InteractiveModeContext } from "@oh-my-pi/pi-coding-agent/modes/types";
 import type { Component } from "@oh-my-pi/pi-tui";
-import { Container, Text } from "@oh-my-pi/pi-tui";
+import { Container, Markdown, Text } from "@oh-my-pi/pi-tui";
 import { assistantMsg } from "../../utilities";
 
 /** Exact stall-notice copy from CompactionController.#startStallTimer (minus theme wrappers). */
@@ -18,10 +19,19 @@ function isStallNoticeText(text: string): boolean {
 	return text.includes(STALL_NOTICE_SNIPPET) && text.includes(STALL_NOTICE_TAIL);
 }
 
+/** Strips ANSI SGR sequences the theme wraps around rendered text. */
+const ANSI_RE = /\x1b\[[0-9;]*m/g;
+
 function collectText(component: Component): string[] {
 	const lines: string[] = [];
 	if (component instanceof Text) {
 		lines.push(component.getText());
+	} else if (component instanceof Markdown) {
+		// Markdown (used for both text and thinking content blocks) only exposes
+		// rendered output, not its raw source — render at a generous width so
+		// short test fixtures never wrap mid-word, then strip the theme's color
+		// codes so substring assertions match plain text.
+		lines.push(...component.render(200).map(line => line.replace(ANSI_RE, "")));
 	}
 	const children = (component as { children?: Component[] }).children ?? [];
 	for (const child of children) {
@@ -45,11 +55,16 @@ function createContext(options: { showStatus?: (message: string, opts?: { dim?: 
 		focusedAgentId: undefined,
 		effectiveHideThinkingBlock: false,
 		proseOnlyThinking: true,
-		settings: Settings,
+		settings,
 		setStatusScrollbackPinned,
 		statusContainer,
 		noteDisplayableThinkingContent: () => false,
 		showStatus: options.showStatus ?? vi.fn(),
+		// createAssistantMessageComponent reads ctx.viewSession.extensionRunner
+		// unconditionally (no `?.` on viewSession itself) — omitting this threw
+		// inside handleUpdate's try/catch, silently swallowing every assistant
+		// component creation and leaving prior tests asserting on an empty surface.
+		viewSession: { extensionRunner: undefined },
 		ui: {
 			requestRender: vi.fn(),
 			requestComponentRender: vi.fn(),
@@ -195,6 +210,27 @@ const sampleResult: CompactionResult = {
 	firstKeptEntryId: "entry-1",
 	tokensBefore: 120_000,
 };
+
+/** Minimal in-flight assistant message (stopReason "stop" — see AssistantMessageComponent#shouldAnimateThinking's doc comment: the streaming partial always reports "stop" until the turn finalizes). */
+function streamingMsg(content: AssistantMessage["content"]): AssistantMessage {
+	return {
+		role: "assistant",
+		content,
+		api: "anthropic-messages",
+		provider: "anthropic",
+		model: "m",
+		usage: {
+			input: 0,
+			output: 0,
+			cacheRead: 0,
+			cacheWrite: 0,
+			totalTokens: 0,
+			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+		},
+		stopReason: "stop",
+		timestamp: 0,
+	};
+}
 
 describe("CompactionController", () => {
 	beforeEach(async () => {
@@ -516,6 +552,181 @@ describe("CompactionController", () => {
 
 		vi.advanceTimersByTime(6000);
 		expect(collectText(root()!).join("\n")).toContain("still running");
+	});
+
+	// Regression: the stall notice passed `elapsedMs / 1000` (seconds) into
+	// `formatDuration`, which expects milliseconds. A real elapsed of ~1000s
+	// rendered as "(1.0s)" — the exact contradictory readout ("no updates for
+	// 670s" next to "(1.0s)") reported against a live session.
+	it("formats the stall notice's elapsed time as milliseconds, not seconds", () => {
+		const { ctx, root } = createContext();
+		const controller = new CompactionController(ctx);
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			action: "context-full",
+			reason: "threshold",
+			phase: "preparing",
+			messagesTotal: 2,
+			tokensBefore: 90_000,
+		});
+
+		vi.advanceTimersByTime(1_000_000);
+		const text = collectText(root()!).join("\n");
+		expect(text).toContain("16m40s");
+		expect(text).not.toContain("(1.0s)");
+	});
+
+	it("shows a retry notice with the candidate model and clears it on new progress", () => {
+		const { ctx, root } = createContext();
+		const controller = new CompactionController(ctx);
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			action: "context-full",
+			reason: "threshold",
+			phase: "preparing",
+			messagesTotal: 2,
+			tokensBefore: 90_000,
+		});
+
+		controller.handleRetry({
+			type: "compaction_live_retry",
+			attempt: 1,
+			maxRetries: 3,
+			delayMs: 4000,
+			model: { id: "k3", provider: "kimi-code", api: "anthropic-messages", contextWindow: 1_048_576, input: ["text"] } as Model,
+			nextModel: false,
+			reason: "Provider stream stalled",
+		});
+		const retryText = collectText(root()!).join("\n");
+		expect(retryText).toContain("Provider stream stalled");
+		expect(retryText).toContain("attempt 1/3");
+		expect(retryText).toContain("4.0s");
+		expect(retryText).toContain("kimi-code/k3");
+
+		controller.handleProgress({
+			type: "compaction_live_progress",
+			phase: "history_summary",
+			messagesDone: 1,
+			messagesTotal: 2,
+		});
+		expect(collectText(root()!).join("\n")).not.toContain("Provider stream stalled");
+	});
+
+	it("labels a next-candidate retry notice distinctly from a same-model backoff", () => {
+		const { ctx, root } = createContext();
+		const controller = new CompactionController(ctx);
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			action: "context-full",
+			reason: "threshold",
+			phase: "preparing",
+			messagesTotal: 2,
+			tokensBefore: 90_000,
+		});
+
+		controller.handleRetry({
+			type: "compaction_live_retry",
+			attempt: 1,
+			maxRetries: 3,
+			delayMs: 0,
+			model: { id: "k3-256k", provider: "kimi-code", api: "anthropic-messages", contextWindow: 262_144, input: ["text"] } as Model,
+			nextModel: true,
+			reason: "Summarization timed out",
+		});
+		const text = collectText(root()!).join("\n");
+		expect(text).toContain("trying next candidate model");
+		expect(text).toContain("kimi-code/k3-256k");
+	});
+
+
+	// Regression: `compaction_live_model` fires again before every same-model
+	// backoff retry and every candidate-fallback attempt, but `handleModel` used
+	// to leave `#assistantComponent`/`#streamingReveal` wired to the *previous*
+	// (failed) attempt. The retried attempt's message starts a brand-new stream
+	// at content index 0 with unrelated text; `StreamingRevealController`
+	// treats index-based updates as in-place appends, so the reveal cursor and
+	// per-index grapheme cache from the aborted attempt bled into the new one —
+	// visible as the previous attempt's thinking/output flashing in and mixing
+	// with the retried attempt's content ("stuttering" at the retry boundary).
+	it("clears the previous attempt's transcript before a retried model starts streaming", () => {
+		const { ctx, root } = createContext();
+		const controller = new CompactionController(ctx);
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			action: "context-full",
+			reason: "threshold",
+			phase: "preparing",
+			messagesTotal: 2,
+			tokensBefore: 90_000,
+		});
+
+		const modelA = { id: "k3", provider: "kimi-code", api: "anthropic-messages", contextWindow: 1_048_576, input: ["text"] } as Model;
+		controller.handleModel({ type: "compaction_live_model", model: modelA, thinkingLevel: ThinkingLevel.Medium });
+		controller.handleUpdate({
+			type: "compaction_live_update",
+			message: streamingMsg([{ type: "thinking", thinking: "Attempt A reasoning AAAA" }]),
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "Attempt A reasoning AAAA", partial: streamingMsg([{ type: "thinking", thinking: "Attempt A reasoning AAAA" }]) },
+		});
+		expect(collectText(root()!).join("\n")).toContain("Attempt A reasoning AAAA");
+
+		// The candidate failed and a retry is starting: the stale attempt must be
+		// gone from the transcript immediately, before any new content arrives.
+		const modelB = { id: "k3-256k", provider: "kimi-code", api: "anthropic-messages", contextWindow: 262_144, input: ["text"] } as Model;
+		controller.handleModel({ type: "compaction_live_model", model: modelB, thinkingLevel: ThinkingLevel.Medium });
+		expect(collectText(root()!).join("\n")).not.toContain("Attempt A reasoning AAAA");
+
+		controller.handleUpdate({
+			type: "compaction_live_update",
+			message: streamingMsg([{ type: "text", text: "Attempt B output BBBB" }]),
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "Attempt B output BBBB", partial: streamingMsg([{ type: "text", text: "Attempt B output BBBB" }]) },
+		});
+		const text = collectText(root()!).join("\n");
+		expect(text).toContain("Attempt B output BBBB");
+		expect(text).not.toContain("Attempt A reasoning AAAA");
+	});
+
+	it("mounts exactly one assistant-message surface across a candidate retry", () => {
+		const { ctx, root } = createContext();
+		const controller = new CompactionController(ctx);
+		controller.handleStart({
+			type: "compaction_live_start",
+			trigger: "auto",
+			action: "context-full",
+			reason: "threshold",
+			phase: "preparing",
+			messagesTotal: 2,
+			tokensBefore: 90_000,
+		});
+
+		const modelA = { id: "k3", provider: "kimi-code", api: "anthropic-messages", contextWindow: 1_048_576, input: ["text"] } as Model;
+		const modelB = { id: "k3-256k", provider: "kimi-code", api: "anthropic-messages", contextWindow: 262_144, input: ["text"] } as Model;
+
+		const countAssistantComponents = (): number =>
+			((root() as { children?: Component[] } | undefined)?.children ?? []).filter(
+				child => child instanceof AssistantMessageComponent,
+			).length;
+
+		controller.handleModel({ type: "compaction_live_model", model: modelA, thinkingLevel: ThinkingLevel.Medium });
+		controller.handleUpdate({
+			type: "compaction_live_update",
+			message: streamingMsg([{ type: "thinking", thinking: "reasoning" }]),
+			assistantMessageEvent: { type: "thinking_delta", contentIndex: 0, delta: "reasoning", partial: streamingMsg([{ type: "thinking", thinking: "reasoning" }]) },
+		});
+		expect(countAssistantComponents()).toBe(1);
+
+		controller.handleModel({ type: "compaction_live_model", model: modelB, thinkingLevel: ThinkingLevel.Medium });
+		expect(countAssistantComponents()).toBe(0);
+
+		controller.handleUpdate({
+			type: "compaction_live_update",
+			message: streamingMsg([{ type: "text", text: "output" }]),
+			assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "output", partial: streamingMsg([{ type: "text", text: "output" }]) },
+		});
+		expect(countAssistantComponents()).toBe(1);
 	});
 
 	it("does not emit a stall notice after completion", () => {

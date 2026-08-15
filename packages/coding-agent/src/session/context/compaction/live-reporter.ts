@@ -83,6 +83,27 @@ export class CompactionLiveReporter {
 		void this.#safeEmit({ type: "compaction_live_model", model, thinkingLevel });
 	}
 
+	/** Report a transient-failure retry (same-model backoff or fallback to the next candidate). */
+	retry(options: {
+		attempt: number;
+		maxRetries: number;
+		delayMs: number;
+		model: Model;
+		nextModel: boolean;
+		reason: string;
+	}): void {
+		if (!this.#active) return;
+		void this.#safeEmit({
+			type: "compaction_live_retry",
+			attempt: options.attempt,
+			maxRetries: options.maxRetries,
+			delayMs: options.delayMs,
+			model: options.model,
+			nextModel: options.nextModel,
+			reason: options.reason,
+		});
+	}
+
 	createCompleteImpl(): <TApi extends Api>(
 		model: Model<TApi>,
 		ctx: Context,

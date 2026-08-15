@@ -218,6 +218,23 @@ export class CompactionController {
 			this.#modelLabel = formatModelSelectorValue(`${event.model.provider}/${event.model.id}`, event.thinkingLevel);
 			this.#ensureSurface();
 			this.#modelText?.setText(theme.fg("muted", `Model: ${this.#modelLabel}`));
+			// `compaction_live_model` fires immediately before every `compact()`
+			// attempt — the first one and every same-candidate backoff retry or
+			// candidate-fallback thereafter. A retry's message is a brand-new
+			// stream, not a continuation: reusing the previous attempt's
+			// `#assistantComponent`/`#streamingReveal` would replay its stale
+			// thinking/text against the new attempt's unrelated content
+			// (`StreamingRevealController`'s per-index grapheme cache and reveal
+			// cursor assume in-place appends), which is exactly what showed up as
+			// content flashing/reordering between thinking and output at retry
+			// boundaries. Tear the streaming surface down so `handleUpdate`
+			// rebuilds it fresh on the next update for this attempt.
+			if (this.#assistantComponent) {
+				this.#streamingReveal.stop();
+				this.#root?.removeChild(this.#assistantComponent);
+				this.#assistantComponent.dispose();
+				this.#assistantComponent = undefined;
+			}
 			this.#ctx.ui.requestRender();
 		} catch {
 			// UI failures must not propagate.
@@ -240,6 +257,21 @@ export class CompactionController {
 				this.#streamingReveal.resyncVisibility();
 			}
 			this.#streamingReveal.setTarget(splitAssistantMessageToolTimeline(event.message).beforeTools);
+			this.#ctx.ui.requestRender();
+		} catch {
+			// UI failures must not propagate.
+		}
+	}
+
+	handleRetry(event: Extract<CompactionLiveEvent, { type: "compaction_live_retry" }>): void {
+		try {
+			this.#touchActivity();
+			this.#ensureSurface();
+			const modelLabel = formatModelSelectorValue(`${event.model.provider}/${event.model.id}`, undefined);
+			const message = event.nextModel
+				? `${event.reason} — trying next candidate model: ${modelLabel}. Press Esc to cancel.`
+				: `${event.reason} — retrying (attempt ${event.attempt}/${event.maxRetries}) in ${formatDuration(event.delayMs)}: ${modelLabel}. Press Esc to cancel.`;
+			this.#stallText?.setText(theme.fg("warning", message));
 			this.#ctx.ui.requestRender();
 		} catch {
 			// UI failures must not propagate.
@@ -386,7 +418,7 @@ export class CompactionController {
 				const elapsedMs = Date.now() - this.#startedAt;
 				const idleMs = Date.now() - this.#lastActivityAt;
 				if (idleMs < thresholdMs) return;
-				const elapsed = formatDuration(Math.floor(elapsedMs / 1000));
+				const elapsed = formatDuration(elapsedMs);
 				this.#stallText?.setText(
 					theme.fg(
 						"warning",

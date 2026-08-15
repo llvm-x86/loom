@@ -163,6 +163,7 @@ export class EventController {
 			compaction_live_model: async e => this.#compactionController.handleModel(e),
 			compaction_live_update: async e => this.#compactionController.handleUpdate(e),
 			compaction_live_end: async e => this.#compactionController.handleEnd(e),
+			compaction_live_retry: async e => this.#compactionController.handleRetry(e),
 			compaction_preparing: e => this.#handleCompactionPreparing(e),
 			auto_compaction_start: e => this.#handleAutoCompactionStart(e),
 			auto_compaction_end: e => this.#handleAutoCompactionEnd(e),

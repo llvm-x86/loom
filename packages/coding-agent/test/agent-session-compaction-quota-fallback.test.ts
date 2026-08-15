@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "bun:test";
 import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
+import type { CompactionResult } from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
@@ -64,6 +65,10 @@ describe("compaction quota exhaustion fallback", () => {
 		);
 	}
 
+	function timeoutError(): Error {
+		return Object.assign(new Error("Provider stream stalled: timeout waiting for response"), { status: 500 });
+	}
+
 	function bundledActiveModel(): Model {
 		// Vision-capable: snapcompact renders history to frames, so the local
 		// archive is only reachable behind an image-capable active model.
@@ -80,10 +85,12 @@ describe("compaction quota exhaustion fallback", () => {
 		endErrorMessage: string | undefined;
 		thrown: unknown;
 		compactionSummary: string | undefined;
+		/** `compaction_live_retry` events emitted while walking the candidate chain. */
+		retries: { nextModel: boolean; delayMs: number; model: string; reason: string }[];
 	}
 
 	async function runAutoCompaction(options: {
-		compact: (model: Model) => never;
+		compact: (model: Model) => CompactionResult;
 		retryEnabled?: boolean;
 	}): Promise<RunResult> {
 		const dir = TempDir.createSync("@pi-compaction-quota-");
@@ -117,7 +124,7 @@ describe("compaction quota exhaustion fallback", () => {
 		const tried: Model[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (_preparation, candidate) => {
 			tried.push(candidate);
-			throw options.compact(candidate);
+			return options.compact(candidate);
 		});
 
 		const agent = new Agent({
@@ -139,11 +146,20 @@ describe("compaction quota exhaustion fallback", () => {
 		const notices: string[] = [];
 		let endAction: string | undefined;
 		let endErrorMessage: string | undefined;
+		const retries: RunResult["retries"] = [];
 		session.subscribe(event => {
 			if (event.type === "notice" && event.source === "compaction") notices.push(event.message);
 			if (event.type === "auto_compaction_end") {
 				endAction = event.action;
 				endErrorMessage = event.errorMessage;
+			}
+			if (event.type === "compaction_live_retry") {
+				retries.push({
+					nextModel: event.nextModel,
+					delayMs: event.delayMs,
+					model: `${event.model.provider}/${event.model.id}`,
+					reason: event.reason,
+				});
 			}
 		});
 
@@ -161,6 +177,7 @@ describe("compaction quota exhaustion fallback", () => {
 				thrown,
 				compactionSummary:
 					compactionEntry && "summary" in compactionEntry ? (compactionEntry.summary as string) : undefined,
+				retries,
 			};
 		} finally {
 			await session.dispose();
@@ -264,4 +281,52 @@ describe("compaction quota exhaustion fallback", () => {
 		// The raw provider envelope must not leak into the actionable message.
 		expect(reported).not.toContain("authentication_error");
 	});
+
+	// Regression: `#runAutoCompaction`'s candidate-fallback loop retried and
+	// walked candidates with no live event at all — the UI showed nothing but
+	// the generic "no updates for Ns" stall notice for however long the whole
+	// chain took, indistinguishable from a genuine hang.
+	it("reports a live retry event before moving to the next candidate on timeout", async () => {
+		const result = await runAutoCompaction({
+			compact: () => {
+				throw timeoutError();
+			},
+		});
+
+		expect(result.tried.length).toBeGreaterThan(1);
+		// One retry event per candidate that was not the last: the walk moves on
+		// immediately (no backoff wait) rather than sleeping silently.
+		expect(result.retries.length).toBe(result.tried.length - 1);
+		for (const [index, retry] of result.retries.entries()) {
+			expect(retry.nextModel).toBe(true);
+			expect(retry.delayMs).toBe(0);
+			expect(retry.reason).toContain("timed out");
+			expect(retry.model).toBe(`${result.tried[index]?.provider}/${result.tried[index]?.id}`);
+		}
+	});
+
+	it("reports a live retry event before backing off and reusing the same candidate", async () => {
+		let calls = 0;
+		const result = await runAutoCompaction({
+			retryEnabled: true,
+			compact: () => {
+				calls++;
+				if (calls === 1) throw usageLimitError();
+				return { summary: "summary", firstKeptEntryId: "entry-1", tokensBefore: 100 };
+			},
+		});
+
+		// The failing call and the successful retry both hit the same
+		// (first/configured) candidate — no fallback needed.
+		expect(result.tried.length).toBe(2);
+		expect(`${result.tried[0]?.provider}/${result.tried[0]?.id}`).toBe(
+			`${result.tried[1]?.provider}/${result.tried[1]?.id}`,
+		);
+		expect(result.retries.length).toBe(1);
+		expect(result.retries[0]?.nextModel).toBe(false);
+		expect(result.retries[0]?.delayMs).toBeGreaterThan(0);
+		expect(result.retries[0]?.model).toBe(`${result.tried[0]?.provider}/${result.tried[0]?.id}`);
+		expect(result.compactionSummary).toBe("summary");
+	});
+
 });

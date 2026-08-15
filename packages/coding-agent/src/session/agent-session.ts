@@ -14645,6 +14645,16 @@ export class AgentSession {
 									},
 								);
 								lastError = error;
+								if (hasMoreCandidates) {
+									this.#compactionLiveReporter?.retry({
+										attempt,
+										maxRetries: retrySettings.maxRetries,
+										delayMs: 0,
+										model: candidate,
+										nextModel: true,
+										reason: "Summarization timed out",
+									});
+								}
 								break;
 							}
 
@@ -14684,6 +14694,16 @@ export class AgentSession {
 									},
 								);
 								lastError = error;
+								if (hasMoreCandidates) {
+									this.#compactionLiveReporter?.retry({
+										attempt,
+										maxRetries: retrySettings.maxRetries,
+										delayMs: 0,
+										model: candidate,
+										nextModel: true,
+										reason: "Retry delay too long",
+									});
+								}
 								break; // Stop waiting: next candidate, else the local archive.
 							}
 
@@ -14695,6 +14715,14 @@ export class AgentSession {
 								retryAfterMs,
 								error: message,
 								model: `${candidate.provider}/${candidate.id}`,
+							});
+							this.#compactionLiveReporter?.retry({
+								attempt,
+								maxRetries: retrySettings.maxRetries,
+								delayMs,
+								model: candidate,
+								nextModel: false,
+								reason: message,
 							});
 							await scheduler.wait(delayMs, { signal: autoCompactionSignal });
 						}
