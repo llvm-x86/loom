@@ -3376,7 +3376,7 @@ export class InteractiveMode implements InteractiveModeContext {
 		if (!goal) return;
 		const summary = goal.objective.length > 48 ? `${goal.objective.slice(0, 47)}…` : goal.objective;
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
-		const historyItem = goalState?.bilevel ? ["View history…"] : [];
+		const historyItem = this.session.settings.get("goal.bilevel.enabled") === true ? ["View history…"] : [];
 		const items =
 			state === "active"
 				? ["Show details", ...historyItem, "Adjust budget…", "Search mode…", "Pause", "Drop"]
@@ -3423,11 +3423,18 @@ export class InteractiveMode implements InteractiveModeContext {
 				? `${used} / ${goal.tokenBudget.toLocaleString()} (${Math.max(0, goal.tokenBudget - goal.tokensUsed).toLocaleString()} left)`
 				: `${used} (no budget)`;
 		const innerModel = this.session.model ? formatModelString(this.session.model) : "(not selected)";
-		const modeLine = state?.bilevel
+		// `goal.bilevel.enabled` is the source of truth for "is this a bilevel goal" — it is set
+		// synchronously by search setup. `state.bilevel` (the runtime trace) only appears after the
+		// first inner-loop iteration closes (`GoalRuntime#runBilevelCycle`), so gating the mode line
+		// on it alone reports "Standard" for a freshly created bilevel goal that hasn't run yet.
+		const bilevelEnabled = this.session.settings.get("goal.bilevel.enabled") === true;
+		const modeLine = bilevelEnabled
 			? (() => {
 					const outer = resolveOuterAnalystModel(this.session);
 					const outerLabel = outer.model ? formatModelString(outer.model) : innerModel;
-					return `Mode: Bilevel — cycle ${state.bilevel.cycles.length}, iteration ${state.bilevel.iterationCount}\nModels: inner ${innerModel}, outer ${outerLabel}`;
+					const cycles = state.bilevel?.cycles.length ?? 0;
+					const iterationCount = state.bilevel?.iterationCount ?? 0;
+					return `Mode: Bilevel — cycle ${cycles}, iteration ${iterationCount}\nModels: inner ${innerModel}, outer ${outerLabel}`;
 				})()
 			: `Mode: Standard\nModel: ${innerModel}`;
 		const lines = [
@@ -3449,7 +3456,11 @@ export class InteractiveMode implements InteractiveModeContext {
 			return;
 		}
 		if (!state.bilevel) {
-			this.showStatus("History view is only available for bilevel goals. Switch search mode first.");
+			this.showStatus(
+				this.session.settings.get("goal.bilevel.enabled") === true
+					? "No search history yet — bilevel history appears after the first inner-loop iteration."
+					: "History view is only available for bilevel goals. Switch search mode first.",
+			);
 			return;
 		}
 		const outer = resolveOuterAnalystModel(this.session);
