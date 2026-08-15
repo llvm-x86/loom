@@ -1,8 +1,10 @@
 export type { GoalMechanismProposal, GoalOuterAnalysis } from "./analysis";
 export { applyOuterAnalysis, parseOuterAnalysis } from "./analysis";
 export type { OuterAnalysisRequest, OuterAnalysisResult } from "./analyst";
-export { runOuterAnalysis } from "./analyst";
+export { resolveOuterAnalystModel, runOuterAnalysis } from "./analyst";
 export { renderOuterDirective } from "./directive";
+export type { GoalHistoryModelInfo, GoalHistoryViewParams } from "./history-view";
+export { renderGoalHistoryHtml } from "./history-view";
 export type {
 	GoalBilevelState,
 	GoalIterationRecord,

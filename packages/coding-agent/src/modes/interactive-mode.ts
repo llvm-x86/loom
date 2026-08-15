@@ -3,6 +3,7 @@
  * Handles TUI rendering and user interaction, delegating business logic to AgentSession.
  */
 import * as fs from "node:fs/promises";
+import * as os from "node:os";
 import * as path from "node:path";
 import {
 	type Agent,
@@ -56,7 +57,7 @@ import { reset as resetCapabilities } from "../capability";
 import type { CollabGuestLink } from "../collab/guest";
 import type { CollabHost } from "../collab/host";
 import { KeybindingsManager } from "../config/keybindings";
-import type { ResolvedModelRoleValue } from "../config/model-resolver";
+import { formatModelString, type ResolvedModelRoleValue } from "../config/model-resolver";
 import { applyProviderGlobalsFromSettings } from "../config/provider-globals";
 import {
 	isSettingsInitialized,
@@ -78,7 +79,12 @@ import type {
 import type { CompactOptions } from "../extensibility/extensions/types";
 import type { Skill } from "../extensibility/skills";
 import { loadSlashCommands } from "../extensibility/slash-commands";
-import { DEFAULT_INNER_BUDGET, parseBilevelState } from "../goals/bilevel";
+import {
+	DEFAULT_INNER_BUDGET,
+	parseBilevelState,
+	renderGoalHistoryHtml,
+	resolveOuterAnalystModel,
+} from "../goals/bilevel";
 import { type GuidedGoalMessage, newGuidedGoalSessionId, runGuidedGoalTurn } from "../goals/guided-setup";
 import type { Goal, GoalModeState } from "../goals/state";
 import { resolveLocalUrlToPath } from "../internal-urls";
@@ -136,6 +142,7 @@ import { renderTreeList } from "../tui/tree-list";
 import { copyToClipboard } from "../utils/clipboard";
 import type { EventBus } from "../utils/event-bus";
 import { getEditorCommand, openInEditor } from "../utils/external-editor";
+import { openPath } from "../utils/open";
 import { getSessionAccentAnsi, getSessionAccentHex } from "../utils/session-color";
 import { messageHasDisplayableThinking } from "../utils/thinking-display";
 import { popTerminalTitle, pushTerminalTitle, setSessionTerminalTitle } from "../utils/title-generator";
@@ -3364,19 +3371,24 @@ export class InteractiveMode implements InteractiveModeContext {
 	}
 
 	async #openGoalMenu(state: "active" | "paused"): Promise<void> {
-		const goal = this.session.getGoalModeState()?.goal;
+		const goalState = this.session.getGoalModeState();
+		const goal = goalState?.goal;
 		if (!goal) return;
 		const summary = goal.objective.length > 48 ? `${goal.objective.slice(0, 47)}…` : goal.objective;
 		const title = state === "active" ? `Goal: ${summary} (${goal.status})` : `Goal paused: ${summary}`;
+		const historyItem = goalState?.bilevel ? ["View history…"] : [];
 		const items =
 			state === "active"
-				? ["Show details", "Adjust budget…", "Search mode…", "Pause", "Drop"]
-				: ["Resume", "Show details", "Adjust budget…", "Search mode…", "Drop"];
+				? ["Show details", ...historyItem, "Adjust budget…", "Search mode…", "Pause", "Drop"]
+				: ["Resume", "Show details", ...historyItem, "Adjust budget…", "Search mode…", "Drop"];
 		const choice = await this.showHookSelector(title, items);
 		if (!choice) return;
 		switch (choice) {
 			case "Show details":
 				this.#showGoalDetails();
+				return;
+			case "View history…":
+				this.#openGoalHistoryView();
 				return;
 			case "Adjust budget…":
 				await this.#promptGoalBudgetEdit();
@@ -3410,13 +3422,54 @@ export class InteractiveMode implements InteractiveModeContext {
 			goal.tokenBudget !== undefined
 				? `${used} / ${goal.tokenBudget.toLocaleString()} (${Math.max(0, goal.tokenBudget - goal.tokensUsed).toLocaleString()} left)`
 				: `${used} (no budget)`;
+		const innerModel = this.session.model ? formatModelString(this.session.model) : "(not selected)";
+		const modeLine = state?.bilevel
+			? (() => {
+					const outer = resolveOuterAnalystModel(this.session);
+					const outerLabel = outer.model ? formatModelString(outer.model) : innerModel;
+					return `Mode: Bilevel — cycle ${state.bilevel.cycles.length}, iteration ${state.bilevel.iterationCount}\nModels: inner ${innerModel}, outer ${outerLabel}`;
+				})()
+			: `Mode: Standard\nModel: ${innerModel}`;
 		const lines = [
 			`Objective: ${goal.objective}`,
 			`Status: ${goal.status}${state?.enabled ? "" : " (paused)"}`,
+			modeLine,
 			`Tokens: ${budgetLine}`,
 			`Time spent: ${formatDuration(goal.timeUsedSeconds * 1000)}`,
 		];
 		this.showStatus(lines.join("\n"));
+	}
+
+	/** Render the goal's bilevel search history (inner + outer loops) to a temp HTML file and open it. */
+	#openGoalHistoryView(): void {
+		const state = this.session.getGoalModeState();
+		const goal = state?.goal;
+		if (!goal) {
+			this.showStatus("No goal set.");
+			return;
+		}
+		if (!state.bilevel) {
+			this.showStatus("History view is only available for bilevel goals. Switch search mode first.");
+			return;
+		}
+		const outer = resolveOuterAnalystModel(this.session);
+		const html = renderGoalHistoryHtml({
+			goal,
+			models: {
+				inner: this.session.model ? formatModelString(this.session.model) : "(not selected)",
+				outer: outer.model ? formatModelString(outer.model) : undefined,
+			},
+			bilevel: state.bilevel,
+		});
+		const filePath = path.join(os.tmpdir(), `omp-goal-history-${goal.id}-${Date.now()}.html`);
+		Bun.write(filePath, html)
+			.then(() => {
+				openPath(filePath);
+				this.showStatus(`Opened goal history: ${filePath}`);
+			})
+			.catch((error: unknown) => {
+				this.showError(`Failed to write goal history: ${error instanceof Error ? error.message : String(error)}`);
+			});
 	}
 
 	async #promptGoalBudgetEdit(): Promise<void> {

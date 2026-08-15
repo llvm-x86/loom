@@ -73,22 +73,11 @@ export interface OuterAnalysisRequest {
 export type { OuterAnalysisResult };
 
 /**
- * Run one Level 1.5 outer-loop analysis.
- *
- * Mirrors `runGuidedGoalTurn`: a oneshot forced-tool-call completion routed through the session
- * transport on a distinct side-session id, so the analyst never pollutes the main conversation.
- * The model is the dedicated `goalOuter` role when configured — `/goal` assigns it during search
- * setup — falling back to `plan`, then `slow`, then the session's own model, so an unconfigured
- * install still gets a strong reviewer.
- *
- * Returns `undefined` rather than throwing when the analyst is unusable. Upstream `_analyze`
- * degrades the same way — a failed analysis leaves the search configuration untouched, because a
- * broken meta-optimizer must not be able to derail a working inner loop.
+ * Resolve the model that {@link runOuterAnalysis} will actually run on: the dedicated
+ * `goalOuter` role when configured, falling back to `plan`, then `slow`, then the session's
+ * own model. Shared with the `/goal` status display so the reported model is never a guess.
  */
-export async function runOuterAnalysis(
-	session: AgentSession,
-	request: OuterAnalysisRequest,
-): Promise<OuterAnalysisResult | undefined> {
+export function resolveOuterAnalystModel(session: AgentSession): ResolvedModelRoleValue {
 	let resolved: ResolvedModelRoleValue = {
 		model: session.model,
 		thinkingLevel: session.thinkingLevel,
@@ -101,6 +90,25 @@ export async function runOuterAnalysis(
 		resolved = candidate;
 		break;
 	}
+	return resolved;
+}
+
+/**
+ * Run one Level 1.5 outer-loop analysis.
+ *
+ * Mirrors `runGuidedGoalTurn`: a oneshot forced-tool-call completion routed through the session
+ * transport on a distinct side-session id, so the analyst never pollutes the main conversation.
+ * The model comes from {@link resolveOuterAnalystModel}.
+ *
+ * Returns `undefined` rather than throwing when the analyst is unusable. Upstream `_analyze`
+ * degrades the same way — a failed analysis leaves the search configuration untouched, because a
+ * broken meta-optimizer must not be able to derail a working inner loop.
+ */
+export async function runOuterAnalysis(
+	session: AgentSession,
+	request: OuterAnalysisRequest,
+): Promise<OuterAnalysisResult | undefined> {
+	const resolved = resolveOuterAnalystModel(session);
 	if (!resolved.model) return undefined;
 
 	const apiKey = await session.modelRegistry.getApiKey(resolved.model, session.sessionId);
