@@ -2151,6 +2151,18 @@ export const SETTINGS_SCHEMA = {
 		},
 	},
 
+	"compaction.fallbackModels": {
+		type: "string",
+		default: "kimi-code/k3-256k kimi-code/k3",
+		ui: {
+			tab: "context",
+			group: "Compaction",
+			label: "Fallback Models",
+			description:
+				"Ordered fallback summarizer models (smallest window first) used when the active model can't run its own compaction summary, e.g. Claude Code OAuth. Each model's context window is its token threshold; the next model is tried on overflow.",
+		},
+	},
+
 	// No default: an unset reserve tells the compaction layer the user never
 	// chose one, so small-window recovery may swap in the proportional reserve
 	// (see resolveBudgetReserveTokens). A materialized 16384 here would make
@@ -5611,6 +5623,7 @@ export interface CompactionSettings {
 	remoteEnabled: boolean;
 	remoteEndpoint: string | undefined;
 	remoteStreamingV2Enabled: boolean;
+	fallbackModels: string;
 	v2RetainedMessageBudget: number;
 	stallNoticeSeconds: number;
 	idleEnabled: boolean;

@@ -66,6 +66,12 @@ describe("compaction model routing", () => {
 		return model;
 	}
 
+	function bundledDeepseekFlash(): Model {
+		const model = getBundledModel("deepseek", "deepseek-v4-flash");
+		if (!model) throw new Error("expected bundled deepseek/deepseek-v4-flash model");
+		return model;
+	}
+
 	async function firstCompactionCandidateProvider(
 		modelRegistry: ModelRegistry,
 		options: { roleModel?: Model } = {},
@@ -424,21 +430,21 @@ describe("compaction model routing", () => {
 	});
 
 	/**
-	 * Kimi compaction runs on substantially cheaper quota than routing a
-	 * summary through whatever premium model is active for the turn. Unless
-	 * the active model is itself a kimi-code model (or an explicit
-	 * compactionModel override applies), compaction must default to the
-	 * cheap kimi-code/k3-256k candidate ahead of the active model -- e.g. a
-	 * cursor model -- even though cursor declares no compactionModel and the
-	 * active-model candidate would otherwise be tried first.
+	 * Routing rules for the default compaction summarizer:
+	 *  - DeepSeek models route to their pro variant (deepseek-v4-pro), falling
+	 *    back to deepseek-v4-flash — never Kimi.
+	 *  - Claude Code OAuth framing is the only chat model that NEEDS an
+	 *    external summarizer (it can't run a reliable local summary), so it
+	 *    routes through the configured fallback models (Kimi by default).
+	 *  - Every other provider summarizes through itself.
 	 */
-	it("prefers kimi-code k3-256k over the active cursor model by default", async () => {
+	it("does not route cursor compaction through kimi; uses the active cursor model", async () => {
 		const modelRegistry = await makeRegistry(authStorage => {
 			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
 			authStorage.setRuntimeApiKey("cursor", "test-cursor-key");
 		});
 
-		const dir = TempDir.createSync("@pi-compaction-routing-kimi-over-cursor-");
+		const dir = TempDir.createSync("@pi-compaction-routing-cursor-self-");
 		tempDirs.push(dir);
 		const sessionManager = SessionManager.inMemory(dir.path());
 		const firstKeptEntryId = sessionManager.appendMessage({
@@ -490,18 +496,79 @@ describe("compaction model routing", () => {
 			await session.dispose();
 		}
 
-		expect(candidateIds[0]).toBe("k3-256k");
-		expect(candidateProviders[0]).toBe("kimi-code");
-		expect(candidateIds).not.toContain("composer-1");
+		expect(candidateIds[0]).toBe("composer-1");
+		expect(candidateProviders[0]).toBe("cursor");
+		expect(candidateProviders).not.toContain("kimi-code");
 	});
 
-	it("falls back to k3 before the active cursor model when k3-256k overflows", async () => {
+	it("routes deepseek compaction through deepseek-v4-pro before the active deepseek model", async () => {
 		const modelRegistry = await makeRegistry(authStorage => {
-			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
-			authStorage.setRuntimeApiKey("cursor", "test-cursor-key");
+			authStorage.setRuntimeApiKey("deepseek", "test-deepseek-key");
 		});
 
-		const dir = TempDir.createSync("@pi-compaction-routing-kimi-overflow-cursor-");
+		const dir = TempDir.createSync("@pi-compaction-routing-deepseek-pro-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		const candidateProviders: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			candidateProviders.push(candidate.provider);
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledDeepseekFlash(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds[0]).toBe("deepseek-v4-pro");
+		expect(candidateProviders[0]).toBe("deepseek");
+		expect(candidateProviders).not.toContain("kimi-code");
+	});
+
+	it("falls back from deepseek-v4-pro to deepseek-v4-flash when pro fails", async () => {
+		const modelRegistry = await makeRegistry(authStorage => {
+			authStorage.setRuntimeApiKey("deepseek", "test-deepseek-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-deepseek-fallback-");
 		tempDirs.push(dir);
 		const sessionManager = SessionManager.inMemory(dir.path());
 		const firstKeptEntryId = sessionManager.appendMessage({
@@ -522,10 +589,8 @@ describe("compaction model routing", () => {
 		const candidateIds: string[] = [];
 		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
 			candidateIds.push(candidate.id);
-			if (candidate.id === "k3-256k") {
-				throw new Error(
-					"This model's maximum context length is 262144 tokens, but the request exceeds the context window.",
-				);
+			if (candidate.id === "deepseek-v4-pro") {
+				throw new Error("Summarization timed out");
 			}
 			return {
 				summary: "summary",
@@ -537,7 +602,7 @@ describe("compaction model routing", () => {
 		});
 
 		const agent = new Agent({
-			initialState: { model: bundledCursorComposer(), systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: { model: bundledDeepseekFlash(), systemPrompt: ["Test"], tools: [], messages: [] },
 		});
 		const session = new AgentSession({
 			agent,
@@ -556,15 +621,88 @@ describe("compaction model routing", () => {
 			await session.dispose();
 		}
 
-		expect(candidateIds).toEqual(["k3-256k", "k3"]);
+		expect(candidateIds).toEqual(["deepseek-v4-pro", "deepseek-v4-flash"]);
 	});
 
-	it("falls back to the active cursor model when kimi-code isn't authenticated", async () => {
-		const modelRegistry = await makeRegistry(authStorage => {
-			authStorage.setRuntimeApiKey("cursor", "test-cursor-key");
+	it("routes Claude Code OAuth framing through the configured kimi fallback models", async () => {
+		const modelRegistry = await makeRegistry(async authStorage => {
+			await authStorage.set("anthropic", {
+				type: "oauth",
+				access: "sk-ant-oat-test-token",
+				refresh: "refresh-token",
+				expires: Date.now() + 3_600_000,
+			});
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
 		});
 
-		const dir = TempDir.createSync("@pi-compaction-routing-cursor-no-kimi-");
+		const dir = TempDir.createSync("@pi-compaction-routing-claude-kimi-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		const candidateProviders: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			candidateProviders.push(candidate.provider);
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledAnthropic(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds[0]).toBe("k3-256k");
+		expect(candidateProviders[0]).toBe("kimi-code");
+	});
+
+	it("honors a custom compaction.fallbackModels setting for Claude fallback", async () => {
+		const modelRegistry = await makeRegistry(async authStorage => {
+			await authStorage.set("anthropic", {
+				type: "oauth",
+				access: "sk-ant-oat-test-token",
+				refresh: "refresh-token",
+				expires: Date.now() + 3_600_000,
+			});
+			authStorage.setRuntimeApiKey("deepseek", "test-deepseek-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-custom-fallback-");
 		tempDirs.push(dir);
 		const sessionManager = SessionManager.inMemory(dir.path());
 		const firstKeptEntryId = sessionManager.appendMessage({
@@ -595,7 +733,7 @@ describe("compaction model routing", () => {
 		});
 
 		const agent = new Agent({
-			initialState: { model: bundledCursorComposer(), systemPrompt: ["Test"], tools: [], messages: [] },
+			initialState: { model: bundledAnthropic(), systemPrompt: ["Test"], tools: [], messages: [] },
 		});
 		const session = new AgentSession({
 			agent,
@@ -604,6 +742,7 @@ describe("compaction model routing", () => {
 				"compaction.enabled": true,
 				"compaction.autoContinue": false,
 				"compaction.strategy": "context-full",
+				"compaction.fallbackModels": "deepseek/deepseek-v4-pro",
 			}),
 			modelRegistry,
 		});
@@ -614,6 +753,6 @@ describe("compaction model routing", () => {
 			await session.dispose();
 		}
 
-		expect(candidateIds[0]).toBe("composer-1");
+		expect(candidateIds[0]).toBe("deepseek-v4-pro");
 	});
 });

@@ -13474,6 +13474,28 @@ export class AgentSession {
 		return this.#resolveConfiguredModelTarget(currentModel.compactionModel, currentModel, availableModels);
 	}
 
+	#resolveCompactionFallbackModels(availableModels: Model[]): Model[] {
+		const raw = this.settings.get("compaction.fallbackModels");
+		if (!raw) return [];
+		const resolved: Model[] = [];
+		for (const token of raw
+			.split(/[\s,]+/)
+			.map(part => part.trim())
+			.filter(Boolean)) {
+			const parsed = parseModelString(token, {
+				allowMaxSuffix: true,
+				allowAutoAlias: true,
+				isLiteralModelId: (provider, id) =>
+					availableModels.some(model => model.provider === provider && model.id === id),
+			});
+			const model = parsed
+				? availableModels.find(m => m.provider === parsed.provider && m.id === parsed.id)
+				: availableModels.find(m => m.id === token);
+			if (model) resolved.push(model);
+		}
+		return resolved;
+	}
+
 	#resolveRoleModelFull(
 		role: string,
 		availableModels: Model[],
@@ -13544,19 +13566,25 @@ export class AgentSession {
 				exemptFromDefer: true,
 			});
 		}
-		// Default compaction summarizer preference: unless the active chat model
-		// already IS a kimi-code model (or an explicit compactionModel override
-		// resolved above), route summarization through Kimi's k3-256k first and
-		// its wide k3 sibling second — before ever falling back to whatever
-		// premium model (e.g. cursor) happens to be active for the turn. Kimi
-		// compaction runs on substantially cheaper quota than routing a summary
-		// through an unrelated premium provider just because it's the chat model.
-		if (!preferredModel || preferredModel.provider !== "kimi-code") {
-			for (const kimiId of ["k3-256k", "k3"]) {
-				addCandidate(
-					availableModels.find(model => model.provider === "kimi-code" && model.id === kimiId),
-					{ exemptFromDefer: true },
-				);
+		// Default compaction summarizer preference. DeepSeek models route to
+		// their pro variant (deepseek-v4-pro) with the flash sibling as a
+		// fallback, rather than exhausting Kimi quota. Claude Code OAuth framing
+		// is the only chat model that NEEDS an external summarizer: it can't run
+		// a reliable local summary, so it routes through the configured fallback
+		// models (Kimi by default). Every other provider summarizes through
+		// itself.
+		if (preferredModel) {
+			if (preferredModel.provider === "deepseek") {
+				for (const deepseekId of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
+					addCandidate(
+						availableModels.find(model => model.provider === "deepseek" && model.id === deepseekId),
+						{ exemptFromDefer: true },
+					);
+				}
+			} else if (this.#usesClaudeCodeOAuthFraming(preferredModel)) {
+				for (const fallback of this.#resolveCompactionFallbackModels(availableModels)) {
+					addCandidate(fallback, { exemptFromDefer: true });
+				}
 			}
 		}
 		addCandidate(preferredModel ?? undefined);
