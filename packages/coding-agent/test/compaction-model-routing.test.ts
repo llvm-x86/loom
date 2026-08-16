@@ -755,4 +755,82 @@ describe("compaction model routing", () => {
 
 		expect(candidateIds[0]).toBe("deepseek-v4-pro");
 	});
+	it("falls back to deepseek-v4-pro when the kimi fallback hits its usage limit", async () => {
+		const modelRegistry = await makeRegistry(async authStorage => {
+			await authStorage.set("anthropic", {
+				type: "oauth",
+				access: "sk-ant-oat-test-token",
+				refresh: "refresh-token",
+				expires: Date.now() + 3_600_000,
+			});
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
+			authStorage.setRuntimeApiKey("deepseek", "test-deepseek-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-kimi-quota-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 100,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const candidateIds: string[] = [];
+		const candidateProviders: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			candidateIds.push(candidate.id);
+			candidateProviders.push(candidate.provider);
+			if (candidate.provider === "kimi-code") {
+				// Kimi's quota error arrives wrapped in a 403 "authentication
+				// failed" envelope; the usage-limit signal must win so the run
+				// falls through to DeepSeek instead of surfacing an auth failure.
+				throw new Error(
+					"Provider authentication failed (permission_error, 403): You've reached your usage limit for this billing cycle.",
+				);
+			}
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledAnthropic(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			await session.dispose();
+		}
+
+		expect(candidateIds[0]).toBe("k3-256k");
+		expect(candidateProviders[0]).toBe("kimi-code");
+		const deepseekIndex = candidateIds.indexOf("deepseek-v4-pro");
+		expect(deepseekIndex).toBeGreaterThan(0);
+		expect(candidateProviders[deepseekIndex]).toBe("deepseek");
+	});
 });

@@ -13585,6 +13585,16 @@ export class AgentSession {
 				for (const fallback of this.#resolveCompactionFallbackModels(availableModels)) {
 					addCandidate(fallback, { exemptFromDefer: true });
 				}
+				// Kimi's quota is finite and can be exhausted mid-session. When the
+				// runtime loop hits a usage-limit error it walks to the next
+				// candidate, so append DeepSeek (pro, then flash) as a
+				// cross-provider fallback rather than wedging the session.
+				for (const deepseekId of ["deepseek-v4-pro", "deepseek-v4-flash"]) {
+					addCandidate(
+						availableModels.find(model => model.provider === "deepseek" && model.id === deepseekId),
+						{ exemptFromDefer: true },
+					);
+				}
 			}
 		}
 		addCandidate(preferredModel ?? undefined);
@@ -14645,6 +14655,35 @@ export class AgentSession {
 
 							const message = error instanceof Error ? error.message : String(error);
 							const id = AIError.classify(error, candidate.api);
+							// A usage/quota limit (e.g. Kimi's "usage limit for this billing
+							// cycle") is the provider's, not a bad credential, and it is
+							// persistent — retrying the same model is pointless. Surface it
+							// as a provider failure and walk to the next candidate (which
+							// may be the DeepSeek cross-provider fallback).
+							if (AIError.is(id, AIError.Flag.UsageLimit)) {
+								logger.warn(
+									hasMoreCandidates
+										? "Auto-compaction summarizer reached its usage limit, trying next model"
+										: "Auto-compaction summarizer reached its usage limit, not retrying same model",
+									{
+										error: message,
+										model: `${candidate.provider}/${candidate.id}`,
+									},
+								);
+								lastNonCredentialError = error;
+								lastError = error;
+								if (hasMoreCandidates) {
+									this.#compactionLiveReporter?.retry({
+										attempt,
+										maxRetries: retrySettings.maxRetries,
+										delayMs: 0,
+										model: candidate,
+										nextModel: true,
+										reason: "Usage limit reached",
+									});
+								}
+								break;
+							}
 							if (AIError.is(id, AIError.Flag.AuthFailed)) {
 								lastError = this.#buildCompactionAuthError();
 								break;
@@ -14690,9 +14729,7 @@ export class AgentSession {
 							const shouldRetry =
 								retrySettings.enabled &&
 								attempt < retrySettings.maxRetries &&
-								(retryAfterMs !== undefined ||
-									AIError.is(id, AIError.Flag.Transient) ||
-									AIError.is(id, AIError.Flag.UsageLimit));
+								(retryAfterMs !== undefined || AIError.is(id, AIError.Flag.Transient));
 							if (!shouldRetry) {
 								lastError = error;
 								break;
