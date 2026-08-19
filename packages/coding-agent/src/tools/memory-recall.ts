@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger, untilAborted } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { formatCurrentTime, formatMemories } from "../hindsight/content";
+import { formatMnemopiStartupFailureMessage } from "../mnemopi/state";
 import recallDescription from "../prompts/tools/recall.md" with { type: "text" };
 import type { ToolSession } from ".";
 
@@ -47,7 +48,12 @@ export class MemoryRecallTool implements AgentTool<typeof memoryRecallSchema> {
 			if (backend === "mnemopi") {
 				const state = await (this.session.awaitMnemopiSessionState?.() ?? this.session.getMnemopiSessionState?.());
 				if (!state) {
-					throw new Error("Mnemopi backend is not initialised for this session.");
+					const failure = this.session.getMnemopiStartupFailure?.();
+					throw new Error(
+						failure
+							? formatMnemopiStartupFailureMessage(failure)
+							: "Mnemopi backend is not initialised for this session.",
+					);
 				}
 				try {
 					if (params.listBanks) {

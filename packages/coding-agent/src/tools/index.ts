@@ -18,7 +18,7 @@ import type { HindsightSessionState } from "../hindsight/state";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { LspTool } from "../lsp";
 import type { MCPManager } from "../mcp";
-import type { MnemopiSessionState } from "../mnemopi/state";
+import type { MnemopiSessionState, MnemopiStartupFailure } from "../mnemopi/state";
 import type { PlanModeState } from "../plan-mode/state";
 import type { AgentRegistry } from "../registry/agent-registry";
 import type { ArtifactManager } from "../session/artifacts";
@@ -245,6 +245,8 @@ export interface ToolSession {
 	 * "will never be ready".
 	 */
 	awaitMnemopiSessionState?: () => Promise<MnemopiSessionState | undefined>;
+	/** The classified reason the most recent mnemopi startup attempt failed, if any is on record — see `../mnemopi/state`. */
+	getMnemopiStartupFailure?: () => MnemopiStartupFailure | undefined;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */

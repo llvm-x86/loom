@@ -2,6 +2,7 @@ import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
 import { parseDeclaredBankRepo } from "../mnemopi/config";
+import { formatMnemopiStartupFailureMessage } from "../mnemopi/state";
 import { findMemoryIdsBySubstring } from "../mnemopi/tree";
 import memoryToolDescription from "../prompts/tools/memory.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -76,7 +77,12 @@ export class MemoryTool implements AgentTool<typeof memoryToolSchema> {
 	async execute(_id: string, params: MemoryToolParams): Promise<AgentToolResult> {
 		const state = await (this.session.awaitMnemopiSessionState?.() ?? this.session.getMnemopiSessionState?.());
 		if (!state) {
-			throw new Error("Mnemopi backend is not initialised for this session.");
+			const failure = this.session.getMnemopiStartupFailure?.();
+			throw new Error(
+				failure
+					? formatMnemopiStartupFailureMessage(failure)
+					: "Mnemopi backend is not initialised for this session.",
+			);
 		}
 		if (params.repo !== undefined) {
 			const slug = parseDeclaredBankRepo(params.repo);

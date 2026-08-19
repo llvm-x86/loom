@@ -28,15 +28,19 @@ import {
 	truncateApproxTokens,
 } from "./config";
 import {
+	classifyMnemopiStartupFailure,
+	formatMnemopiStartupFailureMessage,
 	getMnemopiScopedBanks,
 	getMnemopiScopedDbPaths,
 	getMnemopiSessionState,
+	getMnemopiStartupFailure,
 	loadMnemopi,
 	loadMnemopiCore,
 	MnemopiSessionState,
 	requireMnemopi,
 	requireMnemopiCore,
 	setMnemopiSessionState,
+	setMnemopiStartupFailure,
 } from "./state";
 import { readTreeWriteLog } from "./tree";
 
@@ -67,7 +71,7 @@ export const mnemopiBackend: MemoryBackend = {
 	id: "mnemopi",
 
 	async start(options: MemoryBackendStartOptions): Promise<void> {
-		const { session, settings, agentDir, modelRegistry } = options;
+		const { session } = options;
 		const sessionId = session.sessionId;
 		if (!sessionId) return;
 
@@ -88,16 +92,10 @@ export const mnemopiBackend: MemoryBackend = {
 			return;
 		}
 
-		try {
-			const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
-			await Promise.all([loadMnemopi(), loadMnemopiCore()]);
-			const state = new MnemopiSessionState({ sessionId, config, session });
-			const previous = setMnemopiSessionState(session, state);
-			await previous?.dispose();
-			state.attachSessionListeners();
-		} catch (error) {
-			logger.warn("Mnemopi: backend startup failed; memory backend inert.", { error: String(error) });
-		}
+		// `attemptMnemopiStartup` never throws (it catches, classifies, and
+		// records its own failures — see its doc comment) so this can never
+		// become a fatal session-boot error.
+		await attemptMnemopiStartup(options);
 	},
 
 	async buildDeveloperInstructions(_agentDir, settings, session): Promise<string | undefined> {
@@ -655,6 +653,101 @@ async function resolveMnemopiProviderOptions(
 function getMnemopiSessionStateFromParent(options: MemoryBackendStartOptions): MnemopiSessionState | undefined {
 	const parent = options.parentMnemopiSessionState;
 	return parent?.aliasOf ?? parent;
+}
+
+/** How long a `store-not-writable` startup failure blocks a further retry
+ * attempt. Keeps a tool call landing right after a failure from hammering the
+ * filesystem on every subsequent call while the operator is mid-fix. */
+export const MNEMOPI_STARTUP_RETRY_INTERVAL_MS = 60_000;
+
+// Per-session bookkeeping for the retry path. Keyed by WeakMap (not the
+// session-attached symbols `./state` uses for the failure record) because
+// this is `backend.ts`-private wiring: the args needed to redrive a startup
+// attempt, and the throttle clock, never need to be visible outside this file.
+const mnemopiStartupOptionsBySession = new WeakMap<AgentSession, MemoryBackendStartOptions>();
+const mnemopiRetryAttemptedAtBySession = new WeakMap<AgentSession, number>();
+const mnemopiNoticeShownForSession = new WeakSet<AgentSession>();
+
+/**
+ * Run one mnemopi backend startup attempt: load config, open the session's
+ * Mnemopi handles, install the session state. Used both by the initial
+ * `start()` call and by {@link retryMnemopiStartupIfDue} redriving a startup
+ * that previously failed with a transient, operator-fixable cause.
+ *
+ * Never throws — a failure is classified (see {@link classifyMnemopiStartupFailure}),
+ * logged loudly, surfaced to the user once per session via `emitNotice`, and
+ * recorded on the session (see `./state`'s `setMnemopiStartupFailure`) so
+ * later tool calls can raise an actionable error instead of the misleading
+ * "not initialised" message. The agent must keep working without memory when
+ * this fails, so startup failure is never fatal to session boot.
+ */
+async function attemptMnemopiStartup(options: MemoryBackendStartOptions): Promise<MnemopiSessionState | undefined> {
+	const { session, settings, agentDir, modelRegistry } = options;
+	const sessionId = session.sessionId;
+	if (!sessionId) return undefined;
+	mnemopiStartupOptionsBySession.set(session, options);
+	try {
+		const config = await loadMnemopiConfigWithProviders(settings, agentDir, modelRegistry, sessionId);
+		await Promise.all([loadMnemopi(), loadMnemopiCore()]);
+		const state = new MnemopiSessionState({ sessionId, config, session });
+		const previous = setMnemopiSessionState(session, state);
+		await previous?.dispose();
+		state.attachSessionListeners();
+		setMnemopiStartupFailure(session, undefined);
+		mnemopiNoticeShownForSession.delete(session);
+		return state;
+	} catch (error) {
+		const classified = classifyMnemopiStartupFailure(error);
+		setMnemopiStartupFailure(session, { ...classified, recordedAt: Date.now() });
+		logger.error("Mnemopi: backend startup failed; memory is disabled for this session until fixed.", {
+			kind: classified.kind,
+			detail: classified.detail,
+			path: classified.path,
+		});
+		if (!mnemopiNoticeShownForSession.has(session)) {
+			mnemopiNoticeShownForSession.add(session);
+			session.emitNotice?.(
+				"error",
+				`Mnemopi memory backend is inert: ${formatMnemopiStartupFailureMessage({ ...classified, recordedAt: Date.now() })}`,
+				"mnemopi",
+			);
+		}
+		return undefined;
+	}
+}
+
+/**
+ * Give a session's mnemopi backend a chance to recover from a `store-not-writable`
+ * startup failure. A read-only store is transient and operator-fixable (add
+ * the path to `ReadWritePaths=`, restart the service) — existing panes must
+ * regain working memory once the sandbox is fixed, without a session restart.
+ *
+ * Returns the live session state immediately if one already exists. Otherwise
+ * retries at most once per {@link MNEMOPI_STARTUP_RETRY_INTERVAL_MS} (or the
+ * injected `intervalMs`, for deterministic tests) so a burst of tool calls
+ * right after a failure doesn't hammer the filesystem. Only `store-not-writable`
+ * failures are retried automatically — an "unknown" failure is more likely a
+ * durable config/programming error than a transient one, so it is left for
+ * the operator to diagnose from the logged detail rather than retried blind.
+ */
+export async function retryMnemopiStartupIfDue(
+	session: AgentSession,
+	opts: { now?: () => number; intervalMs?: number } = {},
+): Promise<MnemopiSessionState | undefined> {
+	const existing = getMnemopiSessionState(session);
+	if (existing) return existing;
+	const failure = getMnemopiStartupFailure(session);
+	if (!failure || failure.kind !== "store-not-writable") return undefined;
+	const now = (opts.now ?? Date.now)();
+	const intervalMs = opts.intervalMs ?? MNEMOPI_STARTUP_RETRY_INTERVAL_MS;
+	const lastAttempt = mnemopiRetryAttemptedAtBySession.get(session);
+	if (lastAttempt !== undefined && now - lastAttempt < intervalMs) return undefined;
+	// Gate throttle BEFORE awaiting the attempt so concurrent calls landing in
+	// the same tick can't both slip past the check and double-fire.
+	mnemopiRetryAttemptedAtBySession.set(session, now);
+	const startupOptions = mnemopiStartupOptionsBySession.get(session);
+	if (!startupOptions) return undefined;
+	return attemptMnemopiStartup(startupOptions);
 }
 
 export function getMnemopiDbDirForTests(session: AgentSession): string | undefined {

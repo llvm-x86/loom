@@ -1727,6 +1727,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
 			awaitMnemopiSessionState: () => session?.awaitMnemopiSessionState() ?? Promise.resolve(undefined),
+			getMnemopiStartupFailure: () => session?.getMnemopiStartupFailure(),
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,

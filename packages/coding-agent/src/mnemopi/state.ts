@@ -101,6 +101,81 @@ interface AgentSessionWithMnemopiState extends AgentSession {
 	[kMnemopiSessionState]?: MnemopiSessionState;
 }
 
+/** Discriminated reason a mnemopi backend startup attempt failed. */
+export type MnemopiStartupFailureKind = "store-not-writable" | "unknown";
+
+/** Classified record of the most recent failed mnemopi startup attempt for a session. */
+export interface MnemopiStartupFailure {
+	kind: MnemopiStartupFailureKind;
+	/** Normalized error code when one was present (e.g. "EROFS", "SQLITE_READONLY"). */
+	code?: string;
+	/** Filesystem path extracted from the error message, when present. */
+	path?: string;
+	/** Human-readable detail: `"<code>: <path-or-message>"` when a code is known, else the raw message. */
+	detail: string;
+	/** `Date.now()` when this failure was recorded. */
+	recordedAt: number;
+}
+
+const kSqliteReadonlyPattern = /SQLITE_READONLY|readonly database/i;
+const kUnwritableFsCodes: Record<string, true> = { EROFS: true, EACCES: true, EPERM: true };
+const kUnwritableFsCodePattern = /\b(EROFS|EACCES|EPERM)\b/;
+const kQuotedPathPattern = /'([^']+)'|"([^"]+)"/;
+
+/**
+ * Pure classifier for a mnemopi backend startup error. Distinguishes a
+ * read-only/unwritable store (SQLite `SQLITE_READONLY` / "readonly database",
+ * or POSIX `EROFS`/`EACCES`/`EPERM` — checked via both `error.code` and the
+ * message text, since better-sqlite3 and bun:sqlite surface these
+ * differently) from every other ("unknown") startup failure.
+ */
+export function classifyMnemopiStartupFailure(error: unknown): Omit<MnemopiStartupFailure, "recordedAt"> {
+	const err = error as { code?: unknown; message?: unknown } | null | undefined;
+	const message = typeof err?.message === "string" ? err.message : String(error);
+	const rawCode = typeof err?.code === "string" ? err.code : undefined;
+	const codeMatch = message.match(kUnwritableFsCodePattern)?.[1];
+	const isSqliteReadonly = kSqliteReadonlyPattern.test(message) || rawCode === "SQLITE_READONLY";
+	const isUnwritableFs = (rawCode !== undefined && kUnwritableFsCodes[rawCode] === true) || codeMatch !== undefined;
+	if (!isSqliteReadonly && !isUnwritableFs) return { kind: "unknown", detail: message };
+	const code = isSqliteReadonly && !isUnwritableFs ? "SQLITE_READONLY" : (rawCode ?? codeMatch);
+	const pathMatch = message.match(kQuotedPathPattern);
+	const path = pathMatch ? (pathMatch[1] ?? pathMatch[2]) : undefined;
+	const detail = path ? `${code}: ${path}` : code ? `${code}: ${message}` : message;
+	return { kind: "store-not-writable", code, path, detail };
+}
+
+/** Renders the user-facing message for a classified startup failure — used by
+ * memory tool call sites that would otherwise raise the generic "not
+ * initialised" error when no state exists for the session. */
+export function formatMnemopiStartupFailureMessage(failure: MnemopiStartupFailure): string {
+	if (failure.kind === "store-not-writable") {
+		return (
+			`Memory is unavailable: the mnemopi store is not writable (${failure.detail}). ` +
+			"Retention and recall are disabled until the store is writable; this is an operator/filesystem issue, not a session error."
+		);
+	}
+	return (
+		`Memory is unavailable: the mnemopi backend failed to start (${failure.detail}). ` +
+		"Retention and recall are disabled for this session; check the mnemopi startup logs."
+	);
+}
+
+const kMnemopiStartupFailure = Symbol("mnemopi.startupFailure");
+
+interface AgentSessionWithMnemopiStartupFailure extends AgentSession {
+	[kMnemopiStartupFailure]?: MnemopiStartupFailure;
+}
+
+/** The classified failure from the most recent failed startup attempt, if any is on record. */
+export function getMnemopiStartupFailure(session: AgentSession | undefined): MnemopiStartupFailure | undefined {
+	return session ? (session as AgentSessionWithMnemopiStartupFailure)[kMnemopiStartupFailure] : undefined;
+}
+
+/** Records (or, passed `undefined`, clears) the classified startup failure for a session. */
+export function setMnemopiStartupFailure(session: AgentSession, failure: MnemopiStartupFailure | undefined): void {
+	(session as AgentSessionWithMnemopiStartupFailure)[kMnemopiStartupFailure] = failure;
+}
+
 interface MnemopiScopedMemory {
 	bank: string;
 	memory: Mnemopi;

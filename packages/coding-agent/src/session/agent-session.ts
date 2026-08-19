@@ -257,9 +257,16 @@ import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
 import { resolveMemoryBackend } from "../memory-backend";
+import { retryMnemopiStartupIfDue } from "../mnemopi/backend";
 import { sanitizeBankName } from "../mnemopi/config";
 import { shutdownMnemopiEmbedClient } from "../mnemopi/embed-client";
-import { getMnemopiSessionState, type MnemopiSessionState, setMnemopiSessionState } from "../mnemopi/state";
+import {
+	getMnemopiSessionState,
+	getMnemopiStartupFailure,
+	type MnemopiSessionState,
+	type MnemopiStartupFailure,
+	setMnemopiSessionState,
+} from "../mnemopi/state";
 import { containsOrchestrate, ORCHESTRATE_NOTICE } from "../modes/orchestrate";
 import { theme } from "../modes/theme/theme";
 import { parseTurnBudget } from "../modes/turn-budget";
@@ -4141,6 +4148,11 @@ export class AgentSession {
 		return getMnemopiSessionState(this);
 	}
 
+	/** The classified reason the most recent mnemopi startup attempt failed, if any is on record. */
+	getMnemopiStartupFailure(): MnemopiStartupFailure | undefined {
+		return getMnemopiStartupFailure(this);
+	}
+
 	/**
 	 * Record the in-flight (or already-settled) promise for the session's
 	 * memory-backend `start()` call. `sdk.ts` calls this once, right after
@@ -4161,10 +4173,16 @@ export class AgentSession {
 	 * settled-but-failed startup still resolves here with `undefined` state —
 	 * callers get the definitive answer instead of a false negative from a
 	 * startup that simply hadn't finished yet.
+	 *
+	 * A `store-not-writable` failure is transient and operator-fixable (the
+	 * sandbox gets a `ReadWritePaths=` entry, the service restarts) so, when
+	 * no live state exists, this also gives a throttled retry a chance to
+	 * recover the session in place — see `retryMnemopiStartupIfDue`.
 	 */
 	async awaitMnemopiSessionState(): Promise<MnemopiSessionState | undefined> {
 		await this.#memoryBackendStartup;
-		return this.getMnemopiSessionState();
+		const state = this.getMnemopiSessionState();
+		return state ?? (await retryMnemopiStartupIfDue(this));
 	}
 
 	/** TTSR manager for time-traveling stream rules */
