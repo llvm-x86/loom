@@ -374,6 +374,35 @@ describe("memory tree", () => {
 		}
 	});
 
+	it("lists a bank rendered by an older build (bare `# Memory tree` title) in the index", async () => {
+		const root = makeRoot();
+		try {
+			// Exactly the three shapes found on a live box that predates the
+			// per-bank layout: a bank dir whose entry file still carries the old
+			// untitled heading, a flat subtree dir, and a subtree dir with no
+			// entry file at all. Only the first is a bank.
+			await mkdir(path.join(root, "llvm-x86-agent-chat", "concepts"), { recursive: true });
+			await writeFile(
+				path.join(root, "llvm-x86-agent-chat", "MEMORY.md"),
+				"# Memory tree\n\nAuto-generated entry point.\n",
+				"utf8",
+			);
+			await writeFile(path.join(root, "llvm-x86-agent-chat", "concepts", "note.md"), "# note\n\nbody\n", "utf8");
+			await mkdir(path.join(root, "concepts"), { recursive: true });
+			await writeFile(path.join(root, "concepts", "MEMORY.md"), "# Memory: concepts\n\nflat entry\n", "utf8");
+			await mkdir(path.join(root, "projects"), { recursive: true });
+
+			await renderMemoryTreeIndex(root);
+
+			const index = await readFile(path.join(root, "MEMORY.md"), "utf8");
+			expect(index).toContain("llvm-x86-agent-chat");
+			expect(index).not.toContain("concepts |");
+			expect(index).not.toContain("projects |");
+		} finally {
+			cleanup(root);
+		}
+	});
+
 	it("rejects a bank id that would escape treeRoot via traversal or a separator", () => {
 		expect(bankTreeDir("/tmp/tree", "../escape")).toBeUndefined();
 		expect(bankTreeDir("/tmp/tree", "a/b")).toBeUndefined();

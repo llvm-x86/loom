@@ -314,6 +314,23 @@ function renderSubtreeEntry(
  */
 export const BANK_ROOT_ENTRY_MARKER = "# Memory tree:";
 
+/** Bank root entry title written by builds predating the per-bank layout. */
+const LEGACY_BANK_ROOT_ENTRY_TITLE = "# Memory tree";
+
+/**
+ * True when `content` is a bank's root entry file rather than a subtree entry.
+ * Accepts both the current titled form (`# Memory tree: <bank>`) and the bare
+ * `# Memory tree` line older builds wrote, so banks rendered before the
+ * per-bank layout still appear in the cross-project index instead of staying
+ * invisible until that project happens to write another memory. A subtree
+ * entry (`# Memory: <subtree>`) matches neither.
+ */
+function isBankRootEntry(content: string): boolean {
+	if (content.startsWith(`${BANK_ROOT_ENTRY_MARKER} `)) return true;
+	const firstLine = content.slice(0, content.indexOf("\n") === -1 ? undefined : content.indexOf("\n")).trim();
+	return firstLine === LEGACY_BANK_ROOT_ENTRY_TITLE;
+}
+
 function renderRootEntry(
 	treeRoot: string,
 	bank: string,
@@ -411,8 +428,9 @@ function renderBankIndex(treeRoot: string, rows: readonly { bank: string; leaves
  * Scan `treeRoot` for rendered bank directories and (re)write the
  * cross-project index at `<treeRoot>/MEMORY.md`. Filesystem-driven, not
  * session-driven: a bank this session never opened still shows up as long as
- * some process rendered it. A directory only counts as a bank if its own
- * `MEMORY.md` carries the per-bank marker (`# Memory tree: <bank>`) —
+ * `MEMORY.md` carries the per-bank marker (`# Memory tree: <bank>`) or the
+ * pre-per-bank-title legacy form (a bare `# Memory tree` line, written by
+ * older builds that rendered a bank entry without naming it) —
  * legacy flat subtree dirs from the pre-per-bank layout (`concepts/`,
  * `projects/`, ...) have a *subtree* MEMORY.md (`# Memory: <subtree>`)
  * instead and must never be mistaken for a bank; `archive/` and stray
@@ -431,7 +449,7 @@ export async function renderMemoryTreeIndex(treeRoot: string): Promise<void> {
 		const bankDir = path.join(treeRoot, entry.name);
 		const entryFile = path.join(bankDir, MEMORY_TREE_ENTRY_FILE);
 		const content = await readFile(entryFile, "utf8").catch(() => null);
-		if (content === null || !content.startsWith(`${BANK_ROOT_ENTRY_MARKER} `)) continue;
+		if (content === null || !isBankRootEntry(content)) continue;
 		const [leaves, updated] = await Promise.all([
 			countActiveLeaves(bankDir),
 			stat(entryFile)
