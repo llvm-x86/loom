@@ -16,9 +16,25 @@ import {
 } from "../hindsight/content";
 import { extractMessages } from "../hindsight/transcript";
 import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
-import type { MnemopiBackendConfig, MnemopiScoping } from "./config";
+import { isRecord, toolArgs, touchedRepoDirs } from "../utils/session-context-sync";
+import {
+	collectBankReposFromTouchedDirs,
+	parseDeclaredBankRepo,
+	resolveBankRepo,
+	resolveBankRepoFromTouchedDirs,
+	sanitizeBankName,
+	withTouchedRepoBankScope,
+	type MnemopiBackendConfig,
+	type MnemopiScoping,
+} from "./config";
 import { mnemopiEmbedClient } from "./embed-client";
-import { findMemoryIdByNormalizedContent, renderMemoryTree, restoreMemoryRow } from "./tree";
+import {
+	bankTreeDir,
+	findMemoryIdByNormalizedContent,
+	renderMemoryTree,
+	renderMemoryTreeIndex,
+	restoreMemoryRow,
+} from "./tree";
 
 // The mnemopi package pulls the embeddings stack; keep it off the CLI startup
 // module graph by loading it lazily at the async boundaries that need it.
@@ -310,14 +326,38 @@ export interface MnemopiSessionStateOptions {
 	hasRecalledForFirstTurn?: boolean;
 }
 
+/**
+ * Scan a NEWEST-FIRST message list (same order `maybeRebindTouchedRepoBank`
+ * already reverses to for {@link touchedRepoDirs}) for the most recent
+ * `memory` tool call carrying a validated `repo` argument. Recovers the
+ * sticky declaration on `--resume` — the transcript already has the prior
+ * tool call, so there is nothing to persist to a sidecar file — using the
+ * same `isRecord`/`toolArgs` idiom `touchedRepoDirs` uses to read tool-call
+ * blocks.
+ */
+function scanDeclaredBankRepo(messagesNewestFirst: readonly unknown[]): string | undefined {
+	for (const message of messagesNewestFirst) {
+		const content = isRecord(message) ? message.content : undefined;
+		if (!Array.isArray(content)) continue;
+		for (const block of content) {
+			if (!isRecord(block) || block.type !== "toolCall" || block.name !== "memory") continue;
+			const rawRepo = toolArgs(block).repo;
+			if (typeof rawRepo !== "string") continue;
+			const slug = parseDeclaredBankRepo(rawRepo);
+			if (slug) return slug;
+		}
+	}
+	return undefined;
+}
+
 export class MnemopiSessionState {
 	sessionId: string;
-	readonly config: MnemopiBackendConfig;
+	config: MnemopiBackendConfig;
 	readonly session: AgentSession;
-	readonly memory: Mnemopi;
-	readonly globalMemory?: Mnemopi;
+	memory: Mnemopi;
+	globalMemory?: Mnemopi;
 	readonly aliasOf?: MnemopiSessionState;
-	private readonly scoped: MnemopiScopedResources;
+	private scoped: MnemopiScopedResources;
 	lastRetainedTurn: number;
 	hasRecalledForFirstTurn: boolean;
 	lastRecallSnippet?: string;
@@ -328,6 +368,18 @@ export class MnemopiSessionState {
 	/** Reconcile-on-shutdown hook state; see {@link MnemopiSessionState.attachSessionListeners}. */
 	private exitReconcileArmed = false;
 	private exitReconcileCancel?: () => void;
+	/** Transcript length last scanned by {@link maybeRebindTouchedRepoBank} — skip the rescan when nothing new was appended. */
+	private touchedRepoRescanMessageCount = 0;
+	/** `winner|sorted,touched,slugs` signature from the last rebind check — skip the rebuild when it hasn't actually changed. */
+	private touchedRepoSignature = "";
+	/**
+	 * Sticky agent-declared `owner/repo` slug (precedence step (c) — see
+	 * `MnemopiBackendConfig` and `declareBankRepo`/`maybeRebindTouchedRepoBank`
+	 * below). Set synchronously by the `memory` tool's `repo` param on the
+	 * turn it's declared, and re-derived from the transcript on `--resume`
+	 * (see `scanDeclaredBankRepo`) — never persisted to a sidecar file.
+	 */
+	private declaredBankRepo?: string;
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -503,6 +555,60 @@ export class MnemopiSessionState {
 		return this.collectScopedRecallResults(query);
 	}
 
+	/**
+	 * Read-only cross-project recall: query ANOTHER bank on disk without
+	 * touching this session's own scoped state. `bankRef` accepts either an
+	 * `owner/repo` slug or a literal bank id — both resolve through the same
+	 * {@link resolveBankReference} sanitiser the write path uses, so
+	 * "Family-Fun-Group/SkyRail" and "Family-Fun-Group-SkyRail" hit the same
+	 * bank. The foreign `Mnemopi` handle is opened, queried, and closed here;
+	 * it is never added to `this.scoped` (recall/retain/global), so a later
+	 * `remember()` on this session can never land in the foreign project —
+	 * that's what "read-only" means for this method.
+	 */
+	async recallFromBank(query: string, bankRef: string): Promise<{ bank: string; results: RecallResult[] }> {
+		const bank = resolveBankReference(bankRef);
+		const available = listAvailableBankIds(this.config);
+		if (!available.includes(bank)) {
+			throw new Error(
+				`No such memory bank "${bank}". Available banks: ${available.length > 0 ? available.join(", ") : "(none)"}.`,
+			);
+		}
+		const memory = openForeignBank(this.config, bank);
+		try {
+			const results = await memory.recallEnhanced(query, this.config.recallLimit, {
+				includeFacts: true,
+				channelId: bank,
+			});
+			return { bank, results };
+		} finally {
+			// Always close: this handle is scratch for the duration of one
+			// recall call, not a resource the session owns or reuses.
+			memory.close();
+		}
+	}
+
+	/**
+	 * Discovery surface for cross-project recall: every bank found on disk
+	 * (`<memories>/mnemopi/banks/*` plus the shared/default bank), each with
+	 * its row count, so the agent can tell a real bank from an empty one
+	 * before spending a query on it. Opens and closes each bank in turn —
+	 * same open-and-close lifecycle `createStatsTargets`/`createStatsMemory`
+	 * use for stats/diagnostics in backend.ts, not a new one.
+	 */
+	listAvailableBanks(): { bank: string; memories: number; isOwnScope: boolean }[] {
+		const ownScope = new Set(getMnemopiScopedBanks(this.config));
+		return listAvailableBankIds(this.config).map(bank => {
+			const memory = openForeignBank(this.config, bank);
+			try {
+				return { bank, memories: memory.getStats().total_memories, isOwnScope: ownScope.has(bank) };
+			} finally {
+				memory.close();
+			}
+		});
+	}
+
+
 	formatScopedRecallContext(
 		results: readonly RecallResult[],
 		format: "bullet" | "json" = "bullet",
@@ -566,33 +672,53 @@ export class MnemopiSessionState {
 
 	/**
 	 * Render every scoped bank into the background-maintained memory tree
-	 * (`mnemopi.treeRoot`). Files are the agent-readable projection; the bank
-	 * is the source of truth. Non-throwing — a render failure must never break
-	 * the agent loop. Aliased subagent states defer to their parent: they share
-	 * the same banks, and concurrent renders would clobber entry points.
+	 * (`mnemopi.treeRoot`). Each bank gets its own `<treeRoot>/<bank>`
+	 * subdirectory (via `bankTreeDir`) so N scoped banks never clobber one
+	 * another's entry points into a shared `<treeRoot>/MEMORY.md` — that file
+	 * is reserved for the cross-project index instead. Files are the
+	 * agent-readable projection; the bank is the source of truth.
+	 * Non-throwing — a render failure must never break the agent loop.
+	 * Aliased subagent states defer to their parent: they share the same
+	 * banks, and concurrent renders would clobber entry points.
 	 */
 	async renderMemoryTree(): Promise<void> {
 		if (!this.config.treeEnabled || this.aliasOf) return;
 		const seen = new Set<string>();
 		const scoped: MnemopiScopedMemory[] = [this.scoped.retain, ...this.scoped.recall];
 		if (this.scoped.global) scoped.push(this.scoped.global);
+		let renderedAny = false;
 		for (const entry of scoped) {
 			if (seen.has(entry.bank)) continue;
 			seen.add(entry.bank);
+			const bankDir = bankTreeDir(this.config.treeRoot, entry.bank);
+			if (!bankDir) {
+				if (this.config.debug) {
+					logger.debug("Mnemopi: memory tree render skipped — bank id fails path guard", { bank: entry.bank });
+				}
+				continue;
+			}
 			try {
 				await renderMemoryTree({
 					memory: entry.memory,
 					bank: entry.bank,
-					treeRoot: this.config.treeRoot,
+					treeRoot: bankDir,
 					leafCharCap: this.config.treeLeafCharCap,
 					entryRows: this.config.treeEntryRows,
 					archiveGcDays: this.config.treeArchiveGcDays,
 				});
+				renderedAny = true;
 			} catch (error) {
 				if (this.config.debug) {
 					logger.debug("Mnemopi: memory tree render failed", { bank: entry.bank, error: String(error) });
 				}
 			}
+		}
+		if (renderedAny) {
+			await renderMemoryTreeIndex(this.config.treeRoot).catch((error: unknown) => {
+				if (this.config.debug) {
+					logger.debug("Mnemopi: memory tree index render failed", { error: String(error) });
+				}
+			});
 		}
 		this.treeChangePending = false;
 	}
@@ -626,7 +752,126 @@ export class MnemopiSessionState {
 		return formatRecallBlock(results);
 	}
 
+	/**
+	 * Agent-declared bank repo (precedence step (c) — see
+	 * `MnemopiBackendConfig.bankRepoPinned`/`resolveBankRepo` in config.ts for
+	 * the full pin > declared > cwd-origin > touched-repo precedence). Called
+	 * synchronously from the `memory` tool's `repo` param, so the write the
+	 * agent is making RIGHT NOW lands in the declared bank too, not just
+	 * subsequent ones. Sticky: recorded on `declaredBankRepo` so every later
+	 * call (including ones with no `repo`) keeps using it, and recovered on
+	 * `--resume` by {@link maybeRebindTouchedRepoBank} scanning the transcript
+	 * for this same declaration (see `scanDeclaredBankRepo`) rather than a
+	 * sidecar file.
+	 *
+	 * No-ops under an operator pin (a/b) — the whole point of a pin is that
+	 * it outranks everything, including the agent — or `global` scoping,
+	 * where there is no per-repo write bank to redirect. Also no-ops on an
+	 * alias (sub-session sharing its parent's scoped resources): only the
+	 * owning state may swap them.
+	 */
+	async declareBankRepo(repo: string): Promise<void> {
+		if (this.declaredBankRepo === repo) return;
+		this.declaredBankRepo = repo;
+		if (this.aliasOf || this.config.bankRepoPinned || this.config.scoping === "global") return;
+		const cwd = this.session.sessionManager.getCwd();
+		const nextConfig = withTouchedRepoBankScope(this.config, cwd, repo, [repo]);
+		await this.rebindToConfig(nextConfig);
+	}
+
+	/**
+	 * Console-lane rebind for the WRITE bank (see `MnemopiBackendConfig.bankRepoPinned`
+	 * and `resolveBankRepo` in config.ts for the full pin > declared-repo >
+	 * cwd-origin > touched-repo precedence). No-ops entirely once the bank is
+	 * PINNED (setting/env, steps a/b) — that's the only step nothing may
+	 * override, so there's nothing left to re-detect.
+	 *
+	 * Runs once per user turn (called from {@link beforeAgentStartPrompt}, NOT
+	 * from every recall/retain — scanning the whole transcript on each memory
+	 * op would make memory ops O(n) on long sessions; once-per-turn matches
+	 * the cadence Hindsight's own `onHindsightScopeChanged` rebind check
+	 * runs at). Throttled further by a message-count guard: if nothing was
+	 * appended to the transcript since the last check there is nothing new
+	 * to detect, so the tool-call scan is skipped outright.
+	 *
+	 * Precedence among the non-pinned steps: (c) an agent-declared `repo` —
+	 * already applied live by {@link declareBankRepo}, but re-derived here
+	 * from the transcript so a `--resume`'d process (which replays messages
+	 * into a fresh, blank `declaredBankRepo`) recovers it without a new tool
+	 * call — beats (d) `cwd`'s own git origin, which beats (e) the
+	 * MOST RECENTLY touched repo (transcript scanned newest-message-first).
+	 * Every repo seen via any of (c)/(d)/(e) still joins the RECALL union —
+	 * recall only ever grows, so nothing already written becomes unreachable.
+	 */
+	private async maybeRebindTouchedRepoBank(): Promise<void> {
+		if (this.aliasOf || this.config.bankRepoPinned || this.config.scoping === "global") return;
+		const messages = this.session.messages;
+		if (messages.length === this.touchedRepoRescanMessageCount) return;
+		this.touchedRepoRescanMessageCount = messages.length;
+		const cwd = this.session.sessionManager.getCwd();
+		// Reverse so the Map's first-insertion order (touchedRepoDirs never
+		// reorders on a repeat touch) reflects recency, not first-touch order;
+		// the same reversed list also feeds the declared-repo scan below.
+		const reversed = [...messages].reverse();
+		const declared = this.declaredBankRepo ?? scanDeclaredBankRepo(reversed);
+		this.declaredBankRepo = declared;
+		const dirsByRecency = touchedRepoDirs(reversed, cwd);
+		const strongDirs = [...dirsByRecency.entries()].filter(([, info]) => info.strong).map(([dir]) => dir);
+		const cwdOriginRepo = resolveBankRepo(cwd);
+		const touchedWinner = strongDirs.length > 0 ? resolveBankRepoFromTouchedDirs(strongDirs) : undefined;
+		const winner = declared ?? cwdOriginRepo ?? touchedWinner;
+		const allRepos = collectBankReposFromTouchedDirs(strongDirs);
+		for (const repo of [declared, cwdOriginRepo]) {
+			if (repo && !allRepos.includes(repo)) allRepos.push(repo);
+		}
+		const signature = `${winner ?? ""}|${[...allRepos].sort().join(",")}`;
+		if (signature === this.touchedRepoSignature) return;
+		this.touchedRepoSignature = signature;
+		if (!winner && allRepos.length === 0) return;
+		const nextConfig = withTouchedRepoBankScope(this.config, cwd, winner, allRepos);
+		await this.rebindToConfig(nextConfig);
+	}
+
+	/**
+	 * Swap this session's scoped Mnemopi resources over to `nextConfig`'s bank
+	 * routing, or just adopt it as a no-op when the routing didn't actually
+	 * change. Shared by {@link declareBankRepo} (immediate, same-turn effect)
+	 * and {@link maybeRebindTouchedRepoBank} (throttled per-turn rescan) so
+	 * there is exactly one place that opens/closes bank handles.
+	 */
+	private async rebindToConfig(nextConfig: MnemopiBackendConfig): Promise<void> {
+		const routingUnchanged =
+			nextConfig.bank === this.config.bank &&
+			nextConfig.retainBank === this.config.retainBank &&
+			nextConfig.recallBanks?.length === this.config.recallBanks?.length &&
+			(nextConfig.recallBanks ?? []).every((bank, i) => bank === (this.config.recallBanks ?? [])[i]);
+		if (routingUnchanged) {
+			this.config = nextConfig;
+			return;
+		}
+		const previousScoped = this.scoped;
+		const nextScoped = createScopedResources(nextConfig);
+		this.config = nextConfig;
+		this.scoped = nextScoped;
+		this.memory = nextScoped.retain.memory;
+		this.globalMemory = nextScoped.global?.memory;
+		// Flush in-flight fact extraction on the outgoing banks before closing
+		// their handles — the same non-blocking shutdown step `dispose()` runs
+		// (no `sleep`, no fresh retain: the transcript already written to the
+		// old bank stays there, and `maybeRetainOnAgentEnd` resumes cleanly
+		// against whichever bank is current when it next fires).
+		for (const memory of previousScoped.owned) {
+			try {
+				await memory.flushExtractions();
+			} catch (error) {
+				logger.warn("Mnemopi: flush on bank rebind failed.", { error: String(error) });
+			}
+		}
+		for (const memory of previousScoped.owned) memory.close();
+	}
+
 	async beforeAgentStartPrompt(promptText: string): Promise<string | undefined> {
+		await this.maybeRebindTouchedRepoBank();
 		const parts: string[] = [];
 		if (this.config.autoRecall && !this.hasRecalledForFirstTurn) {
 			const latestPrompt = promptText.trim();
@@ -644,8 +889,9 @@ export class MnemopiSessionState {
 			}
 		}
 		if (this.treeChangePending) {
+			const bankDir = bankTreeDir(this.config.treeRoot, this.scoped.retain.bank) ?? this.config.treeRoot;
 			parts.push(
-				`Memory: a change you requested awaits materialisation. Read \`${this.config.treeRoot}/MEMORY.md\` to verify the leaf landed.`,
+				`Memory: a change you requested awaits materialisation. Read \`${bankDir}/MEMORY.md\` to verify the leaf landed.`,
 			);
 		}
 		return parts.length > 0 ? parts.join("\n\n") : undefined;
@@ -1033,6 +1279,51 @@ function resolveBankDbPath(config: MnemopiBackendConfig, bank: string): string {
 	if (bank === sharedBank) return config.dbPath;
 	const { BankManager } = requireMnemopiCore();
 	return new BankManager(dirname(config.dbPath)).getBankDbPath(bank);
+}
+
+/**
+ * Resolve a caller-supplied cross-bank reference to a bank id. Runs the same
+ * two steps the write path uses so both spellings of a project land on the
+ * same bank: {@link parseDeclaredBankRepo} validates an `owner/repo` slug
+ * (returns `undefined` for a bare bank id, falling through to it unchanged),
+ * then {@link sanitizeBankName} applies the exact charset/length collapsing
+ * `projectBank` uses when it derives a bank id from a slug — so
+ * "Family-Fun-Group/SkyRail" and "Family-Fun-Group-SkyRail" both resolve to
+ * "Family-Fun-Group-SkyRail".
+ */
+export function resolveBankReference(value: string): string {
+	const trimmed = value.trim();
+	const slug = parseDeclaredBankRepo(trimmed);
+	return sanitizeBankName(slug ?? trimmed) ?? trimmed;
+}
+
+/** Every bank id present on disk (`<memories>/mnemopi/banks/*` + the shared/default bank). */
+function listAvailableBankIds(config: MnemopiBackendConfig): string[] {
+	const { BankManager } = requireMnemopiCore();
+	return new BankManager(dirname(config.dbPath)).listBanks();
+}
+
+/**
+ * Open a bank purely to read it — cross-bank recall and the bank-discovery
+ * listing both use this, never `createMemory` (which enables
+ * `proactiveLinking` for the session's OWN scoped banks). `reconcile: false`
+ * keeps this open from kicking off background tree/consolidation work for a
+ * project this session isn't actually working in; callers MUST `close()` the
+ * returned handle themselves once done.
+ */
+function openForeignBank(config: MnemopiBackendConfig, bank: string): Mnemopi {
+	const providerOptions = config.providerOptions as Record<string, unknown>;
+	const { Mnemopi } = requireMnemopi();
+	return new Mnemopi({
+		dbPath: resolveBankDbPath(config, bank),
+		bank,
+		sessionId: bank,
+		authorId: "coding-agent",
+		authorType: "agent",
+		channelId: bank,
+		...providerOptions,
+		reconcile: false,
+	} as ConstructorParameters<typeof Mnemopi>[0]);
 }
 
 function mergeRecallResult(

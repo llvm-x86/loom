@@ -249,12 +249,15 @@ describe("Mnemopi tool factories", () => {
 		expect(MemoryTool.createIf(mnemopiSession)).toBeInstanceOf(MemoryTool);
 	});
 
-	it("retain/recall/reflect/edit factories return null under mnemopi (single `memory` channel)", () => {
+	it("retain/reflect/edit factories return null under mnemopi, but recall stays for cross-bank reads", () => {
 		const session = makeSession(Settings.isolated({ "memory.backend": "mnemopi" }));
 		expect(MemoryRetainTool.createIf(session)).toBeNull();
-		expect(MemoryRecallTool.createIf(session)).toBeNull();
 		expect(MemoryReflectTool.createIf(session)).toBeNull();
 		expect(MemoryEditTool.createIf(session)).toBeNull();
+		// Writing stays on the single `memory` channel and a session reads its own
+		// memories as tree files, but another project's bank is only reachable
+		// through the SQLite index, so recall is exposed on mnemopi too.
+		expect(MemoryRecallTool.createIf(session)).toBeInstanceOf(MemoryRecallTool);
 	});
 
 	it("retain/recall/reflect factories return tool instances when memory.backend === hindsight", () => {
@@ -402,6 +405,38 @@ describe("memory.execute (Mnemopi backend)", () => {
 		expect(findMemoryIdsBySubstring(state.getScopedRetainTarget().memory, "anything", 5)).toHaveLength(0);
 	});
 
+	it("repo declares the bank for the write, sticks for a later call that omits it, and rejects malformed slugs", async () => {
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		const state = registerMnemopiState();
+		const tool = MemoryTool.createIf(makeSession(settings))!;
+
+		for (const bad of ["not-a-slug", "a/b/c/d", ""]) {
+			const result = await tool.execute("call-memory-bad-repo", { action: "add", content: "x", repo: bad });
+			expect(result.useless).toBe(true);
+		}
+		expect(findMemoryIdsBySubstring(state.getScopedRetainTarget().memory, "x", 5)).toHaveLength(0);
+
+		const declared = await tool.execute("call-memory-declare", {
+			action: "add",
+			content: "SkyRail uses rolling deploys",
+			repo: "Family-Fun-Group/SkyRail",
+		});
+		expect(declared.details).toMatchObject({ status: "queued" });
+		expect(state.getScopedRetainTarget().bank).toBe("Family-Fun-Group-SkyRail");
+		const firstIds = findMemoryIdsBySubstring(state.getScopedRetainTarget().memory, "rolling deploys", 5);
+		expect(firstIds).toHaveLength(1);
+
+		// Sticky: a later call with NO `repo` still targets the declared bank.
+		const sticky = await tool.execute("call-memory-sticky", {
+			action: "add",
+			content: "SkyRail also uses blue-green for the db layer",
+		});
+		expect(sticky.details).toMatchObject({ status: "queued" });
+		expect(state.getScopedRetainTarget().bank).toBe("Family-Fun-Group-SkyRail");
+		const secondIds = findMemoryIdsBySubstring(state.getScopedRetainTarget().memory, "blue-green", 5);
+		expect(secondIds).toHaveLength(1);
+	});
+
 	it("replace updates the matched memory's content", async () => {
 		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
 		const state = registerMnemopiState();
@@ -465,6 +500,54 @@ describe("memory.execute (Mnemopi backend)", () => {
 		await expect(tool.execute("call-memory-no-state", { action: "add", content: "x" })).rejects.toThrow(
 			/not initialised/i,
 		);
+	});
+
+	it("waits for a still-starting backend instead of failing the race (regression: --resume)", async () => {
+		// Reproduces the mechanism behind "Mnemopi backend is not initialised for
+		// this session." on --resume: sdk.ts's `startMemoryBackend()` is a
+		// fire-and-forget task (autolearn.enabled=false, the common case), so a
+		// tool call can legitimately arrive before `mnemopiBackend.start()` has
+		// registered state. A resumed session's next turn can be dispatched
+		// immediately (no fresh-session warm-up delay), so it hits this window
+		// deterministically where a fresh session usually outlives it. The fix
+		// makes the tool await the tracked startup promise instead of treating
+		// "not ready yet" as "will never be ready".
+		const settings = Settings.isolated({ "memory.backend": "mnemopi" });
+		let state: MnemopiSessionState | undefined;
+		const startupGate = Promise.withResolvers<void>();
+		const session = {
+			cwd: "/tmp",
+			hasUI: false,
+			settings,
+			getSessionFile: () => null,
+			getSessionId: () => TEST_SESSION_ID,
+			getSessionSpawns: () => null,
+			getMnemopiSessionState: () => state,
+			// Simulates AgentSession.awaitMnemopiSessionState(): blocks on the
+			// in-flight startup task, then re-reads whatever state start()
+			// eventually registered.
+			awaitMnemopiSessionState: async () => {
+				await startupGate.promise;
+				return state;
+			},
+		} as unknown as ToolSession;
+
+		const tool = MemoryTool.createIf(session)!;
+		const execution = tool.execute("call-memory-race", {
+			action: "add",
+			content: "resume race fact survives the startup race",
+		});
+
+		// The tool call above is already in flight; only now does the
+		// backend's fire-and-forget start() resolve and register state —
+		// exactly the ordering a resumed session's first turn can produce.
+		state = registerMnemopiState();
+		startupGate.resolve();
+
+		const result = await execution;
+		expect(result.details).toMatchObject({ status: "queued" });
+		const ids = findMemoryIdsBySubstring(state.getScopedRetainTarget().memory, "survives the startup race", 5);
+		expect(ids).toHaveLength(1);
 	});
 
 	it("dedupes repeated identical fact writes onto the same leaf id", async () => {
@@ -789,7 +872,7 @@ describe("Mnemopi backend lifecycle", () => {
 
 		const [id] = findMemoryIdsBySubstring(retainMemory, "consolidated fact for the tree", 5);
 		expect(id).toBeDefined();
-		const leaf = await readFile(path.join(config.treeRoot, "concepts", `${id}.md`), "utf8");
+		const leaf = await readFile(path.join(config.treeRoot, retainMemory.bank, "concepts", `${id}.md`), "utf8");
 		expect(leaf).toContain("status: active");
 
 		registeredMnemopiState = undefined;
@@ -844,7 +927,7 @@ describe("Mnemopi backend lifecycle", () => {
 
 		const summary = await mnemopiBackend.apply!(path.dirname(tempDbPath!), "/tmp", state.session);
 		expect(summary).toContain("Memory tree reconciled");
-		const leaf = await readFile(path.join(config.treeRoot, "concepts", `${id}.md`), "utf8");
+		const leaf = await readFile(path.join(config.treeRoot, retain.bank, "concepts", `${id}.md`), "utf8");
 		expect(leaf).toContain("status: active");
 
 		registeredMnemopiState = undefined;

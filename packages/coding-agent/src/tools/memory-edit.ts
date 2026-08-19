@@ -69,7 +69,7 @@ export class MemoryEditTool implements AgentTool<typeof memoryEditSchema> {
 	}
 
 	async execute(_id: string, params: MemoryEditParams): Promise<AgentToolResult> {
-		const state = this.session.getMnemopiSessionState?.();
+		const state = await (this.session.awaitMnemopiSessionState?.() ?? this.session.getMnemopiSessionState?.());
 		if (!state) {
 			throw new Error("Mnemopi backend is not initialised for this session.");
 		}

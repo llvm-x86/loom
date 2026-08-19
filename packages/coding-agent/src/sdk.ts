@@ -1726,6 +1726,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			getSessionId: () => sessionManager.getSessionId?.() ?? null,
 			getHindsightSessionState: () => session?.getHindsightSessionState(),
 			getMnemopiSessionState: () => session?.getMnemopiSessionState(),
+			awaitMnemopiSessionState: () => session?.awaitMnemopiSessionState() ?? Promise.resolve(undefined),
 			getAgentId: () => resolvedAgentId,
 			getToolByName: name => session?.getToolByName(name),
 			agentRegistry,
@@ -3230,15 +3231,28 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		// mid-session DISABLE. The subscription lives for the session's lifetime; the
 		// reference is intentionally discarded (the listener retains it).
 		if (!restrictToolNames) {
+			// Track the startup promise on the session regardless of which branch
+			// fires it: `memory-{tool,recall,retain,edit,reflect}.ts`/`learn.ts`
+			// call `session.awaitMnemopiSessionState()` before failing with "not
+			// initialised" so a tool call that lands before this fire-and-forget
+			// task settles (the common `autolearn.enabled=false` path below) waits
+			// for the real answer instead of racing a background task it can't
+			// see. `.catch` makes the tracked promise never reject: `start()`
+			// already logs and swallows its own failures (mnemopiBackend.start's
+			// try/catch), and a `resolveMemoryBackend` throw here must not become
+			// an unhandled rejection now that the promise may go unconsumed when
+			// no tool call ever awaits it.
+			const memoryBackendStartup = logger.time("startMemoryStartupTask", startMemoryBackend).catch(error => {
+				logger.warn("Memory backend startup task failed.", { error: String(error) });
+			});
+			session.setMemoryBackendStartup(memoryBackendStartup);
 			if (settings.get("autolearn.enabled") && taskDepth === 0) {
-				await logger.time("startMemoryStartupTask", startMemoryBackend);
+				await memoryBackendStartup;
 				new AutoLearnController({
 					session,
 					settings,
 					capture: content => session.runAutolearnCapture(signal => runAutoLearnCapture(content, signal)),
 				});
-			} else {
-				void logger.time("startMemoryStartupTask", startMemoryBackend);
 			}
 		}
 

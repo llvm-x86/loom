@@ -1,10 +1,17 @@
 import { describe, expect, it } from "bun:test";
 import { mkdtempSync, rmSync, utimesSync } from "node:fs";
-import { readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import * as path from "node:path";
 import { Mnemopi } from "@oh-my-pi/pi-mnemopi/core";
-import { findMemoryIdsBySubstring, readTreeWriteLog, renderMemoryTree, restoreMemoryRow } from "../tree";
+import {
+	bankTreeDir,
+	findMemoryIdsBySubstring,
+	readTreeWriteLog,
+	renderMemoryTree,
+	renderMemoryTreeIndex,
+	restoreMemoryRow,
+} from "../tree";
 
 describe("memory tree", () => {
 	function makeMemory(): Mnemopi {
@@ -284,6 +291,108 @@ describe("memory tree", () => {
 			const [id] = findMemoryIdsBySubstring(memory, "survives deletion", 5);
 			const leaf = await readFile(path.join(root, "concepts", `${id}.md`), "utf8");
 			expect(leaf).toContain("status: active");
+		} finally {
+			cleanup(root);
+			memory.close();
+		}
+	});
+
+	it("renders two banks into their own directories without clobbering entry points or leaves", async () => {
+		const memoryA = new Mnemopi({ dbPath: ":memory:", sessionId: "tree-test", bank: "bank-a" });
+		const memoryB = new Mnemopi({ dbPath: ":memory:", sessionId: "tree-test", bank: "bank-b" });
+		const root = makeRoot();
+		try {
+			const idA = memoryA.remember("bank A's only fact", {
+				source: "test",
+				metadata: { subtree: "concepts" },
+				scope: "bank",
+			});
+			const idB = memoryB.remember("bank B's only fact", {
+				source: "test",
+				metadata: { subtree: "concepts" },
+				scope: "bank",
+			});
+
+			const dirA = bankTreeDir(root, "bank-a");
+			const dirB = bankTreeDir(root, "bank-b");
+			if (!dirA || !dirB) throw new Error("expected canonical bank ids to pass the path guard");
+			await renderMemoryTree({ memory: memoryA, bank: "bank-a", treeRoot: dirA });
+			await renderMemoryTree({ memory: memoryB, bank: "bank-b", treeRoot: dirB });
+
+			const rootA = await readFile(path.join(dirA, "MEMORY.md"), "utf8");
+			const rootB = await readFile(path.join(dirB, "MEMORY.md"), "utf8");
+			expect(rootA).toContain("# Memory tree: bank-a");
+			expect(rootB).toContain("# Memory tree: bank-b");
+
+			const leafA = await readFile(path.join(dirA, "concepts", `${idA}.md`), "utf8");
+			const leafB = await readFile(path.join(dirB, "concepts", `${idB}.md`), "utf8");
+			expect(leafA).toContain("bank A's only fact");
+			expect(leafB).toContain("bank B's only fact");
+			// Neither bank's leaves crossed into the other bank's directory.
+			expect(await readdir(path.join(dirA, "concepts"))).not.toContain(`${idB}.md`);
+			expect(await readdir(path.join(dirB, "concepts"))).not.toContain(`${idA}.md`);
+
+			await renderMemoryTreeIndex(root);
+			const index = await readFile(path.join(root, "MEMORY.md"), "utf8");
+			expect(index).toContain("# Memory index");
+			expect(index).toContain("bank-a");
+			expect(index).toContain("bank-b");
+			expect(index).not.toContain("# Memory tree:"); // never confused with a per-bank root entry
+		} finally {
+			cleanup(root);
+			memoryA.close();
+			memoryB.close();
+		}
+	});
+
+	it("excludes legacy flat subtree dirs and archive/ from the cross-project index", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			// Simulate the pre-fix flat renderer's leftovers: subtree dirs with
+			// their own MEMORY.md sitting directly under treeRoot, plus a stray
+			// atomic-write temp file. None of these are banks.
+			await mkdir(path.join(root, "concepts"), { recursive: true });
+			await writeFile(path.join(root, "concepts", "MEMORY.md"), "# Memory: concepts\n\nlegacy flat entry\n", "utf8");
+			await mkdir(path.join(root, "archive"), { recursive: true });
+			await writeFile(path.join(root, "MEMORY.md.tmp-12345"), "leftover atomic-write temp", "utf8");
+
+			const dir = bankTreeDir(root, memory.bank);
+			if (!dir) throw new Error("expected canonical bank id to pass the path guard");
+			memory.remember("a real bank fact", { source: "test", metadata: { subtree: "concepts" }, scope: "bank" });
+			await renderMemoryTree({ memory, bank: memory.bank, treeRoot: dir });
+			await renderMemoryTreeIndex(root);
+
+			const index = await readFile(path.join(root, "MEMORY.md"), "utf8");
+			expect(index).toContain(memory.bank);
+			expect(index).not.toContain("concepts |");
+			expect(index).not.toContain("archive |");
+			expect(index).not.toContain("tmp-12345");
+		} finally {
+			cleanup(root);
+			memory.close();
+		}
+	});
+
+	it("rejects a bank id that would escape treeRoot via traversal or a separator", () => {
+		expect(bankTreeDir("/tmp/tree", "../escape")).toBeUndefined();
+		expect(bankTreeDir("/tmp/tree", "a/b")).toBeUndefined();
+		expect(bankTreeDir("/tmp/tree", "..")).toBeUndefined();
+		expect(bankTreeDir("/tmp/tree", "valid-bank_1")).toBe(path.join("/tmp/tree", "valid-bank_1"));
+	});
+
+	it("cleans up the atomic-write temp file when the write is interrupted", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			memory.remember("triggers a write", { source: "test", metadata: { subtree: "concepts" }, scope: "bank" });
+			// A directory at the destination path makes `rename` fail after the
+			// temp file is written, simulating an interrupted atomic write.
+			await mkdir(path.join(root, "MEMORY.md"), { recursive: true });
+			await expect(renderMemoryTree({ memory, bank: memory.bank, treeRoot: root })).rejects.toThrow();
+
+			const names = await readdir(root);
+			expect(names.some(n => n.startsWith("MEMORY.md.tmp-"))).toBe(false);
 		} finally {
 			cleanup(root);
 			memory.close();

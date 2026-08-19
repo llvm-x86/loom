@@ -48,7 +48,7 @@ import {
 import { getAgentDir, logger } from "@oh-my-pi/pi-utils";
 import { loadMnemopiConfig, sanitizeBankName } from "../mnemopi/config";
 import { loadMnemopi, loadMnemopiCore } from "../mnemopi/state";
-import { renderMemoryTree } from "../mnemopi/tree";
+import { bankTreeDir, renderMemoryTree, renderMemoryTreeIndex } from "../mnemopi/tree";
 
 interface SyncContextSummary {
 	ok: boolean;
@@ -61,15 +61,6 @@ interface SyncContextSummary {
 }
 
 const VALID_REASONS: readonly SessionContextSyncReason[] = ["compaction", "shutdown", "idle"];
-
-/**
- * A memory-bank slug is what sanitizeBankName emits (and what every producer
- * — detectTouchedRepos, resolveTouchedSlugs, the env bank-repo spool entry —
- * now writes into spool/close-pass repos): letters/digits/_/- only, 1-64
- * chars. Anything else is either a traversal attempt ("..", "../x") or junk
- * that could name a path segment outside the tree root when joined.
- */
-const BANK_SLUG_RE = /^[a-zA-Z0-9_-]{1,64}$/;
 
 /** Fixed session identity on every ledger-repair event (frozen wire shape). */
 const REPAIR_SESSION_LABEL = "ledger-repair";
@@ -251,6 +242,12 @@ async function reconcileRepoMemoryTrees(settings: Settings, repos: readonly stri
 			},
 		);
 	}
+	// One index rewrite for the whole batch, not per repo — reconcileRepoMemoryTree
+	// stays a clean single-bank primitive (and its own tests assert nothing else
+	// gets written under treeRoot).
+	await renderMemoryTreeIndex(config.treeRoot).catch((error: unknown) => {
+		logger.warn("Sync-context: memory-tree index render failed.", { error: String(error) });
+	});
 }
 
 /**
@@ -266,7 +263,8 @@ export async function reconcileRepoMemoryTree(
 ): Promise<boolean> {
 	// Defensive: the slug doubles as a path segment below `<treeRoot>` and
 	// the bank name. Only canonical slugs may render — junk is skipped.
-	if (!BANK_SLUG_RE.test(repo)) return false;
+	const bankDir = bankTreeDir(treeRoot, repo);
+	if (!bankDir) return false;
 	await loadMnemopi();
 	const { BankManager, Mnemopi } = await loadMnemopiCore();
 	const dbPath = new BankManager(dbDir).getBankDbPath(repo);
@@ -278,14 +276,15 @@ export async function reconcileRepoMemoryTree(
 		noEmbeddings: true,
 	});
 	try {
-		// The tree filesystem is keyed per repo: each bank owns
-		// `<treeRoot>/<repo>/MEMORY.md` + subtrees. Rendering into the raw
-		// root would collide every repo's projection into one pile and leave
-		// agents nothing at the documented `treeRoot/<repo>` location.
+		// The tree filesystem is keyed per bank: each repo owns
+		// `<treeRoot>/<repo>/MEMORY.md` + subtrees (`bankTreeDir`, shared with
+		// the in-session renderer). Rendering into the raw root would collide
+		// every repo's projection into one pile and leave agents nothing at
+		// the documented `treeRoot/<repo>` location.
 		await renderMemoryTree({
 			memory,
 			bank: repo,
-			treeRoot: path.join(treeRoot, repo),
+			treeRoot: bankDir,
 		});
 		return true;
 	} finally {

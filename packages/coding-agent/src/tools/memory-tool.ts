@@ -1,6 +1,7 @@
 import type { AgentTool, AgentToolResult } from "@oh-my-pi/pi-agent-core";
 import { logger } from "@oh-my-pi/pi-utils";
 import { type } from "arktype";
+import { parseDeclaredBankRepo } from "../mnemopi/config";
 import { findMemoryIdsBySubstring } from "../mnemopi/tree";
 import memoryToolDescription from "../prompts/tools/memory.md" with { type: "text" };
 import type { ToolSession } from ".";
@@ -15,6 +16,9 @@ const memoryToolSchema = type({
 	),
 	"target?": type("string").describe(
 		"subtree to file the memory under for add, e.g. projects/agent-chat, concepts, people, skills",
+	),
+	"repo?": type("string").describe(
+		"owner/repo slug the memory belongs to, e.g. Family-Fun-Group/SkyRail. Pins the bank this session writes/recalls memory from for the rest of the session — sticky, so later calls may omit it",
 	),
 	"context?": type("string").describe("source context to attach (add only)"),
 	"importance?": type("number").describe("0..1 priority hint (add only)"),
@@ -70,9 +74,20 @@ export class MemoryTool implements AgentTool<typeof memoryToolSchema> {
 	}
 
 	async execute(_id: string, params: MemoryToolParams): Promise<AgentToolResult> {
-		const state = this.session.getMnemopiSessionState?.();
+		const state = await (this.session.awaitMnemopiSessionState?.() ?? this.session.getMnemopiSessionState?.());
 		if (!state) {
 			throw new Error("Mnemopi backend is not initialised for this session.");
+		}
+		if (params.repo !== undefined) {
+			const slug = parseDeclaredBankRepo(params.repo);
+			if (!slug) {
+				return failure(
+					`memory repo must look like "owner/repo" (got ${JSON.stringify(params.repo)}); the memory was not stored.`,
+				);
+			}
+			// Sticky for the rest of the session (see MnemopiSessionState.declareBankRepo)
+			// — applied before this same write so it lands in the declared bank too.
+			await state.declareBankRepo(slug);
 		}
 		if (params.action === "add") {
 			const content = params.content?.trim();

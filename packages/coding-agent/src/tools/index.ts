@@ -235,6 +235,16 @@ export interface ToolSession {
 	getHindsightSessionState?: () => HindsightSessionState | undefined;
 	/** Get Mnemopi runtime state for this agent session. */
 	getMnemopiSessionState?: () => MnemopiSessionState | undefined;
+	/**
+	 * Like {@link getMnemopiSessionState}, but waits for a still-in-flight
+	 * backend startup (see `AgentSession.setMemoryBackendStartup`) before
+	 * answering. The memory tools use this instead of the bare getter so a
+	 * tool call landing before startup settles — most reliably reproduced on
+	 * `--resume`, where the next turn can be dispatched immediately with no
+	 * fresh-session warm-up delay — does not mistake "not ready yet" for
+	 * "will never be ready".
+	 */
+	awaitMnemopiSessionState?: () => Promise<MnemopiSessionState | undefined>;
 	/** Agent identity used for IRC routing. Returns the registry id (e.g. "Main", "AuthLoader"). */
 	getAgentId?: () => string | null;
 	/** Look up a registered tool by name (used by the eval js backend's tool bridge). */
@@ -517,6 +527,8 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 		}
 		if (session.settings.get("memory.backend") === "mnemopi") {
 			if (!requestedTools.includes("memory")) requestedTools.push("memory");
+			// recall is the only cross-bank (other project) read path on mnemopi.
+			if (!requestedTools.includes("recall")) requestedTools.push("recall");
 		} else if (session.settings.get("memory.backend") === "hindsight") {
 			for (const name of ["recall", "retain", "reflect"]) {
 				if (!requestedTools.includes(name)) requestedTools.push(name);
@@ -562,8 +574,12 @@ export async function createTools(session: ToolSession, toolNames?: string[]): P
 				!restrictToolNames && session.enableIrc !== false && isIrcEnabled(session.settings, session.taskDepth ?? 0)
 			);
 		}
-		if (name === "retain" || name === "recall" || name === "reflect") {
+		if (name === "retain" || name === "reflect") {
 			return session.settings.get("memory.backend") === "hindsight";
+		}
+		if (name === "recall") {
+			const backend = session.settings.get("memory.backend");
+			return backend === "hindsight" || backend === "mnemopi";
 		}
 		if (name === "memory") return session.settings.get("memory.backend") === "mnemopi";
 		if (name === "manage_skill") return session.settings.get("autolearn.enabled") && (session.taskDepth ?? 0) === 0;

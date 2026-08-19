@@ -135,12 +135,12 @@ function stripCodeFence(text: string): string {
 	return match ? match[1].trim() : trimmed;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
+export function isRecord(value: unknown): value is Record<string, unknown> {
 	return typeof value === "object" && value !== null;
 }
 
 /** Parse a toolCall block's `arguments` (object in-memory, JSON string on disk). */
-function toolArgs(block: Record<string, unknown>): Record<string, unknown> {
+export function toolArgs(block: Record<string, unknown>): Record<string, unknown> {
 	const raw = block.arguments;
 	if (isRecord(raw)) return raw;
 	if (typeof raw === "string") {
@@ -193,7 +193,7 @@ function pathsFromToolCall(name: string, args: Record<string, unknown>): { paths
  * touched. Returns a map of absolute repo-dir → whether it saw a strong (work)
  * signal. A "repo dir" is the first path segment directly under the root.
  */
-function touchedRepoDirs(messages: readonly unknown[], workspaceRoot: string): Map<string, { strong: boolean }> {
+export function touchedRepoDirs(messages: readonly unknown[], workspaceRoot: string): Map<string, { strong: boolean }> {
 	const root = path.resolve(workspaceRoot);
 	const dirs = new Map<string, { strong: boolean }>();
 	const consider = (rawPath: string, strong: boolean) => {

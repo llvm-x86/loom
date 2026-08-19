@@ -1,3 +1,4 @@
+import type { Dirent } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import type { Mnemopi } from "@oh-my-pi/pi-mnemopi";
@@ -7,29 +8,52 @@ import { logger } from "@oh-my-pi/pi-utils";
  * Background-maintained memory tree.
  *
  * The mnemopi bank (SQLite) is the source of truth; this module renders it as
- * an agent-readable file tree that ONLY the background memory system writes:
+ * an agent-readable file tree that ONLY the background memory system writes.
+ * `renderMemoryTree` itself projects ONE bank into whatever directory it is
+ * handed (used directly by tests); callers that hold multiple banks route
+ * through `bankTreeDir` so every bank gets its own subdirectory and none can
+ * clobber another's entry points:
  *
  *   <treeRoot>/
- *     MEMORY.md                      entry point: subtree rollup
- *     <subtree>/MEMORY.md            entry point: leaf headers for the subtree
- *     <subtree>/<slug>.md            leaf (YAML-lite header + body)
- *     archive/<subtree>/<slug>.md    leaves whose bank row is archived
+ *     MEMORY.md                             cross-project index: one row per bank dir
+ *     <bank>/MEMORY.md                       per-bank entry point: subtree rollup
+ *     <bank>/<subtree>/MEMORY.md             entry point: leaf headers for the subtree
+ *     <bank>/<subtree>/<slug>.md             leaf (YAML-lite header + body)
+ *     <bank>/archive/<subtree>/<slug>.md     leaves whose bank row is archived
  *
  * Working agents never write here — they read with their normal file tools and
- * request mutations through the single `memory` tool. Every render is a pure
- * projection of the bank, so the tree is disposable: delete it and the next
- * pass re-materialises it fully.
+ * request mutations through the single `memory` tool. Reading/grepping another
+ * project's `<bank>/` directory is how an agent pulls context across projects.
+ * Every render is a pure projection of the bank, so the tree is disposable:
+ * delete it and the next pass re-materialises it fully.
  *
  * Reconcile rules (idempotent, safe to run on every pass):
  *  - a leaf whose body differs from its bank row AND whose file mtime is
  *    newer than the row is an external hand-edit: the body is ADOPTED back
  *    into the bank (body wins, metadata stays background-owned);
  *  - stale leaves (slug no longer in the bank) are removed;
- *  - archived rows render under `archive/` with `status: archived`.
+ *  - archived rows render under `archive/` with `status: archived`;
+ *  - `renderMemoryTreeIndex` rescans `treeRoot` for bank directories (marker
+ *    on their own MEMORY.md, not directory name) and rewrites the root index.
  */
 
 export const MEMORY_TREE_ENTRY_FILE = "MEMORY.md";
 export const MEMORY_TREE_ARCHIVE_DIR = "archive";
+
+/**
+ * `<treeRoot>/<bank>` — the canonical per-bank directory. Guards `bank`
+ * against traversal/separators before it becomes a path segment; returns
+ * undefined (never a raw-root fallback) for anything that fails the guard —
+ * silently rendering there would collide every bank's projection into one
+ * pile. Shared by both render entry points (in-session and sync-context) so
+ * there is exactly one place that knows the `<treeRoot>/<bank>` convention.
+ */
+export const BANK_ID_PATH_RE = /^[a-zA-Z0-9_-]{1,64}$/;
+
+export function bankTreeDir(treeRoot: string, bank: string): string | undefined {
+	if (!BANK_ID_PATH_RE.test(bank)) return undefined;
+	return path.join(treeRoot, bank);
+}
 
 export interface MemoryTreeRow {
 	id: string;
@@ -282,8 +306,17 @@ function renderSubtreeEntry(
 	].join("\n");
 }
 
+/**
+ * Title carries the "this dir is a rendered bank" marker that
+ * `renderMemoryTreeIndex` scans for — must stay distinct from both the
+ * cross-project index title (`# Memory index`) and the subtree entry title
+ * (`# Memory: <subtree>`) so the three file kinds can never be confused.
+ */
+export const BANK_ROOT_ENTRY_MARKER = "# Memory tree:";
+
 function renderRootEntry(
 	treeRoot: string,
+	bank: string,
 	subtrees: readonly { subtree: string; leaves: number; archived: number; updated: string }[],
 ): string {
 	const lines = subtrees.map(entry => {
@@ -292,12 +325,14 @@ function renderRootEntry(
 		)} |`;
 	});
 	return [
-		"# Memory tree",
+		`${BANK_ROOT_ENTRY_MARKER} ${bank}`,
 		"",
-		`Auto-generated entry point for the background-maintained memory tree at \`${treeRoot}\`.`,
+		`Auto-generated entry point for bank \`${bank}\`'s memory tree at \`${treeRoot}\`.`,
 		"Every file under this root is written ONLY by the background memory system; working",
 		"agents read with their normal file tools and request changes through the single",
 		"`memory` tool. Read this file first, then a subtree's MEMORY.md, then follow leaves.",
+		`Other projects' memory lives in sibling directories — see \`../${MEMORY_TREE_ENTRY_FILE}\``,
+		"for the cross-project index.",
 		"",
 		"| subtree | leaves | archived | updated |",
 		"| --- | --- | --- | --- |",
@@ -308,8 +343,105 @@ function renderRootEntry(
 
 async function atomicWrite(dest: string, content: string): Promise<void> {
 	const tmp = `${dest}.tmp-${process.pid}`;
-	await writeFile(tmp, content, "utf8");
-	await rename(tmp, dest);
+	try {
+		await writeFile(tmp, content, "utf8");
+		await rename(tmp, dest);
+	} catch (error) {
+		// A write interrupted mid-flight (crash, OOM-kill) must not leave a
+		// `MEMORY.md.tmp-<pid>` orphan sitting in the tree forever.
+		await rm(tmp, { force: true }).catch(() => {});
+		throw error;
+	}
+}
+
+function repoSlugHint(bank: string): string | undefined {
+	// Repo-keyed banks ARE the sanitized `owner/repo` slug (sync-context.ts);
+	// synthetic cwd-derived banks are `<basename>-<base36 Bun.hash>`
+	// (limitBankName in config.ts) — a long trailing base36 run is the tell.
+	// Best-effort display hint only, never used for path safety.
+	if (bank === "default") return undefined;
+	if (/-[0-9a-z]{10,16}$/.test(bank)) return undefined;
+	return bank;
+}
+
+async function countActiveLeaves(bankDir: string): Promise<number> {
+	let entries: Dirent[];
+	try {
+		entries = await readdir(bankDir, { withFileTypes: true });
+	} catch {
+		return 0;
+	}
+	let count = 0;
+	for (const entry of entries) {
+		if (entry.name === MEMORY_TREE_ARCHIVE_DIR) continue; // archived leaves aren't "active"
+		const full = path.join(bankDir, entry.name);
+		if (entry.isDirectory()) {
+			count += await countActiveLeaves(full);
+		} else if (entry.isFile() && entry.name.endsWith(".md") && entry.name !== MEMORY_TREE_ENTRY_FILE) {
+			count += 1;
+		}
+	}
+	return count;
+}
+
+function renderBankIndex(treeRoot: string, rows: readonly { bank: string; leaves: number; updated: string }[]): string {
+	const lines = rows.map(row => {
+		return `| ${escapeCell(row.bank)} | ${row.leaves} | ${escapeCell(row.updated.slice(0, 19))} | ${escapeCell(
+			repoSlugHint(row.bank) ?? "-",
+		)} |`;
+	});
+	return [
+		"# Memory index",
+		"",
+		`Cross-project entry point for the memory tree at \`${treeRoot}\`. Each row is a separate`,
+		"project's memory bank, rendered by the background memory system into its own directory —",
+		"this file only lists banks, it is NOT itself a project's tree. Read `<bank>/MEMORY.md`",
+		"for that project's subtree rollup, then follow leaves the same as your own memory. You",
+		"may read/grep another project's directory directly to pull context from it; nothing",
+		"under this root is scoped to the current session.",
+		"",
+		"| bank | leaves | updated | repo |",
+		"| --- | --- | --- | --- |",
+		...lines,
+		"",
+	].join("\n");
+}
+
+/**
+ * Scan `treeRoot` for rendered bank directories and (re)write the
+ * cross-project index at `<treeRoot>/MEMORY.md`. Filesystem-driven, not
+ * session-driven: a bank this session never opened still shows up as long as
+ * some process rendered it. A directory only counts as a bank if its own
+ * `MEMORY.md` carries the per-bank marker (`# Memory tree: <bank>`) —
+ * legacy flat subtree dirs from the pre-per-bank layout (`concepts/`,
+ * `projects/`, ...) have a *subtree* MEMORY.md (`# Memory: <subtree>`)
+ * instead and must never be mistaken for a bank; `archive/` and stray
+ * `MEMORY.md.tmp-*` files are likewise never listed.
+ */
+export async function renderMemoryTreeIndex(treeRoot: string): Promise<void> {
+	let entries: Dirent[];
+	try {
+		entries = await readdir(treeRoot, { withFileTypes: true });
+	} catch {
+		return; // nothing rendered under this root yet
+	}
+	const rows: { bank: string; leaves: number; updated: string }[] = [];
+	for (const entry of entries) {
+		if (!entry.isDirectory() || entry.name === MEMORY_TREE_ARCHIVE_DIR) continue;
+		const bankDir = path.join(treeRoot, entry.name);
+		const entryFile = path.join(bankDir, MEMORY_TREE_ENTRY_FILE);
+		const content = await readFile(entryFile, "utf8").catch(() => null);
+		if (content === null || !content.startsWith(`${BANK_ROOT_ENTRY_MARKER} `)) continue;
+		const [leaves, updated] = await Promise.all([
+			countActiveLeaves(bankDir),
+			stat(entryFile)
+				.then(s => s.mtime.toISOString())
+				.catch(() => ""),
+		]);
+		rows.push({ bank: entry.name, leaves, updated });
+	}
+	rows.sort((a, b) => (a.bank < b.bank ? -1 : 1));
+	await atomicWrite(path.join(treeRoot, MEMORY_TREE_ENTRY_FILE), renderBankIndex(treeRoot, rows));
 }
 
 /**
@@ -417,7 +549,7 @@ export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<Re
 			};
 		})
 		.sort((a, b) => (a.subtree < b.subtree ? -1 : 1));
-	await atomicWrite(path.join(treeRoot, MEMORY_TREE_ENTRY_FILE), renderRootEntry(treeRoot, rollup));
+	await atomicWrite(path.join(treeRoot, MEMORY_TREE_ENTRY_FILE), renderRootEntry(treeRoot, bank, rollup));
 	appendTreeWriteLog(memory, bank, result);
 	return result;
 }

@@ -180,7 +180,7 @@ export const mnemopiBackend: MemoryBackend = {
 	},
 
 	async status({ agentDir, session }): Promise<MemoryBackendStatus> {
-		const state = getMnemopiSessionState(session);
+		const state = await (session?.awaitMnemopiSessionState?.() ?? getMnemopiSessionState(session));
 		const primary = state?.aliasOf ?? state;
 		if (!primary) {
 			return {
@@ -210,7 +210,7 @@ export const mnemopiBackend: MemoryBackend = {
 	},
 
 	async search({ session }, query, options) {
-		const state = getMnemopiSessionState(session);
+		const state = await (session?.awaitMnemopiSessionState?.() ?? getMnemopiSessionState(session));
 		const primary = state?.aliasOf ?? state;
 		if (!primary) {
 			return {
@@ -240,7 +240,7 @@ export const mnemopiBackend: MemoryBackend = {
 	},
 
 	async save({ cwd, session }, input: MemoryBackendSaveInput) {
-		const state = getMnemopiSessionState(session);
+		const state = await (session?.awaitMnemopiSessionState?.() ?? getMnemopiSessionState(session));
 		const primary = state?.aliasOf ?? state;
 		if (!primary) {
 			return {

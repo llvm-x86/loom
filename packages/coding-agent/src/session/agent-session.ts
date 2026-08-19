@@ -2233,6 +2233,18 @@ export class AgentSession {
 	#synchronouslyTerminatedYieldToolCallIds = new Set<string>();
 	#providerSessionState = new Map<string, ProviderSessionState>();
 	#hindsightSessionState: HindsightSessionState | undefined = undefined;
+	// Resolves once the fire-and-forget memory-backend startup task (sdk.ts
+	// `startMemoryBackend`) has settled — success OR swallowed failure. The
+	// backend's `start()` is deliberately NOT awaited by session creation
+	// (autolearn.enabled=false is the common case) so `createAgentSession`
+	// returns promptly; without tracking this promise, a tool call that
+	// arrives before startup finishes sees `getMnemopiSessionState() ===
+	// undefined` and throws "Mnemopi backend is not initialised for this
+	// session." even though the backend is still legitimately starting. This
+	// is most visible on `--resume`: a resumed session's next turn can be
+	// dispatched immediately (no fresh-session warm-up delay), so the race
+	// window that a fresh session usually outlives gets hit deterministically.
+	#memoryBackendStartup: Promise<void> | undefined = undefined;
 	readonly rawSseDebugBuffer: RawSseDebugBuffer;
 
 	#resetPromptMaintenanceState(): void {
@@ -4127,6 +4139,32 @@ export class AgentSession {
 
 	getMnemopiSessionState(): MnemopiSessionState | undefined {
 		return getMnemopiSessionState(this);
+	}
+
+	/**
+	 * Record the in-flight (or already-settled) promise for the session's
+	 * memory-backend `start()` call. `sdk.ts` calls this once, right after
+	 * kicking off `startMemoryBackend()`, whether or not it awaits that task
+	 * itself. Consumers that need to observe backend readiness (rather than
+	 * racing it) go through {@link awaitMnemopiSessionState} instead of the
+	 * bare synchronous getter.
+	 */
+	setMemoryBackendStartup(promise: Promise<void>): void {
+		this.#memoryBackendStartup = promise;
+	}
+
+	/**
+	 * Wait for the memory-backend startup task to settle (a no-op if none was
+	 * ever recorded, e.g. `resolveMemoryBackend` chose a backend with no
+	 * per-session state), then return the current Mnemopi state. `start()`
+	 * catches and logs its own failures (see `mnemopiBackend.start`), so a
+	 * settled-but-failed startup still resolves here with `undefined` state —
+	 * callers get the definitive answer instead of a false negative from a
+	 * startup that simply hadn't finished yet.
+	 */
+	async awaitMnemopiSessionState(): Promise<MnemopiSessionState | undefined> {
+		await this.#memoryBackendStartup;
+		return this.getMnemopiSessionState();
 	}
 
 	/** TTSR manager for time-traveling stream rules */
