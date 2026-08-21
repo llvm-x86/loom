@@ -7,12 +7,12 @@ import {
 import { Effort, THINKING_EFFORTS } from "../effort";
 import { FIREWORKS_FAST_SUFFIX, toFireworksPublicModelId } from "../fireworks-model-id";
 import {
+	isDeepseekModelIdOrName,
 	isGlmVisionModelId,
 	isGrokReasoningEffortCapable,
 	isKimiK3ModelId,
 	isKimiModelId,
 	isReasoningGlmModelId,
-	isDeepseekModelIdOrName,
 } from "../identity/family";
 import type { ModelManagerOptions } from "../model-manager";
 import { getBundledModels } from "../models";
@@ -2085,34 +2085,37 @@ function openCodeModelManagerOptions(
 		providerId,
 		cacheProviderId: openCodeModelCacheProviderId(providerId, apiKey, discoveryBaseUrl),
 		dynamicModelsAuthoritative: true,
-		...(apiKey && {
-			fetchDynamicModels: () =>
-				fetchOpenAICompatibleModels<Api>({
-					api: "openai-completions",
-					provider: providerId,
-					baseUrl: discoveryBaseUrl,
-					apiKey,
-					mapModel: (entry, defaults) => {
-						const reference = references.get(defaults.id);
-						const name = toModelName(entry.name, reference?.name ?? defaults.name);
-						if (!reference) {
-							return {
-								...defaults,
-								name,
-							};
-						}
+		// OpenCode Zen's free/stealth models (Big Pickle, Ox Alpha Free, ...) are
+		// servable with zero credentials; only Go's catalog is entitlement-gated
+		// server-side. Always attempt discovery — fetchOpenAICompatibleModels
+		// omits the Authorization header when apiKey is undefined, and a 401 just
+		// falls back to bundled/no models rather than erroring.
+		fetchDynamicModels: () =>
+			fetchOpenAICompatibleModels<Api>({
+				api: "openai-completions",
+				provider: providerId,
+				baseUrl: discoveryBaseUrl,
+				apiKey,
+				mapModel: (entry, defaults) => {
+					const reference = references.get(defaults.id);
+					const name = toModelName(entry.name, reference?.name ?? defaults.name);
+					if (!reference) {
 						return {
-							...reference,
-							id: defaults.id,
+							...defaults,
 							name,
-							baseUrl: openCodeBaseUrlForApi(reference.api, basePath),
-							contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
-							maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
 						};
-					},
-					fetch: config?.fetch,
-				}),
-		}),
+					}
+					return {
+						...reference,
+						id: defaults.id,
+						name,
+						baseUrl: openCodeBaseUrlForApi(reference.api, basePath),
+						contextWindow: toPositiveNumber(entry.context_length, reference.contextWindow),
+						maxTokens: toPositiveNumber(entry.max_completion_tokens, reference.maxTokens),
+					};
+				},
+				fetch: config?.fetch,
+			}),
 	};
 }
 
@@ -2917,7 +2920,6 @@ export function basetenModelManagerOptions(
 	};
 }
 
-
 // ---------------------------------------------------------------------------
 // 14.6 Makora
 // ---------------------------------------------------------------------------
@@ -2996,7 +2998,6 @@ export function makoraModelManagerOptions(
 		}),
 	};
 }
-
 
 // ---------------------------------------------------------------------------
 // 14.65 DeepInfra

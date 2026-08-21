@@ -36,6 +36,37 @@ describe("OpenCode provider discovery", () => {
 		expect(opencodeZenModelManagerOptions().dynamicModelsAuthoritative).toBe(true);
 	});
 
+	test("marks Zen (free/stealth models, no key required) unauthenticated-capable but leaves Go gated", () => {
+		const zen = PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-zen");
+		const go = PROVIDER_DESCRIPTORS.find(item => item.providerId === "opencode-go");
+		expect(zen?.allowUnauthenticated).toBe(true);
+		expect(zen?.catalogDiscovery?.allowUnauthenticated).toBe(true);
+		expect(go?.allowUnauthenticated).toBeFalsy();
+	});
+
+	test("discovers Zen's free/stealth catalog (Big Pickle et al.) with zero credentials", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-zen-free-"));
+		try {
+			let sawAuthHeader = false;
+			const options = opencodeZenModelManagerOptions({
+				fetch: async (_url, init) => {
+					sawAuthHeader = new Headers(init?.headers).has("authorization");
+					return modelListResponse(LIVE_FREE_MODEL_IDS);
+				},
+			});
+			expect(options.fetchDynamicModels).toBeDefined();
+			const result = await resolveProviderModels(
+				{ ...options, cacheDbPath: path.join(tempDir, "models.db") },
+				"online-if-uncached",
+			);
+			expect(sawAuthHeader).toBe(false);
+			expect(result.stale).toBe(false);
+			expect(result.models.map(model => model.id).sort()).toEqual([...LIVE_FREE_MODEL_IDS].sort());
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
+
 	test("replaces stale bundled Zen models with each credential's live endpoint list", async () => {
 		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-opencode-zen-"));
 		try {

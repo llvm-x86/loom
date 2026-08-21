@@ -16,8 +16,8 @@ import {
 	cerebrasModelManagerOptions,
 	cloudflareAiGatewayModelManagerOptions,
 	coreWeaveModelManagerOptions,
-	deepseekModelManagerOptions,
 	deepinfraModelManagerOptions,
+	deepseekModelManagerOptions,
 	firepassModelManagerOptions,
 	fireworksModelManagerOptions,
 	githubCopilotModelManagerOptions,
@@ -331,10 +331,17 @@ export const CATALOG_PROVIDERS = [
 	},
 	{
 		id: "opencode-zen",
-		defaultModel: "claude-opus-4-8",
+		defaultModel: "big-pickle",
 		envVars: ["OPENCODE_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => opencodeZenModelManagerOptions(config),
 		dynamicModelsAuthoritative: true,
+		// Zen's free/stealth models (Big Pickle, Ox Alpha Free, MiMo-V2.5 Free, ...)
+		// require no API key at all — verified live against
+		// https://opencode.ai/zen/v1/{models,chat/completions}. Paid models on the
+		// same catalog still 401 without a key; that's a normal per-model auth
+		// failure, not a reason to hide the whole provider from unauthenticated use.
+		allowUnauthenticated: true,
+		catalogDiscovery: { label: "OpenCode Zen", allowUnauthenticated: true },
 	},
 	{
 		id: "openrouter",
