@@ -4712,6 +4712,10 @@ export class InteractiveMode implements InteractiveModeContext {
 		return this.#selectorController.showOAuthSelector(mode, providerId);
 	}
 
+	showAccountSelector(providerId?: string): Promise<void> {
+		return this.#selectorController.showAccountSelector(providerId);
+	}
+
 	showResetUsageSelector(): Promise<void> {
 		return this.#selectorController.showResetUsageSelector();
 	}

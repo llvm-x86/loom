@@ -7,6 +7,7 @@
  * - `AuthStorage` class: credential management with round-robin, usage limits, OAuth refresh
  * - `SqliteAuthCredentialStore`: concrete SQLite-backed implementation
  */
+
 import { Database, type Statement } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import * as fs from "node:fs/promises";
@@ -57,9 +58,20 @@ import {
 	listCodexResetCredits,
 } from "./usage/openai-codex-reset";
 import { opencodeGoUsageProvider } from "./usage/opencode-go";
+
 import { zaiRankingStrategy, zaiUsageProvider } from "./usage/zai";
 
+/** Session-sticky credential reference shared by auto-rotation and user pins (`/account`). */
+type SessionSticky = {
+	type: AuthCredential["type"];
+	index: number;
+	lastUsedAtMs?: number;
+	/** Set when a user explicitly chose this credential for the session (exempt from warm re-rank). */
+	pinned?: boolean;
+};
+
 const USAGE_RANKING_METRIC_EPSILON = 1e-9;
+
 /**
  * Primary (short, e.g. 5h) window used-fraction at or above which a candidate
  * is demoted behind cooler siblings during ranking: a nearly exhausted short
@@ -1157,10 +1169,7 @@ export class AuthStorage {
 	/** Tracks next credential index per provider:type key for round-robin distribution (non-session use). */
 	#providerRoundRobinIndex: Map<string, number> = new Map();
 	/** Tracks the last used credential per provider for a session (used for rate-limit switching). */
-	#sessionLastCredential: Map<
-		string,
-		Map<string, { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number }>
-	> = new Map();
+	#sessionLastCredential: Map<string, Map<string, SessionSticky>> = new Map();
 	/** Recent bearer fingerprints resolved for each durable OAuth row; used only for delayed usage-limit attribution. */
 	#oauthBearerFingerprints: Map<string, Map<number, string[]>> = new Map();
 	/** Maps provider:type -> credentialIndex -> blockedUntilMs for temporary backoff. */
@@ -1782,18 +1791,25 @@ export class AuthStorage {
 		sessionId: string | undefined,
 		type: AuthCredential["type"],
 		index: number,
+		pinned: boolean = false,
 	): void {
 		if (!sessionId) return;
 		const nowMs = Date.now();
 		const sessionMap = this.#sessionLastCredential.get(provider) ?? new Map();
-		sessionMap.set(sessionId, { type, index, lastUsedAtMs: nowMs });
+		sessionMap.set(sessionId, { type, index, lastUsedAtMs: nowMs, pinned: pinned || undefined });
 		this.#sessionLastCredential.set(provider, sessionMap);
 
 		try {
 			const credentialId = this.#getStoredCredentials(provider)[index]?.id;
 			if (credentialId !== undefined) {
 				const cacheKey = `${SESSION_STICKY_CACHE_PREFIX}${provider}:${sessionId}`;
-				const cacheValue = JSON.stringify({ type, index, credentialId, lastUsedAtMs: nowMs });
+				const cacheValue = JSON.stringify({
+					type,
+					index,
+					credentialId,
+					lastUsedAtMs: nowMs,
+					pinned: pinned || undefined,
+				});
 				// Expires in 30 days
 				const expiresAtSec = Math.floor(nowMs / 1000) + 30 * 24 * 60 * 60;
 				this.#store.setCache(cacheKey, cacheValue, expiresAtSec);
@@ -1804,10 +1820,7 @@ export class AuthStorage {
 	}
 
 	/** Retrieves the last credential used by a session. */
-	#getSessionCredential(
-		provider: string,
-		sessionId: string | undefined,
-	): { type: AuthCredential["type"]; index: number; lastUsedAtMs?: number } | undefined {
+	#getSessionCredential(provider: string, sessionId: string | undefined): SessionSticky | undefined {
 		if (!sessionId) return undefined;
 		let sessionMap = this.#sessionLastCredential.get(provider);
 		if (sessionMap?.has(sessionId)) {
@@ -1822,8 +1835,8 @@ export class AuthStorage {
 					index: number;
 					credentialId?: number;
 					lastUsedAtMs?: number;
+					pinned?: boolean;
 				};
-
 				if (val.credentialId !== undefined) {
 					const stored = this.#getStoredCredentials(provider);
 					const actualIndex = stored.findIndex(entry => entry.id === val.credentialId);
@@ -1842,7 +1855,12 @@ export class AuthStorage {
 					sessionMap = new Map();
 					this.#sessionLastCredential.set(provider, sessionMap);
 				}
-				const sessionVal = { type: val.type, index: val.index, lastUsedAtMs: val.lastUsedAtMs };
+				const sessionVal: SessionSticky = {
+					type: val.type,
+					index: val.index,
+					lastUsedAtMs: val.lastUsedAtMs,
+					pinned: val.pinned === true ? true : undefined,
+				};
 				sessionMap.set(sessionId, sessionVal);
 				return sessionVal;
 			}
@@ -2759,6 +2777,36 @@ export class AuthStorage {
 	 */
 	async logout(provider: string): Promise<void> {
 		await this.remove(provider);
+	}
+
+	/**
+	 * User-requested session credential pin (e.g. `/account` picker): records
+	 * the same sticky used by automatic rotation, but with `pinned: true` so
+	 * usage ranking cannot override it while the pinned credential stays
+	 * usable. `credentialId` must reference a live stored row; returns the
+	 * resolved index or `undefined` when the id is unknown.
+	 */
+	setSessionCredentialPin(provider: string, sessionId: string | undefined, credentialId: number): number | undefined {
+		if (!sessionId) return undefined;
+		const stored = this.#getStoredCredentials(provider);
+		const index = stored.findIndex(entry => entry.id === credentialId);
+		if (index === -1) return undefined;
+		this.#recordSessionCredential(provider, sessionId, stored[index]!.credential.type, index, true);
+		return index;
+	}
+
+	/**
+	 * Drops any session-sticky credential for `(provider, sessionId)` — both
+	 * the in-memory map and the persisted cache row — so the next resolve
+	 * re-runs selection from scratch. Used by `/account auto`.
+	 */
+	clearSessionCredentialPin(provider: string, sessionId: string | undefined): void {
+		this.#clearSessionCredential(provider, sessionId);
+	}
+
+	/** Whether the session's sticky credential (if any) was explicitly user-pinned. */
+	isSessionCredentialPinned(provider: string, sessionId: string | undefined): boolean {
+		return this.#getSessionCredential(provider, sessionId)?.pinned === true;
 	}
 
 	// ─────────────────────────────────────────────────────────────────────────────
@@ -4247,14 +4295,18 @@ export class AuthStorage {
 		// pins predating `lastUsedAtMs` count as warm until the next resolve rewrites the row.
 		const sessionPreferredLastUsedAtMs =
 			sessionCredential?.type === "oauth" ? sessionCredential.lastUsedAtMs : undefined;
-		const sessionPreferredIsWarm =
-			provider !== "anthropic" ||
-			sessionPreferredLastUsedAtMs === undefined ||
-			Date.now() - sessionPreferredLastUsedAtMs < ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS;
 		const sessionPreferredIsAvailable =
 			sessionPreferredIndex !== undefined &&
 			sessionPreferredCanRefreshOrUse &&
 			!this.#isCredentialBlocked(provider, providerKey, sessionPreferredIndex, blockScope);
+		// A USER pin (`/account` picker) is exempt from the Anthropic-only warm
+		// window: the user explicitly chose this account, so idle time must not
+		// silently migrate the session to a sibling with more headroom.
+		const sessionPreferredIsWarm =
+			sessionCredential?.pinned === true ||
+			provider !== "anthropic" ||
+			sessionPreferredLastUsedAtMs === undefined ||
+			Date.now() - sessionPreferredLastUsedAtMs < ANTHROPIC_SESSION_STICKY_CACHE_WARM_MS;
 		const shouldRank = checkUsage && (!sessionPreferredIsAvailable || !sessionPreferredIsWarm || hasPlanRequirement);
 		// When ranking, seed the pinned credential first in the evaluation order so it wins genuine
 		// ties (the ranked comparator falls back to `orderPos`) without overriding a strictly-better

@@ -298,7 +298,7 @@ describe("InteractiveMode todo HUD anchor", () => {
 
 	it("pins the todo HUD when compaction pins native scrollback", () => {
 		mode.setTodos([{ name: "Tasks", tasks: [{ content: "alpha", status: "pending" }] }]);
-		const todo = mode.todoContainer as NativeScrollbackLiveRegion;
+		const todo = mode.todoContainer as unknown as NativeScrollbackLiveRegion;
 		expect(todo.isNativeScrollbackLiveRegionPinned?.()).toBe(false);
 		mode.setStatusScrollbackPinned(true);
 		expect(todo.isNativeScrollbackLiveRegionPinned?.()).toBe(true);

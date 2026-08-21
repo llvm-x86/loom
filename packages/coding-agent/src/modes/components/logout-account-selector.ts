@@ -6,6 +6,12 @@ import { DynamicBorder } from "./dynamic-border";
 
 const LOGOUT_SELECTOR_MAX_VISIBLE = 10;
 
+/** Optional text overrides so the component can be reused for non-logout account pickers. */
+export interface LogoutAccountSelectorTextOptions {
+	title?: string;
+	footerHint?: string;
+}
+
 /** Account picker for `/logout` after the provider has been selected. */
 export class LogoutAccountSelectorComponent extends Container {
 	#listContainer: Container;
@@ -14,23 +20,26 @@ export class LogoutAccountSelectorComponent extends Container {
 	#statusMessage: string | undefined;
 	#onSelectCallback: (account: LogoutAccount) => void;
 	#onCancelCallback: () => void;
+	#footerHint: string;
 
 	constructor(
 		providerName: string,
 		accounts: LogoutAccount[],
 		onSelect: (account: LogoutAccount) => void,
 		onCancel: () => void,
+		textOptions: LogoutAccountSelectorTextOptions = {},
 	) {
 		super();
 		this.#accounts = accounts;
 		this.#onSelectCallback = onSelect;
 		this.#onCancelCallback = onCancel;
+		this.#footerHint = textOptions.footerHint ?? "  ↑/↓ select · ↵ log out account · Esc cancel";
 		const activeIndex = accounts.findIndex(account => account.active);
 		this.#selectedIndex = activeIndex >= 0 ? activeIndex : 0;
 
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
-		this.addChild(new TruncatedText(theme.bold(`Select ${providerName} account to log out:`)));
+		this.addChild(new TruncatedText(theme.bold(textOptions.title ?? `Select ${providerName} account to log out:`)));
 		this.addChild(new Spacer(1));
 		this.#listContainer = new Container();
 		this.addChild(this.#listContainer);
@@ -78,9 +87,7 @@ export class LogoutAccountSelectorComponent extends Container {
 			this.#listContainer.addChild(new TruncatedText(theme.fg("muted", "  No stored accounts to log out"), 0, 0));
 		}
 
-		this.#listContainer.addChild(
-			new TruncatedText(theme.fg("muted", "  ↑/↓ select · ↵ log out account · Esc cancel"), 0, 0),
-		);
+		this.#listContainer.addChild(new TruncatedText(theme.fg("muted", this.#footerHint), 0, 0));
 
 		if (this.#statusMessage) {
 			this.#listContainer.addChild(new Spacer(1));

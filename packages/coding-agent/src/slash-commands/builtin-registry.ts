@@ -1511,6 +1511,28 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 		},
 	},
 	{
+		name: "account",
+		description: "Switch which stored OAuth account this session uses",
+		inlineHint: "[provider]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			const providerId = command.args.trim();
+			if (providerId) {
+				const matchedProvider = getOAuthProviders().find(provider => provider.id === providerId);
+				if (!matchedProvider) {
+					runtime.ctx.showWarning(`Unknown OAuth provider: ${providerId}`);
+					runtime.ctx.editor.setText("");
+					return;
+				}
+				void runtime.ctx.showAccountSelector(matchedProvider.id);
+				runtime.ctx.editor.setText("");
+				return;
+			}
+			void runtime.ctx.showAccountSelector();
+			runtime.ctx.editor.setText("");
+		},
+	},
+	{
 		name: "mcp",
 		description: "Manage MCP servers (add, list, remove, test)",
 		acpDescription: "Manage MCP servers",

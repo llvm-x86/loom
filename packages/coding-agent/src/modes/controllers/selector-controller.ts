@@ -1690,6 +1690,95 @@ export class SelectorController {
 		});
 	}
 
+	async #handleAccountSwitch(providerId: string, account: LogoutAccount): Promise<void> {
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		const sessionId = this.ctx.session.sessionId;
+		if (account.credentialId < 0) {
+			authStorage.clearSessionCredentialPin(providerId, sessionId);
+			this.ctx.showStatus(`${providerId} session now uses automatic usage-based account rotation.`);
+			this.ctx.statusLine.invalidate();
+			this.ctx.ui.requestRender();
+			return;
+		}
+		const pinnedIndex = authStorage.setSessionCredentialPin(providerId, sessionId, account.credentialId);
+		if (pinnedIndex === undefined) {
+			this.ctx.showError(`Switch failed: ${account.label} is no longer stored for ${providerId}.`);
+			return;
+		}
+		this.ctx.showStatus(`This session now uses ${account.label} for ${providerId}.`);
+		this.ctx.statusLine.invalidate();
+		this.ctx.ui.requestRender();
+	}
+
+	/**
+	 * `/account [provider]` — lets the user pin *this session* to one of the
+	 * already-stored OAuth accounts for a provider (default `anthropic`),
+	 * overriding automatic usage-based rotation until explicitly cleared via
+	 * the "Auto" row. Unlike `/logout`, this never removes a credential.
+	 */
+	async showAccountSelector(providerId?: string): Promise<void> {
+		const targetProviderId = providerId ?? "anthropic";
+		const authStorage = this.ctx.session.modelRegistry.authStorage;
+		try {
+			await authStorage.reload();
+		} catch (error: unknown) {
+			this.ctx.showError(
+				`Could not load stored credentials: ${error instanceof Error ? error.message : String(error)}`,
+			);
+			return;
+		}
+		const provider = getOAuthProviders().find(candidate => candidate.id === targetProviderId);
+		const providerLabel = provider?.name ?? targetProviderId;
+		const sessionId = this.ctx.session.sessionId;
+		const oauthStored = authStorage
+			.listStoredCredentials(targetProviderId)
+			.filter(row => row.credential.type === "oauth");
+		if (oauthStored.length === 0) {
+			this.ctx.showError(`No stored OAuth accounts for ${providerLabel}. Use /login to add one.`);
+			return;
+		}
+		if (oauthStored.length < 2) {
+			this.ctx.showStatus(
+				`Only one stored ${providerLabel} account; nothing to switch to. Use /login to add another.`,
+			);
+			return;
+		}
+
+		const isPinned = authStorage.isSessionCredentialPinned(targetProviderId, sessionId);
+		const storedAccounts = toLogoutAccounts(targetProviderId, oauthStored, {
+			activeIdentity: authStorage.getOAuthAccountIdentity(targetProviderId, sessionId),
+		});
+		const autoRow: LogoutAccount = {
+			credentialId: -1,
+			provider: targetProviderId,
+			label: "Auto (usage-based rotation)",
+			detail: "",
+			type: "oauth",
+			active: !isPinned,
+		};
+		const rows: LogoutAccount[] = [autoRow, ...storedAccounts];
+
+		this.showSelector(done => {
+			const selector = new LogoutAccountSelectorComponent(
+				providerLabel,
+				rows,
+				account => {
+					done();
+					void this.#handleAccountSwitch(targetProviderId, account);
+				},
+				() => {
+					done();
+					this.ctx.ui.requestRender();
+				},
+				{
+					title: `Switch session to a ${providerLabel} account:`,
+					footerHint: "  ↑/↓ select · ↵ use in this session · Esc cancel",
+				},
+			);
+			return { component: selector, focus: selector };
+		});
+	}
+
 	async showOAuthSelector(mode: "login" | "logout", providerId?: string): Promise<void> {
 		if (providerId) {
 			if (mode === "login") {
