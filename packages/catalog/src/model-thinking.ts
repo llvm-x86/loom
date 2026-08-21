@@ -30,6 +30,7 @@ import {
 	isMinimaxM2FamilyModelId,
 	isMinimaxM3FamilyModelId,
 	isOpenAIGptOssModelId,
+	isOpenCodeZenDeepseekAlias,
 	supportsAdaptiveThinkingDisplay,
 } from "./identity/family";
 import type {
@@ -489,8 +490,7 @@ function isDeepseekReasoningModel<TApi extends Api>(spec: ModelSpec<TApi>): bool
 	if (!spec.reasoning) return false;
 	const lowerId = spec.id.toLowerCase();
 	const lowerName = (spec.name ?? "").toLowerCase();
-	const isOpenCodeDeepseekAlias =
-		spec.provider === "opencode-zen" && (lowerId === "big-pickle" || lowerName === "big pickle");
+	const isOpenCodeDeepseekAlias = isOpenCodeZenDeepseekAlias(spec.provider, spec.id, spec.name ?? "");
 	return (
 		modelMatchesHost(spec, "deepseekFamily") ||
 		isDeepseekModelIdOrName(spec.id) ||

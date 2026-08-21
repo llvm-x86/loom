@@ -20,6 +20,7 @@ import {
 	isKimiModelId,
 	isMimoModelIdOrName,
 	isOpenAISamplingRestrictedModelId,
+	isOpenCodeZenDeepseekAlias,
 	isQwenModelId,
 	modelFamilyToken,
 } from "../identity/family";
@@ -290,10 +291,10 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 	const isXiaomiMimo = isXiaomiHost && (isMimoModelIdOrName(spec.id) || isMimoModelIdOrName(spec.name ?? ""));
 	const isMimoReasoningEffortModel =
 		!isXiaomiHost && (isMimoModelIdOrName(spec.id) || isMimoModelIdOrName(spec.name ?? ""));
-	// OpenCode Zen's `big-pickle` is a DeepSeek reasoning alias; the upstream
-	// 400s come from DeepSeek and require exact reasoning_content replay.
-	const isOpenCodeDeepseekAlias =
-		provider === "opencode-zen" && (lowerId === "big-pickle" || lowerName === "big pickle");
+	// OpenCode Zen's stealth aliases (`big-pickle`, Ox Alpha Free) are
+	// DeepSeek reasoning models behind the gateway; the upstream 400s come from
+	// DeepSeek and require exact reasoning_content replay.
+	const isOpenCodeDeepseekAlias = isOpenCodeZenDeepseekAlias(provider, spec.id, spec.name ?? "");
 	const isDeepseekFamily =
 		modelMatchesHost(hostModel, "deepseekFamily") ||
 		isDeepseekModelIdOrName(spec.id) ||
@@ -403,9 +404,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 						? KIMI_REASONING_STREAM_IDLE_TIMEOUT_MS
 						: spec.reasoning && isDirectDeepseekApi
 							? DEEPSEEK_REASONING_STREAM_IDLE_TIMEOUT_MS
-							: isLocalServingBackend
-								? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
-								: undefined;
+							: spec.reasoning && isOpenCodeDeepseekAlias
+								? DEEPSEEK_REASONING_STREAM_IDLE_TIMEOUT_MS
+								: isLocalServingBackend
+									? LOCAL_OPENAI_COMPAT_STREAM_IDLE_TIMEOUT_MS
+									: undefined;
 
 	// Fireworks "Fast" variants (`<id>-fast`) are served from the router
 	// namespace (`accounts/fireworks/routers/<id>-fast`), like Fire Pass, rather

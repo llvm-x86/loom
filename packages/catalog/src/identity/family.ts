@@ -88,6 +88,26 @@ export const isMimoModelIdOrName = memo((value: string): boolean => {
 	return value.toLowerCase().includes("mimo");
 });
 
+/**
+ * OpenCode Zen DeepSeek-family aliases. The gateway fronts these ids with
+ * DeepSeek-style reasoning models: they stream `reasoning_content` deltas and
+ * the upstream validates exact reasoning replay on follow-up thinking-mode
+ * requests. Matched by exact id or display name — Zen's live `/v1/models`
+ * records carry no metadata beyond `owned_by`, so substring heuristics would
+ * overreach across unrelated future stealth drops on this provider.
+ */
+export function isOpenCodeZenDeepseekAlias(provider: string, modelId: string, name: string): boolean {
+	if (provider !== "opencode-zen") return false;
+	const lowerId = modelId.toLowerCase();
+	const lowerName = name.toLowerCase();
+	return (
+		lowerId === "big-pickle" ||
+		lowerName === "big pickle" ||
+		lowerId === "x-preview-f-free" ||
+		lowerName.startsWith("ox alpha")
+	);
+}
+
 const GROK_EFFORT_CAPABLE_PREFIXES = ["grok-3-mini", "grok-4.20-multi-agent", "grok-4.3", "grok-4.5"] as const;
 
 /**
