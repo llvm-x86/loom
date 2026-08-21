@@ -72,6 +72,7 @@ const OVERFLOW_PATTERNS = [
 	/greater than the context length/i, // LM Studio
 	/context window exceeds limit/i, // MiniMax
 	/exceeded model token limit/i, // Kimi For Coding
+	/supports only \d+k context/i, // Kimi For Coding (k3-256k, mislabeled HTTP 401)
 	/context[_ ]length[_ ]exceeded/i, // Generic fallback
 	/too many tokens/i, // Generic fallback
 	/token limit exceeded/i, // Generic fallback
@@ -305,6 +306,21 @@ function matchesOverflowText(text: string): boolean {
 	return OVERFLOW_PATTERNS.some(p => p.test(text)) || OVERFLOW_NO_BODY_PATTERN.test(text);
 }
 
+/**
+ * An unambiguous overflow message outranks a status-derived auth failure.
+ *
+ * Kimi answers an over-window prompt on `k3-256k` with HTTP 401
+ * `invalid_authentication_error` ("k3-256k supports only 256K context."), and a
+ * 401 alone means {@link Flag.AuthFailed}. The two route very differently:
+ * overflow walks the candidate chain to a wider model and records the window
+ * that failed, while an auth failure stops the chain and asks the operator to
+ * re-authenticate. Overflow phrasing is specific enough that no genuine
+ * credentials error carries it, so drop the auth bit when both are present.
+ */
+function overflowOutranksAuth(kinds: number): number {
+	return (kinds & Flag.ContextOverflow) !== 0 ? kinds & ~Flag.AuthFailed : kinds;
+}
+
 function classifyText(errorMessage: string | undefined, errorStatus: number | undefined, api?: Api): number {
 	let kinds = 0;
 	if (errorMessage) {
@@ -337,7 +353,7 @@ function classifyText(errorMessage: string | undefined, errorStatus: number | un
 		if (matchesStrictToolsRejection(cleanMessage, statusClean)) kinds |= Flag.Grammar;
 		if (matchesFastModeUnsupported(cleanMessage, statusClean)) kinds |= Flag.FastModeUnsupported;
 	}
-	if (kinds !== 0) return create(kinds);
+	if (kinds !== 0) return create(overflowOutranksAuth(kinds));
 	const fallbackStatus = errorStatus ?? (errorMessage ? status({ message: errorMessage }) : undefined);
 	if (fallbackStatus === 401 || fallbackStatus === 403) return create(Flag.AuthFailed);
 	return fallbackStatus ?? 0;
@@ -416,7 +432,7 @@ export function classify(error: unknown, api?: Api): number {
 		link = typeof link === "object" && "cause" in link ? (link as { cause: unknown }).cause : undefined;
 	}
 
-	return kinds !== 0 ? create(kinds) : (status(error) ?? 0);
+	return kinds !== 0 ? create(overflowOutranksAuth(kinds)) : (status(error) ?? 0);
 }
 
 /**
@@ -476,6 +492,7 @@ export function classifyMessage(message: {
 		// auto-retry would loop. Strip Transient so the recovery message surfaces immediately.
 		kinds &= ~Flag.Transient;
 	}
+	kinds = overflowOutranksAuth(kinds);
 	const id = kinds !== 0 ? create(kinds) : (statusFromId(textId) ?? statusFromId(existingId) ?? currentStatus ?? 0);
 
 	message.errorId = id;
@@ -494,6 +511,24 @@ export function isContextOverflow(message: AssistantMessage, contextWindow?: num
 		if (inputTokens > contextWindow) return true;
 	}
 	return message.stopReason === "error" && !!message.errorMessage && matchesOverflowText(message.errorMessage);
+}
+
+/**
+ * Whether an arbitrary failure value is a context overflow: a thrown error, a
+ * message string, or an assistant-error payload carrying `errorMessage`.
+ *
+ * The error-shaped counterpart to {@link isContextOverflow}, which needs a
+ * full {@link AssistantMessage}. Credential-rotation gates use this to refuse
+ * rotation on an overflow no matter which HTTP status the provider dressed it
+ * in.
+ */
+export function isContextOverflowError(error: unknown): boolean {
+	if (is(classify(error), Flag.ContextOverflow)) return true;
+	if (typeof error === "object" && error !== null && "errorMessage" in error) {
+		const errorMessage = (error as { errorMessage: unknown }).errorMessage;
+		if (typeof errorMessage === "string") return matchesOverflowText(errorMessage);
+	}
+	return false;
 }
 
 export function stringify(id: number | undefined): string {

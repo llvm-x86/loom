@@ -32,6 +32,28 @@ describe("AIError.classify — structural provider errors", () => {
 		).toBe(true);
 	});
 
+	it("reads kimi's mislabeled 401 over-window rejection as an overflow, not an auth failure", () => {
+		// api.kimi.com answers a >256K prompt on k3-256k with HTTP 401
+		// `invalid_authentication_error`. Only the message tells the truth, and
+		// callers route the two flags in opposite directions: overflow walks to
+		// a wider model, authFailed stops and asks for re-auth.
+		const id = AIError.classify(
+			new AIError.ProviderHttpError(
+				"Provider authentication failed (invalid_authentication_error, 401): k3-256k supports only 256K context.",
+				401,
+				{ code: "invalid_authentication_error" },
+			),
+		);
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.AuthFailed)).toBe(false);
+	});
+
+	it("keeps authFailed on a 401 that carries no overflow phrasing", () => {
+		const id = AIError.classify(new AIError.ProviderHttpError("invalid api key", 401));
+		expect(AIError.is(id, AIError.Flag.AuthFailed)).toBe(true);
+		expect(AIError.is(id, AIError.Flag.ContextOverflow)).toBe(false);
+	});
+
 	it("classifies a typed AWS credential-resolution failure as authFailed", () => {
 		const id = AIError.classify(new AIError.AwsCredentialsError("opaque provider setup failure", "resolution"));
 		expect(AIError.is(id, AIError.Flag.AuthFailed)).toBe(true);

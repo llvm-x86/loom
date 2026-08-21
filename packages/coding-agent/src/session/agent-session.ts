@@ -13884,15 +13884,44 @@ export class AgentSession {
 		// Widest window observed to overflow on this input; anything at or below
 		// it cannot fit either, so those candidates are skipped.
 		let overflowedWindow = 0;
+		let attempt = 0;
+		// Routing surprises ("why did compaction run on k3 and not k3-256k?") are
+		// otherwise invisible: the live reporter's model label only shows the
+		// candidate currently being tried, so a skipped or failed candidate leaves
+		// no trace anywhere. Log the resolved chain plus every skip/failure.
+		logger.debug("Compaction candidate chain resolved", {
+			candidates: candidates.slice(0, 8).map(model => `${model.provider}/${model.id}`),
+			total: candidates.length,
+			tokensBefore: preparation.tokensBefore,
+		});
 
 		for (const candidate of candidates) {
-			if (!this.#candidateFitsAfterOverflow(candidate, overflowedWindow)) continue;
+			const candidateKey = `${candidate.provider}/${candidate.id}`;
+			if (!this.#candidateFitsAfterOverflow(candidate, overflowedWindow)) {
+				logger.warn("Compaction candidate skipped: window cannot fit an input that already overflowed", {
+					candidate: candidateKey,
+					contextWindow: candidate.contextWindow ?? 0,
+					overflowedWindow,
+				});
+				continue;
+			}
 			const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
-			if (!apiKey) continue;
+			if (!apiKey) {
+				logger.warn("Compaction candidate skipped: no usable credentials", { candidate: candidateKey });
+				continue;
+			}
+			attempt += 1;
 
 			try {
 				this.#compactionLiveReporter?.model(candidate, this.thinkingLevel);
-				return await compact(
+				logger.debug("Compaction candidate attempt", {
+					candidate: candidateKey,
+					attempt,
+					contextWindow: candidate.contextWindow ?? 0,
+					thinkingLevel: this.thinkingLevel,
+					tokensBefore: preparation.tokensBefore,
+				});
+				const result = await compact(
 					this.#obfuscatePreparationForProvider(preparation),
 					candidate,
 					this.#modelRegistry.resolver(candidate, this.sessionId),
@@ -13929,9 +13958,18 @@ export class AgentSession {
 							}),
 					},
 				);
+				if (attempt > 1) {
+					logger.warn("Compaction summarized on a fallback candidate", { candidate: candidateKey, attempt });
+				} else {
+					logger.debug("Compaction summarized", { candidate: candidateKey, attempt });
+				}
+				return result;
 			} catch (error) {
 				const flags = AIError.classify(error, candidate.api);
-				if (AIError.is(flags, AIError.Flag.AuthFailed)) continue;
+				if (AIError.is(flags, AIError.Flag.AuthFailed)) {
+					logger.warn("Compaction candidate failed: auth rejected", { candidate: candidateKey });
+					continue;
+				}
 				// Quota/rate-limit, transient, and context-overflow failures are
 				// candidate-local: an exhausted provider (e.g. cursor quota) must
 				// not kill compaction while another enabled model can still
@@ -13948,6 +13986,14 @@ export class AgentSession {
 					overflowedWindow = Math.max(overflowedWindow, candidate.contextWindow ?? 0);
 				}
 				lastCandidateError = error;
+				logger.warn("Compaction candidate failed; falling through to the next candidate", {
+					candidate: candidateKey,
+					contextOverflow: AIError.is(flags, AIError.Flag.ContextOverflow),
+					usageLimit: AIError.is(flags, AIError.Flag.UsageLimit),
+					transient: AIError.is(flags, AIError.Flag.Transient),
+					timeout: AIError.is(flags, AIError.Flag.Timeout),
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		}
 
@@ -14659,12 +14705,27 @@ export class AgentSession {
 						(reason === "threshold" ? "pre_turn" : reason === "idle" ? "standalone_turn" : "mid_turn"),
 				});
 
+				logger.debug("Auto-compaction candidate chain resolved", {
+					candidates: candidates.slice(0, 8).map(c => `${c.provider}/${c.id}`),
+					total: candidates.length,
+				});
 				for (let candidateIndex = 0; candidateIndex < candidates.length; candidateIndex++) {
 					const candidate = candidates[candidateIndex];
+					const candidateKey = `${candidate.provider}/${candidate.id}`;
 					const hasMoreCandidates = candidateIndex < candidates.length - 1;
-					if (!this.#candidateFitsAfterOverflow(candidate, overflowedWindow)) continue;
+					if (!this.#candidateFitsAfterOverflow(candidate, overflowedWindow)) {
+						logger.warn("Auto-compaction candidate skipped: window cannot fit an input that already overflowed", {
+							model: candidateKey,
+							contextWindow: candidate.contextWindow,
+							overflowedWindow,
+						});
+						continue;
+					}
 					const apiKey = await this.#modelRegistry.getApiKey(candidate, this.sessionId);
-					if (!apiKey) continue;
+					if (!apiKey) {
+						logger.warn("Auto-compaction candidate skipped: no usable credentials", { model: candidateKey });
+						continue;
+					}
 
 					let attempt = 0;
 					while (true) {
@@ -14703,6 +14764,15 @@ export class AgentSession {
 									codexCompaction,
 								},
 							);
+							if (candidateIndex > 0) {
+								logger.warn("Auto-compaction summarized on a fallback candidate", {
+									model: candidateKey,
+									candidateIndex,
+									preferred: `${candidates[0].provider}/${candidates[0].id}`,
+								});
+							} else {
+								logger.debug("Auto-compaction summarized", { model: candidateKey });
+							}
 							break;
 						} catch (error) {
 							if (autoCompactionSignal.aborted) {
@@ -14741,6 +14811,12 @@ export class AgentSession {
 								break;
 							}
 							if (AIError.is(id, AIError.Flag.AuthFailed)) {
+								logger.warn(
+									hasMoreCandidates
+										? "Auto-compaction summarizer rejected the credentials, trying next model"
+										: "Auto-compaction summarizer rejected the credentials, no candidates left",
+									{ error: message, model: candidateKey },
+								);
 								lastError = this.#buildCompactionAuthError();
 								break;
 							}
@@ -14787,6 +14863,12 @@ export class AgentSession {
 								attempt < retrySettings.maxRetries &&
 								(retryAfterMs !== undefined || AIError.is(id, AIError.Flag.Transient));
 							if (!shouldRetry) {
+								logger.warn(
+									hasMoreCandidates
+										? "Auto-compaction summarization failed, trying next model"
+										: "Auto-compaction summarization failed, no candidates left",
+									{ error: message, model: candidateKey, errorId: AIError.stringify(id) },
+								);
 								lastError = error;
 								break;
 							}

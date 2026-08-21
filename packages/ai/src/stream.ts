@@ -979,6 +979,14 @@ function isRetryableUpstreamError(error: unknown, status: number | undefined, me
 	// per-minute caps) classify as RATE_LIMIT_EXCEEDED in
 	// `parseRateLimitReason` and stay in the provider's own backoff layer
 	// instead of burning siblings.
+	//
+	// A prompt that does not fit does not fit on a sibling credential either.
+	// Kimi rejects an over-window request on `k3-256k` with HTTP 401
+	// `invalid_authentication_error` ("k3-256k supports only 256K context."),
+	// and rotating on that both invalidates a healthy credential and replays a
+	// quarter-million-token request against every sibling.
+	if (AIError.isContextOverflowError(error)) return false;
+	if (message !== undefined && AIError.isContextOverflowError(message)) return false;
 	if (AIError.isUsageLimit(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	if (status === 401) return true;

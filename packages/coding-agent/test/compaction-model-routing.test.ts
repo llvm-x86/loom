@@ -3,13 +3,14 @@ import * as path from "node:path";
 import { Agent } from "@oh-my-pi/pi-agent-core";
 import * as compactionModule from "@oh-my-pi/pi-agent-core/compaction";
 import type { Model } from "@oh-my-pi/pi-ai";
+import * as AIError from "@oh-my-pi/pi-ai/error";
 import { getBundledModel } from "@oh-my-pi/pi-catalog/models";
 import { ModelRegistry } from "@oh-my-pi/pi-coding-agent/config/model-registry";
 import { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
 import { AgentSession } from "@oh-my-pi/pi-coding-agent/session/agent-session";
 import { AuthStorage } from "@oh-my-pi/pi-coding-agent/session/auth-storage";
 import { SessionManager } from "@oh-my-pi/pi-coding-agent/session/session-manager";
-import { TempDir } from "@oh-my-pi/pi-utils";
+import { logger, TempDir } from "@oh-my-pi/pi-utils";
 
 /**
  * The compaction summarizer must never route through the reverse-engineered
@@ -832,5 +833,109 @@ describe("compaction model routing", () => {
 		const deepseekIndex = candidateIds.indexOf("deepseek-v4-pro");
 		expect(deepseekIndex).toBeGreaterThan(0);
 		expect(candidateProviders[deepseekIndex]).toBe("deepseek");
+	});
+
+	it("treats kimi's mislabeled 401 overflow as an overflow and logs the fallback hop", async () => {
+		const modelRegistry = await makeRegistry(async authStorage => {
+			await authStorage.set("anthropic", {
+				type: "oauth",
+				access: "sk-ant-oat-test-token",
+				refresh: "refresh-token",
+				expires: Date.now() + 3_600_000,
+			});
+			authStorage.setRuntimeApiKey("kimi-code", "test-kimi-key");
+		});
+
+		const dir = TempDir.createSync("@pi-compaction-routing-logs-");
+		tempDirs.push(dir);
+		const sessionManager = SessionManager.inMemory(dir.path());
+		const firstKeptEntryId = sessionManager.appendMessage({
+			role: "user",
+			content: [{ type: "text", text: "kept" }],
+			timestamp: Date.now(),
+		});
+		vi.spyOn(compactionModule, "prepareCompaction").mockReturnValue({
+			firstKeptEntryId,
+			messagesToSummarize: [{ role: "user", content: [{ type: "text", text: "old" }], timestamp: 1 }],
+			turnPrefixMessages: [],
+			recentMessages: [],
+			isSplitTurn: false,
+			tokensBefore: 200_217,
+			fileOps: { read: new Set(), written: new Set(), edited: new Set() },
+			settings: { ...compactionModule.DEFAULT_COMPACTION_SETTINGS, strategy: "context-full" },
+		});
+		const tried: string[] = [];
+		vi.spyOn(compactionModule, "compact").mockImplementation(async (preparation, candidate) => {
+			tried.push(candidate.id);
+			// Verbatim live failure: a >256K prompt on kimi-code/k3-256k comes
+			// back as HTTP 401 `invalid_authentication_error`, not a 400
+			// overflow. Classified as an auth failure it stops the chain and
+			// blames the operator's credentials; it must read as an overflow so
+			// the walk records the busted window and moves to the 1M-window
+			// sibling.
+			if (candidate.id === "k3-256k") {
+				throw new AIError.ProviderHttpError(
+					"Provider authentication failed (invalid_authentication_error, 401): k3-256k supports only 256K context.",
+					401,
+					{ code: "invalid_authentication_error" },
+				);
+			}
+			return {
+				summary: "summary",
+				shortSummary: undefined,
+				firstKeptEntryId: preparation.firstKeptEntryId,
+				tokensBefore: preparation.tokensBefore,
+				details: {},
+			};
+		});
+
+		const events: { level: string; message: string; context: Record<string, unknown> | undefined }[] = [];
+		const unregister = logger.registerLogSink(event => {
+			if (event.message.startsWith("Auto-compaction")) {
+				events.push({ level: event.level, message: event.message, context: event.context });
+			}
+		});
+
+		const agent = new Agent({
+			initialState: { model: bundledAnthropic(), systemPrompt: ["Test"], tools: [], messages: [] },
+		});
+		const session = new AgentSession({
+			agent,
+			sessionManager,
+			settings: Settings.isolated({
+				"compaction.enabled": true,
+				"compaction.autoContinue": false,
+				"compaction.strategy": "context-full",
+				"compaction.fallbackModels": "kimi-code/k3-256k kimi-code/k3",
+			}),
+			modelRegistry,
+		});
+
+		try {
+			await session.runIdleCompaction();
+		} finally {
+			unregister();
+			await session.dispose();
+		}
+
+		expect(tried.slice(0, 2)).toEqual(["k3-256k", "k3"]);
+
+		const chain = events.find(event => event.message === "Auto-compaction candidate chain resolved");
+		expect((chain?.context?.candidates as string[] | undefined)?.[0]).toBe("kimi-code/k3-256k");
+
+		// The overflow branch, not the auth branch: it records the window that
+		// failed so narrower candidates are skipped instead of retried.
+		const overflow = events.find(
+			event => event.message === "Auto-compaction summarization overflowed the candidate window",
+		);
+		expect(overflow?.level).toBe("warn");
+		expect(overflow?.context?.model).toBe("kimi-code/k3-256k");
+		expect(overflow?.context?.contextWindow).toBe(262_144);
+		expect(events.some(event => event.message.includes("rejected the credentials"))).toBe(false);
+
+		const fallbackWin = events.find(event => event.message === "Auto-compaction summarized on a fallback candidate");
+		expect(fallbackWin?.level).toBe("warn");
+		expect(fallbackWin?.context?.model).toBe("kimi-code/k3");
+		expect(fallbackWin?.context?.preferred).toBe("kimi-code/k3-256k");
 	});
 });

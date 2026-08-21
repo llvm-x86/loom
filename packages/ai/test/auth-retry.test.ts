@@ -88,6 +88,22 @@ describe("isAuthRetryableError", () => {
 		expect(isAuthRetryableError(new Error("network blip"))).toBe(false);
 		expect(isAuthRetryableError(undefined)).toBe(false);
 	});
+
+	it("never rotates on an overflow wearing a 401, including assistant-error payloads", () => {
+		// Kimi's k3-256k answers an over-window prompt with HTTP 401
+		// `invalid_authentication_error`. Rotating would disable a healthy
+		// credential and replay a >256K request against every sibling, and no
+		// sibling can make the prompt fit.
+		const kimiBody =
+			"Provider authentication failed (invalid_authentication_error, 401): k3-256k supports only 256K context.";
+		expect(isAuthRetryableError(new ProviderHttpError(kimiBody, 401, { code: "invalid_authentication_error" }))).toBe(
+			false,
+		);
+		expect(isAuthRetryableError(Object.assign(new Error(kimiBody), { status: 401 }))).toBe(false);
+		expect(isAuthRetryableError({ errorMessage: kimiBody, errorStatus: 401 })).toBe(false);
+		// A 401 that is genuinely about credentials still rotates.
+		expect(isAuthRetryableError(authError(401))).toBe(true);
+	});
 });
 
 describe("withAuth", () => {

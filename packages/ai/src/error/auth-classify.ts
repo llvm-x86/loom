@@ -1,5 +1,5 @@
 import { extractHttpStatusFromError } from "@oh-my-pi/pi-utils";
-import { isOAuthExpiry, isUsageLimit } from "./flags";
+import { isContextOverflowError, isOAuthExpiry, isUsageLimit } from "./flags";
 import { isUsageLimitOutcome } from "./rate-limit";
 
 /**
@@ -31,8 +31,15 @@ export function isInvalidatedOAuthTokenError(error: unknown): boolean {
  * …), or a bare `429` whose payload did not preserve a richer quota code.
  * Transient 429s (`Too many requests`, per-minute caps) stay in the
  * upstream-backoff lane.
+ *
+ * A context overflow never rotates, whatever status it wears: no sibling
+ * credential can make an over-window prompt fit, so rotating there disables a
+ * healthy account and replays the whole oversized request against each
+ * sibling. Kimi makes this concrete — `k3-256k` answers a >256K prompt with
+ * HTTP 401 `invalid_authentication_error`.
  */
 export function isAuthRetryableError(error: unknown): boolean {
+	if (isContextOverflowError(error)) return false;
 	if (isUsageLimit(error)) return true;
 	if (isInvalidatedOAuthTokenError(error)) return true;
 	const httpStatus = extractHttpStatusFromError(error);
