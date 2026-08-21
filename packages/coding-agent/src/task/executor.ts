@@ -448,6 +448,14 @@ export interface ExecutorOptions {
 	invokedAt?: number;
 	acquiredAt?: number;
 	sessionFile?: string | null;
+	/**
+	 * Spawn-time transcript path override (resident agents pin their session
+	 * file to the stable per-project residents dir). Wins over the default
+	 * `artifactsDir/<id>.jsonl` derivation.
+	 */
+	transcriptFile?: string;
+	/** Per-spawn settings overrides merged into the subagent settings snapshot (e.g. resident memory-bank scoping). */
+	settingsOverrides?: Partial<Record<SettingPath, unknown>>;
 	persistArtifacts?: boolean;
 	artifactsDir?: string;
 	eventBus?: EventBus;
@@ -2367,15 +2375,22 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	// Set up artifact paths and write input file upfront if artifacts dir provided
+	// A resident spawn pins its transcript to the stable per-project residents
+	// dir via `transcriptFile`; everything else derives it from artifactsDir.
 	let subtaskSessionFile: string | undefined;
-	if (options.artifactsDir) {
+	if (options.transcriptFile) {
+		subtaskSessionFile = options.transcriptFile;
+	} else if (options.artifactsDir) {
 		subtaskSessionFile = path.join(options.artifactsDir, `${id}.jsonl`);
 	}
 
 	const settings = options.settings ?? Settings.isolated();
+	const readSummarizeOverride = agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined;
 	const subagentSettings = createSubagentSettings(
 		settings,
-		agent.readSummarize === false ? { "read.summarize.enabled": false } : undefined,
+		readSummarizeOverride || options.settingsOverrides
+			? { ...readSummarizeOverride, ...options.settingsOverrides }
+			: undefined,
 		options.parentServiceTier,
 	);
 	// Eager per-task scratch dir, created before the session so the system

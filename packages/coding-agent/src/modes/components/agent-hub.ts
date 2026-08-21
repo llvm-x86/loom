@@ -23,6 +23,7 @@ import { AgentLifecycleManager } from "../../registry/agent-lifecycle";
 import { type AgentRef, AgentRegistry, type AgentStatus, MAIN_AGENT_ID } from "../../registry/agent-registry";
 import { registerPersistedSubagents } from "../../registry/persisted-agents";
 import { USER_INTERRUPT_LABEL } from "../../session/messages";
+import { registerPersistedResidents } from "../../task/resident";
 import { parseThinkingLevel } from "../../thinking";
 import { replaceTabs, TRUNCATE_LENGTHS, truncateToWidth } from "../../tools/render-utils";
 import type { ObservableSession, SessionObserverRegistry } from "../session-observer-registry";
@@ -223,6 +224,13 @@ export class AgentHubOverlayComponent extends Container {
 			: registerPersistedSubagents(this.#registry, deps.sessionFile)
 					.catch((error: unknown) => {
 						logger.warn("Failed to register persisted subagents", { error });
+					})
+					// Residents live in the stable per-project dir, not the
+					// per-session transcript dir — register them too so the hub
+					// shows parked residents from earlier sessions.
+					.then(() => registerPersistedResidents(this.#registry, deps.sessionFile))
+					.catch((error: unknown) => {
+						logger.warn("Failed to register persisted residents", { error });
 					})
 					.then(() => {
 						this.#refreshRows();

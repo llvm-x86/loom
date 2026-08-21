@@ -321,6 +321,15 @@ export interface AgentDefinition {
 	readSummarize?: boolean;
 	/** Prewalk hand-off for the spawned session: `true` = switch to the default prewalk target at the first edit/write, string = custom target model pattern. */
 	prewalk?: boolean | string;
+	/**
+	 * Resident agents are long-lived, stably named, and context-preserving:
+	 * a spawn routed to a resident wakes the existing parked/live instance
+	 * (full transcript intact) instead of starting blank, and the resident
+	 * accumulates durable knowledge in its own per-project memory bank.
+	 * Only bundled/persona agents should set this; ordinary spawns are
+	 * unaffected.
+	 */
+	resident?: boolean;
 	source: AgentSource;
 	filePath?: string;
 }

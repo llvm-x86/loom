@@ -33,10 +33,18 @@ import { describeLoopLimitRuntime } from "../modes/loop-limit";
 import { theme } from "../modes/theme/theme";
 import type { InteractiveModeContext } from "../modes/types";
 import { extractLastCodeBlock, extractLastCommand } from "../modes/utils/copy-targets";
+import { AgentLifecycleManager } from "../registry/agent-lifecycle";
+import { AgentRegistry } from "../registry/agent-registry";
 import type { AgentSession, FreshSessionResult } from "../session/agent-session";
 import { COMPACT_MODES, parseCompactArgs } from "../session/compact-modes";
 import { resolveResumableSession } from "../session/session-listing";
 import { formatShakeSummary, type ShakeMode } from "../session/shake-types";
+import {
+	deleteResidentTranscript,
+	RESIDENTS_DIR_NAME,
+	readResidentOwner,
+	registerPersistedResidents,
+} from "../task/resident";
 import { CLI_THINKING_LEVELS, getConfiguredThinkingLevelMetadata, parseConfiguredThinkingLevel } from "../thinking";
 import { expandTilde, resolveToCwd } from "../tools/path-utils";
 import { urlHyperlinkAlways } from "../tui";
@@ -1530,6 +1538,133 @@ const BUILTIN_SLASH_COMMAND_REGISTRY: ReadonlyArray<SlashCommandSpec> = [
 			}
 			void runtime.ctx.showAccountSelector();
 			runtime.ctx.editor.setText("");
+		},
+	},
+	{
+		name: "residents",
+		description: "List and manage resident agents (long-running, context-preserving subagents)",
+		inlineHint: "[compact|reset <name>]",
+		allowArgs: true,
+		handleTui: (command, runtime) => {
+			const done = () => runtime.ctx.editor.setText("");
+			const sessionDir = runtime.ctx.sessionManager.getSessionDir();
+			const residentsDir = path.join(sessionDir, RESIDENTS_DIR_NAME);
+			const registry = AgentRegistry.global();
+			const lifecycle = AgentLifecycleManager.global();
+			const [action = "", ...rest] = command.args.trim().split(/\s+/);
+			const targetName = rest.join(" ").trim();
+			const findResidentId = async (name: string): Promise<string | undefined> => {
+				await registerPersistedResidents(registry, runtime.ctx.session.sessionFile ?? null);
+				const wanted = name.toLowerCase();
+				let entries: string[] = [];
+				try {
+					entries = await fs.readdir(residentsDir);
+				} catch {}
+				const onDisk = entries.filter(e => e.endsWith(".jsonl")).map(e => e.slice(0, -".jsonl".length));
+				return onDisk.find(id => id.toLowerCase() === wanted) ?? (registry.get(name) ? name : undefined);
+			};
+
+			if (action === "" || action === "list") {
+				void (async () => {
+					await registerPersistedResidents(registry, runtime.ctx.session.sessionFile ?? null);
+					let entries: string[] = [];
+					try {
+						entries = await fs.readdir(residentsDir);
+					} catch {}
+					const ids = entries.filter(e => e.endsWith(".jsonl")).map(e => e.slice(0, -".jsonl".length));
+					if (ids.length === 0) {
+						runtime.ctx.showStatus(
+							'No residents yet. Spawn one with the task tool: agent "bug-reviewer" or "fix-architect".',
+							{ dim: true },
+						);
+						done();
+						return;
+					}
+					const lines: string[] = ["Residents:"];
+					for (const id of ids.sort()) {
+						const transcript = path.join(residentsDir, `${id}.jsonl`);
+						const stat = await fs.stat(transcript).catch(() => null);
+						const ref = registry.get(id);
+						const status = ref?.status ?? "parked";
+						const sizeKb = stat ? Math.max(1, Math.round(stat.size / 1024)) : 0;
+						const ageMin = stat ? Math.max(0, Math.round((Date.now() - stat.mtimeMs) / 60_000)) : 0;
+						const owner = (await readResidentOwner(transcript))?.pid;
+						const ownerNote =
+							owner === undefined ? "" : owner === process.pid ? " · owned here" : ` · owned by pid ${owner}`;
+						lines.push(`  ${id} — ${status}, ${sizeKb} KB transcript, active ${ageMin}m ago${ownerNote}`);
+					}
+					lines.push(
+						"",
+						"Use /residents compact <name> to compact now, /residents reset <name> to wipe its transcript (memory bank survives).",
+					);
+					runtime.ctx.showStatus(lines.join("\n"));
+					done();
+				})();
+				return;
+			}
+
+			if (action === "compact") {
+				if (!targetName) {
+					runtime.ctx.showWarning("Usage: /residents compact <name>");
+					done();
+					return;
+				}
+				void (async () => {
+					const id = await findResidentId(targetName);
+					if (!id) {
+						runtime.ctx.showWarning(`Unknown resident: ${targetName}`);
+						done();
+						return;
+					}
+					try {
+						runtime.ctx.showStatus(`Compacting resident ${id}…`, { dim: true });
+						const session = await lifecycle.ensureLive(id);
+						const result = await session.compact();
+						const summary = result.shortSummary ? ` — ${result.shortSummary}` : "";
+						runtime.ctx.showStatus(`Resident ${id} compacted (${result.tokensBefore} tokens before)${summary}`);
+					} catch (error) {
+						runtime.ctx.showWarning(
+							`Failed to compact ${id}: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+					done();
+				})();
+				return;
+			}
+
+			if (action === "reset") {
+				if (!targetName) {
+					runtime.ctx.showWarning("Usage: /residents reset <name>");
+					done();
+					return;
+				}
+				void (async () => {
+					const id = await findResidentId(targetName);
+					if (!id) {
+						runtime.ctx.showWarning(`Unknown resident: ${targetName}`);
+						done();
+						return;
+					}
+					const ref = registry.get(id);
+					if (ref?.status === "running") {
+						runtime.ctx.showWarning(`Resident ${id} is running — wait for it to go idle before resetting.`);
+						done();
+						return;
+					}
+					await lifecycle.release(id);
+					const removed = await deleteResidentTranscript(path.join(residentsDir, `${id}.jsonl`));
+					runtime.ctx.showStatus(
+						removed
+							? `Resident ${id} reset — transcript wiped; its memory bank is untouched. Next spawn starts fresh.`
+							: `Resident ${id} unregistered; no transcript on disk.`,
+					);
+					done();
+				})();
+				return;
+			}
+
+			runtime.ctx.showWarning(`Unknown /residents action: ${action} (expected list, compact, or reset)`);
+			done();
 		},
 	},
 	{

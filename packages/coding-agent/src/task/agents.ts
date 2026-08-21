@@ -6,7 +6,9 @@
 import { Effort } from "@oh-my-pi/pi-ai";
 import { parseFrontmatter, prompt } from "@oh-my-pi/pi-utils";
 import { parseAgentFields } from "../discovery/helpers";
+import bugReviewerMd from "../prompts/agents/bug-reviewer.md" with { type: "text" };
 import designerMd from "../prompts/agents/designer.md" with { type: "text" };
+import fixArchitectMd from "../prompts/agents/fix-architect.md" with { type: "text" };
 // Embed agent markdown files at build time
 import agentFrontmatterTemplate from "../prompts/agents/frontmatter.md" with { type: "text" };
 import librarianMd from "../prompts/agents/librarian.md" with { type: "text" };
@@ -25,6 +27,7 @@ interface AgentFrontmatter {
 	model?: string | string[];
 	thinkingLevel?: string;
 	blocking?: boolean;
+	resident?: boolean;
 	prewalk?: boolean | string;
 }
 
@@ -44,6 +47,8 @@ const EMBEDDED_AGENT_DEFS: EmbeddedAgentDef[] = [
 	{ fileName: "scout.md", template: scoutMd },
 	{ fileName: "designer.md", template: designerMd },
 	{ fileName: "reviewer.md", template: reviewerMd },
+	{ fileName: "bug-reviewer.md", template: bugReviewerMd },
+	{ fileName: "fix-architect.md", template: fixArchitectMd },
 	{ fileName: "librarian.md", template: librarianMd },
 	{
 		fileName: "task.md",

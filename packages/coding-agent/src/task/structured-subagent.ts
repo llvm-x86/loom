@@ -15,7 +15,7 @@ import { MCPManager } from "../mcp/manager";
 import { loadOverallPlanReference } from "../plan-mode/plan-handoff";
 import planModeSubagentPrompt from "../prompts/system/plan-mode-subagent.md" with { type: "text" };
 import subagentUserPromptTemplate from "../prompts/system/subagent-user-prompt.md" with { type: "text" };
-import { MAIN_AGENT_ID } from "../registry/agent-registry";
+import { AgentRegistry, MAIN_AGENT_ID } from "../registry/agent-registry";
 import type { ToolSession } from "../tools";
 import { isIrcEnabled } from "../tools/hub";
 import { buildOutputValidator } from "../tools/output-schema-validator";
@@ -31,6 +31,14 @@ import {
 } from "./isolation-runner";
 import { generateTaskName } from "./name-generator";
 import { AgentOutputManager } from "./output-manager";
+import {
+	claimResidentOwnership,
+	RESIDENT_ROUTE_DEFAULT_TIMEOUT_MS,
+	residentBankName,
+	residentIdForAgent,
+	residentTranscriptPath,
+	routeToResident,
+} from "./resident";
 import { ensureScratchDir } from "./scratch";
 import { withSharedTreeLock } from "./shared-tree-lock";
 import { resolveSpawnPolicy } from "./spawn-policy";
@@ -585,11 +593,96 @@ function attachStructuredOutputMetadata(result: SingleResult, schema: Structured
 }
 
 /**
+ * Wake an existing resident instance and return its reply as a synthetic
+ * SingleResult, or undefined when no usable resident exists (caller falls
+ * through to a fresh spawn). Throws for a foreign-owned resident — that is a
+ * caller-actionable state, not a degrade-to-fresh one (spawning anyway would
+ * split the resident's mind across two processes).
+ */
+async function tryRouteResident(
+	request: StructuredSubagentRequest,
+	policy: EffectiveSubagentPolicy,
+): Promise<StructuredSubagentResult | undefined> {
+	const agent = policy.effectiveAgent;
+	const id = residentIdForAgent(agent.name);
+	if (policy.enableIrc === false) return undefined;
+	const sessionFile = request.session.getSessionFile();
+	const configuredRuntime = Math.max(
+		0,
+		Math.trunc(Number(request.maxRuntimeMs ?? request.session.settings.get("task.maxRuntimeMs") ?? 0) || 0),
+	);
+	const startedAt = Date.now();
+	const routed = await routeToResident({
+		registry: AgentRegistry.global(),
+		id,
+		task: request.assignment,
+		sessionFile,
+		timeoutMs: configuredRuntime > 0 ? configuredRuntime : RESIDENT_ROUTE_DEFAULT_TIMEOUT_MS,
+		signal: request.signal,
+	});
+	if (routed.kind === "absent") return undefined;
+	if (routed.kind === "foreign-owned") {
+		throw new StructuredSubagentError(
+			"preflight",
+			`Resident "${id}" is owned by another live loom process. Drive it from that process, or reset it once that process exits.`,
+		);
+	}
+	const base: Omit<SingleResult, "exitCode" | "output" | "error"> = {
+		index: request.index ?? 0,
+		id,
+		agent: agent.name,
+		agentSource: agent.source,
+		task: renderSubagentPrompt(request.assignment),
+		assignment: request.assignment.trim(),
+		description: trimToUndefined(request.identity?.label),
+		stderr: "",
+		truncated: false,
+		durationMs: Date.now() - startedAt,
+		tokens: 0,
+		requests: 0,
+	};
+	if (routed.kind === "timeout") {
+		// The resident is still working; its eventual reply lands in Main's
+		// inbox. Surface the timeout as an ordinary failed result.
+		const minutes = Math.round(routed.waitedMs / 60_000);
+		return {
+			result: {
+				...base,
+				exitCode: 1,
+				output: "",
+				error: `Resident "${id}" did not reply within ${minutes}m. It is still running — its reply will arrive via hub.`,
+			},
+			policy,
+			mergeSummary: "",
+			changesApplied: null,
+			artifactsDir: "",
+			temporaryArtifacts: false,
+		};
+	}
+	return {
+		result: { ...base, exitCode: 0, output: routed.body },
+		policy,
+		mergeSummary: "",
+		changesApplied: null,
+		artifactsDir: "",
+		temporaryArtifacts: false,
+	};
+}
+
+/**
  * Execute a validated subagent. Preflight errors occur before any artifact
  * lease or child dispatch; callers keep responsibility for their result text.
  */
 export async function runStructuredSubagent(request: StructuredSubagentRequest): Promise<StructuredSubagentResult> {
 	const policy = await resolveEffectiveSubagentPolicy(request);
+	// Resident personas route to their long-lived instance (or fresh-spawn it
+	// with stable identity, transcript pinning, and bank scoping) instead of
+	// the ordinary ephemeral-spawn path. See task/resident.ts.
+	const isResident = policy.effectiveAgent.resident === true;
+	if (isResident) {
+		const routed = await tryRouteResident(request, policy);
+		if (routed) return routed;
+	}
 	const lease = await leaseArtifacts(request.session, request.invocationKind);
 	let changesApplied: boolean | null = null;
 	let mergeSummary = "";
@@ -599,16 +692,43 @@ export async function runStructuredSubagent(request: StructuredSubagentRequest):
 	// the `finally` block needs the ACTUAL outcome, not the intent.
 	let isolated = policy.isIsolated;
 	try {
-		const id = await reserveStructuredSubagentId(request.session, {
-			...request.identity,
-			label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
-		});
+		// Residents keep a stable id across spawns (that stability IS the
+		// feature — it is what makes later invocations routable); ordinary
+		// spawns allocate a unique-per-session id.
+		const id = isResident
+			? residentIdForAgent(policy.effectiveAgent.name)
+			: await reserveStructuredSubagentId(request.session, {
+					...request.identity,
+					label: request.identity?.label ?? (request.invocationKind === "eval" ? "EvalAgent" : undefined),
+				});
 		const spawnCwd = await resolveSpawnCwd(request);
 		const baseOptions = buildExecutorOptions(request, policy, lease, id, spawnCwd);
 		baseOptions.planReference = await loadPlanReference(request, policy);
 		let isolationContext: IsolationContext | null = null;
 		let isolationDegraded = false;
 		let isolationWorkdir: string | undefined;
+		if (isResident) {
+			// Residents never isolate: they are read-only personas whose
+			// transcript and bank must live in the shared project state, not a
+			// disposable worktree.
+			isolated = false;
+			const transcriptPath = residentTranscriptPath(request.session.getSessionFile(), id);
+			if (transcriptPath) {
+				await fs.mkdir(path.dirname(transcriptPath), { recursive: true });
+				const ownership = await claimResidentOwnership(transcriptPath);
+				if (ownership === "foreign") {
+					throw new StructuredSubagentError(
+						"preflight",
+						`Resident "${id}" is owned by another live loom process. Drive it from that process, or reset it once that process exits.`,
+					);
+				}
+				baseOptions.transcriptFile = transcriptPath;
+			}
+			baseOptions.settingsOverrides = {
+				...baseOptions.settingsOverrides,
+				"mnemopi.bank": residentBankName(policy.effectiveAgent.name),
+			};
+		}
 		if (isolated) {
 			try {
 				isolationContext = await prepareIsolationContext(spawnCwd, {
