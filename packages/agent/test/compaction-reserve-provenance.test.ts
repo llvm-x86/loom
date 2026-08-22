@@ -1,6 +1,7 @@
 import { describe, expect, it } from "bun:test";
 import type { CompactionSettings } from "@oh-my-pi/pi-agent-core/compaction/compaction";
 import {
+	compactionNeedsContextWindow,
 	DEFAULT_COMPACTION_SETTINGS,
 	DEFAULT_RESERVE_TOKENS,
 	effectiveReserveTokens,
@@ -94,5 +95,63 @@ describe("compaction reserve provenance", () => {
 		// of the field is the provenance signal, not its value.
 		expect(DEFAULT_COMPACTION_SETTINGS.reserveTokens).toBeUndefined();
 		expect(DEFAULT_RESERVE_TOKENS).toBe(16384);
+	});
+});
+
+describe("tokens-mode compaction without a context window", () => {
+	// The user config is `compaction.thresholdTokens: 200000` with
+	// `thresholdMode: "tokens"`. When the model reports no context window
+	// (unknown `?`), an explicit absolute token threshold must still trigger
+	// compaction — it is window-independent.
+	it("fires an explicit token threshold when the window is unknown (0)", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdMode: "tokens",
+			thresholdTokens: 200000,
+			keepRecentTokens: 20000,
+		};
+		expect(compactionNeedsContextWindow(settings)).toBe(false);
+		expect(resolveThresholdTokens(0, settings)).toBe(200000);
+		expect(shouldCompact(199999, 0, settings)).toBe(false);
+		expect(shouldCompact(200000, 0, settings)).toBe(false);
+		expect(shouldCompact(200001, 0, settings)).toBe(true);
+	});
+
+	it("auto-detects tokens mode from a bare thresholdTokens and still fires with no window", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdTokens: 100000,
+			keepRecentTokens: 20000,
+		};
+		// resolveCompactionThresholdMode falls back to "tokens" when thresholdTokens > 0.
+		expect(compactionNeedsContextWindow(settings)).toBe(false);
+		expect(resolveThresholdTokens(0, settings)).toBe(100000);
+		expect(shouldCompact(150000, 0, settings)).toBe(true);
+	});
+
+	it("still clamps an explicit token threshold below a known window", () => {
+		const settings: CompactionSettings = {
+			enabled: true,
+			thresholdMode: "tokens",
+			thresholdTokens: 200000,
+			keepRecentTokens: 20000,
+		};
+		// cw=300000: threshold clamps to cw-1; a huge configured threshold also
+		// clamps to cw-1 when it exceeds the window.
+		expect(resolveThresholdTokens(300000, settings)).toBe(200000);
+		expect(resolveThresholdTokens(1000, settings)).toBe(999);
+	});
+
+	it("window-relative modes still require a known window (no compaction on 0)", () => {
+		const reserve: CompactionSettings = {
+			enabled: true,
+			thresholdMode: "percent",
+			thresholdPercent: 80,
+			keepRecentTokens: 20000,
+		};
+		expect(compactionNeedsContextWindow(reserve)).toBe(true);
+		// percent of an unknown window resolves to 0 -> no compaction.
+		expect(resolveThresholdTokens(0, reserve)).toBe(0);
+		expect(shouldCompact(500000, 0, reserve)).toBe(false);
 	});
 });

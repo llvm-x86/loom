@@ -58,6 +58,7 @@ import {
 	collectShakeRegions,
 	compact,
 	compactionContextTokens,
+	compactionNeedsContextWindow,
 	createCompactionSummaryMessage,
 	DEFAULT_SHAKE_CONFIG,
 	effectiveReserveTokens,
@@ -3853,7 +3854,9 @@ export class AgentSession {
 
 		const advisorModel = agent.state.model;
 		const contextWindow = advisorModel.contextWindow ?? 0;
-		if (contextWindow <= 0) return false;
+		// Tokens mode is window-independent (explicit absolute threshold); only
+		// window-relative modes require a known window to decide.
+		if (contextWindow <= 0 && compactionNeedsContextWindow(compactionSettings)) return false;
 
 		const messages = agent.state.messages;
 		const estimateOptions = { excludeEncryptedReasoning: true } as const;
@@ -11822,9 +11825,12 @@ export class AgentSession {
 	async #runPrePromptCompactionIfNeeded(messages: AgentMessage[]): Promise<void> {
 		const model = this.model;
 		if (!model) return;
-		const contextWindow = model.contextWindow ?? 0;
-		if (contextWindow <= 0) return;
 		const compactionSettings = this.settings.getGroup("compaction");
+		const contextWindow = model.contextWindow ?? 0;
+		// Tokens mode is window-independent (explicit absolute threshold), so an
+		// unknown window must not suppress pre-prompt compaction. Window-relative
+		// modes cannot decide without a window and bail here.
+		if (contextWindow <= 0 && compactionNeedsContextWindow(compactionSettings)) return;
 		const contextTokens = this.#estimatePrePromptContextTokens(messages, contextWindow);
 		if (!shouldCompact(contextTokens, contextWindow, compactionSettings)) return;
 

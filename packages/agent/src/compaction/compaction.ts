@@ -292,12 +292,27 @@ export function resolveBudgetReserveTokens(contextWindow: number, settings: Comp
 }
 
 /**
+ * Whether a compaction decision needs a known (positive) context window.
+ *
+ * `thresholdMode: "tokens"` with an explicit `thresholdTokens` is
+ * window-independent: the user picked an absolute token count, so compaction
+ * must still fire when the model reports no window (0 / unknown). All other
+ * modes (`percent`, `reserve`) derive their threshold from the window, so they
+ * cannot decide without one.
+ */
+export function compactionNeedsContextWindow(settings: CompactionSettings): boolean {
+	return resolveCompactionThresholdMode(settings) !== "tokens";
+}
+
+/**
  * Check if compaction should trigger based on context usage.
  */
 export function shouldCompact(contextTokens: number, contextWindow: number, settings: CompactionSettings): boolean {
-	if (!settings.enabled || settings.strategy === "off" || contextWindow <= 0) return false;
+	if (!settings.enabled || settings.strategy === "off") return false;
 	const thresholdTokens = resolveThresholdTokens(contextWindow, settings);
-	return contextTokens > thresholdTokens;
+	// A non-positive threshold means the mode could not be resolved against the
+	// window (window-relative mode with an unknown window): do not compact.
+	return thresholdTokens > 0 && contextTokens > thresholdTokens;
 }
 
 /**
@@ -348,6 +363,11 @@ export function resolveThresholdTokens(contextWindow: number, settings: Compacti
 	if (mode === "tokens") {
 		const thresholdTokens = settings.thresholdTokens;
 		if (typeof thresholdTokens === "number" && Number.isFinite(thresholdTokens) && thresholdTokens > 0) {
+			// `thresholdTokens` is an absolute, window-independent count. When the
+			// window is unknown (<= 0) the explicit threshold stands on its own;
+			// otherwise it is clamped below the window so compaction leaves room
+			// for the next prompt+response.
+			if (contextWindow <= 0) return Math.max(1, thresholdTokens);
 			return Math.min(contextWindow - 1, Math.max(1, thresholdTokens));
 		}
 		return resolveReserveThresholdTokens(contextWindow, settings);
