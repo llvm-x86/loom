@@ -24,6 +24,8 @@ describe("DeepSeek provider discovery", () => {
 		expect(vision?.reasoning).toBe(true);
 		expect(vision?.thinking).toEqual({ mode: "effort", efforts: [Effort.Low, Effort.High, Effort.Max] });
 		expect(vision?.input).toEqual(["text", "image"]);
+		expect(vision?.contextWindow).toBe(1_000_000);
+		expect(vision?.maxTokens).toBe(384_000);
 	});
 
 	test("leaves bundled models' reasoning metadata intact", async () => {

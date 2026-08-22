@@ -1443,6 +1443,12 @@ const DEEPSEEK_V4_REASONING_BY_ID: Record<string, true> = {
 
 const DEEPSEEK_V4_DEFAULT_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
 
+// The `/models` endpoint omits token limits for the experimental SKU, so the
+// live session shows an unresolved context window (`409K/?`). Mirror the
+// bundled deepseek-v4-flash sibling: 1M context, 384k output.
+const DEEPSEEK_V4_VISION_EXP_CONTEXT_WINDOW = 1_000_000;
+const DEEPSEEK_V4_VISION_EXP_MAX_TOKENS = 384_000;
+
 function applyDeepseekDiscoveryOverrides(model: ModelSpec<"openai-completions">): ModelSpec<"openai-completions"> {
 	if (!DEEPSEEK_V4_REASONING_BY_ID[model.id]) {
 		return model;
@@ -1453,6 +1459,8 @@ function applyDeepseekDiscoveryOverrides(model: ModelSpec<"openai-completions">)
 		reasoning: true,
 		input: isVision ? ["text", "image"] : ["text"],
 		thinking: { mode: "effort", efforts: DEEPSEEK_V4_DEFAULT_EFFORTS },
+		contextWindow: model.contextWindow ?? DEEPSEEK_V4_VISION_EXP_CONTEXT_WINDOW,
+		maxTokens: model.maxTokens ?? DEEPSEEK_V4_VISION_EXP_MAX_TOKENS,
 	};
 }
 
