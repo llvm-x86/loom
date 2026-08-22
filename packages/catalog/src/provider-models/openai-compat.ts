@@ -1429,10 +1429,57 @@ export interface DeepSeekModelManagerConfig {
 	fetch?: FetchImpl;
 }
 
+/**
+ * Curated overlay for DeepSeek V4 family models that the `/models` endpoint
+ * fails to advertise as reasoning-capable. The V4 line is reasoning-native
+ * (flash / pro are bundled as `reasoning: true`), but an unbundled variant
+ * like `deepseek-v4-flash-vision-exp` comes back from discovery with
+ * `reasoning: false`, which hides the thinking dial and the
+ * `reasoning_content` wire flags. Vision SKUs also accept image input.
+ */
+const DEEPSEEK_V4_REASONING_BY_ID: Record<string, true> = {
+	"deepseek-v4-flash-vision-exp": true,
+};
+
+const DEEPSEEK_V4_DEFAULT_EFFORTS: readonly Effort[] = [Effort.Low, Effort.High, Effort.Max];
+
+function applyDeepseekDiscoveryOverrides(model: ModelSpec<"openai-completions">): ModelSpec<"openai-completions"> {
+	if (!DEEPSEEK_V4_REASONING_BY_ID[model.id]) {
+		return model;
+	}
+	const isVision = model.id.includes("vision");
+	return {
+		...model,
+		reasoning: true,
+		input: isVision ? ["text", "image"] : ["text"],
+		thinking: { mode: "effort", efforts: DEEPSEEK_V4_DEFAULT_EFFORTS },
+	};
+}
+
 export function deepseekModelManagerOptions(
 	config?: DeepSeekModelManagerConfig,
 ): ModelManagerOptions<"openai-completions"> {
-	return createSimpleOpenAICompletionsOptions("deepseek", "https://api.deepseek.com", config);
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? "https://api.deepseek.com";
+	const references = createBundledReferenceMap<"openai-completions">("deepseek");
+	return {
+		providerId: "deepseek",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "deepseek",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id);
+						const model = mapWithBundledReference(entry, defaults, reference);
+						return applyDeepseekDiscoveryOverrides(model);
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
 }
 // ---------------------------------------------------------------------------
 // 6.7 Zhipu Coding Plan
