@@ -217,6 +217,12 @@ describe("extendRecallWithLegacyBanks edge cases", () => {
 // mirrors the isolation used by test/tools/gh.test.ts and hindsight-bank.test.ts.
 process.env.GIT_CONFIG_GLOBAL = "/dev/null";
 process.env.GIT_CONFIG_SYSTEM = "/dev/null";
+// The pin outranks every derivation step by design, so a shell that exports
+// LOOM_MNEMOPI_BANK_REPO (console lanes do, per session) silently rewrites the
+// expected bank for 17 of the tests below. Drop it: these suites exist to
+// exercise the DERIVATION, and the pin's own precedence is asserted explicitly
+// via `mnemopi.bankRepo` settings fixtures.
+delete process.env.LOOM_MNEMOPI_BANK_REPO;
 
 async function initGitRepoWithOrigin(dir: string, originUrl?: string): Promise<void> {
 	await fs.mkdir(dir, { recursive: true });
@@ -287,6 +293,96 @@ describe("resolveBankRepo (lazy git-origin derivation)", () => {
 			await dir.remove();
 		}
 	});
+
+	// Regression: an isolated task / run-scratch dir is NOT a checkout, so the
+	// git walk finds nothing and the bank used to fall back to the cwd hash.
+	// Real memory landed in per-run drawers named after the isolation segment
+	// (`t<digest>-<hash>`) — 86 stranded rows across 95 such banks on the
+	// reference install — where recall for the repo could never reach it. The
+	// dir's `owner.json` names the checkout it was cut from; inherit its origin.
+	it("inherits the bank repo from a managed run dir's owner marker", async () => {
+		const repo = await TempDir.create("@mnemopi-owner-repo-");
+		const scratch = await TempDir.create("@mnemopi-owner-scratch-");
+		try {
+			await initGitRepoWithOrigin(repo.path(), "git@github.com:Family-Fun-Group/SkyRail.git");
+			await fs.writeFile(
+				path.join(scratch.path(), "owner.json"),
+				JSON.stringify({
+					pid: process.pid,
+					repoRoot: repo.path(),
+					taskId: "t1",
+					runId: "r1",
+					worktree: "t0e43fdbf5",
+				}),
+			);
+			expect(resolveBankRepo(scratch.path())).toBe("Family-Fun-Group/SkyRail");
+			// The whole point: same bank as the parent session, not a t-drawer.
+			expect(
+				computeMnemopiBankScope(undefined, scratch.path(), "per-project", resolveBankRepo(scratch.path())).bank,
+			).toBe(computeMnemopiBankScope(undefined, repo.path(), "per-project", resolveBankRepo(repo.path())).bank);
+		} finally {
+			await repo.remove();
+			await scratch.remove();
+		}
+	});
+
+	it("inherits from an owner marker in a parent dir of the cwd", async () => {
+		const repo = await TempDir.create("@mnemopi-owner-nested-repo-");
+		const scratch = await TempDir.create("@mnemopi-owner-nested-");
+		try {
+			await initGitRepoWithOrigin(repo.path(), "https://github.com/Family-Fun-Group/kanban.git");
+			await fs.writeFile(path.join(scratch.path(), "owner.json"), JSON.stringify({ repoRoot: repo.path() }));
+			const nested = path.join(scratch.path(), "work", "deep");
+			await fs.mkdir(nested, { recursive: true });
+			expect(resolveBankRepo(nested)).toBe("Family-Fun-Group/kanban");
+		} finally {
+			await repo.remove();
+			await scratch.remove();
+		}
+	});
+
+	// A spawn from outside any checkout records repoRoot === the dir itself.
+	// There is no parent git config to inherit, so the cwd-hash fallback must
+	// stand rather than the resolver looping on the same failed lookup.
+	it("keeps the cwd-hash fallback when the owner marker names no checkout", async () => {
+		const scratch = await TempDir.create("@mnemopi-owner-self-");
+		try {
+			await fs.writeFile(path.join(scratch.path(), "owner.json"), JSON.stringify({ repoRoot: scratch.path() }));
+			expect(resolveBankRepo(scratch.path())).toBeUndefined();
+		} finally {
+			await scratch.remove();
+		}
+	});
+
+	it("keeps the cwd-hash fallback for a malformed or repoRoot-less owner marker", async () => {
+		const bad = await TempDir.create("@mnemopi-owner-bad-");
+		const empty = await TempDir.create("@mnemopi-owner-empty-");
+		try {
+			await fs.writeFile(path.join(bad.path(), "owner.json"), "{not json");
+			await fs.writeFile(path.join(empty.path(), "owner.json"), JSON.stringify({ pid: 1, worktree: "t9" }));
+			expect(resolveBankRepo(bad.path())).toBeUndefined();
+			expect(resolveBankRepo(empty.path())).toBeUndefined();
+		} finally {
+			await bad.remove();
+			await empty.remove();
+		}
+	});
+
+	// The cwd's own origin still outranks the marker: a scratch CLONE is a real
+	// checkout, and cloning repo B inside a dir cut from repo A must key on B.
+	it("prefers the cwd's own git origin over the owner marker", async () => {
+		const parent = await TempDir.create("@mnemopi-owner-prec-parent-");
+		const clone = await TempDir.create("@mnemopi-owner-prec-clone-");
+		try {
+			await initGitRepoWithOrigin(parent.path(), "git@github.com:Family-Fun-Group/SkyRail.git");
+			await initGitRepoWithOrigin(clone.path(), "git@github.com:llvm-x86/agent-chat.git");
+			await fs.writeFile(path.join(clone.path(), "owner.json"), JSON.stringify({ repoRoot: parent.path() }));
+			expect(resolveBankRepo(clone.path())).toBe("llvm-x86/agent-chat");
+		} finally {
+			await parent.remove();
+			await clone.remove();
+		}
+	});
 });
 
 describe("loadMnemopiConfig recall union for lazily-derived repo banks", () => {
@@ -298,8 +394,12 @@ describe("loadMnemopiConfig recall union for lazily-derived repo banks", () => {
 			const settings = await Settings.isolated({ "mnemopi.scoping": "per-project" }).cloneForCwd(projectDir.path());
 			const config = loadMnemopiConfig(settings, agentDir.path());
 
-			const slugBank = computeMnemopiBankScope(undefined, projectDir.path(), "per-project", "Family-Fun-Group/BehaviorOS")
-				.bank;
+			const slugBank = computeMnemopiBankScope(
+				undefined,
+				projectDir.path(),
+				"per-project",
+				"Family-Fun-Group/BehaviorOS",
+			).bank;
 			const cwdOnlyBank = computeMnemopiBankScope(undefined, projectDir.path(), "per-project", undefined).bank;
 
 			expect(config.bank).toBe(slugBank);
@@ -336,9 +436,7 @@ describe("touched-repo bank derivation (console-lane fallback)", () => {
 		try {
 			await initGitRepoWithOrigin(noOrigin.path());
 			await initGitRepoWithOrigin(withOrigin.path(), "git@github.com:Family-Fun-Group/SkyRail.git");
-			expect(resolveBankRepoFromTouchedDirs([noOrigin.path(), withOrigin.path()])).toBe(
-				"Family-Fun-Group/SkyRail",
-			);
+			expect(resolveBankRepoFromTouchedDirs([noOrigin.path(), withOrigin.path()])).toBe("Family-Fun-Group/SkyRail");
 			expect(resolveBankRepoFromTouchedDirs([noOrigin.path()])).toBeUndefined();
 		} finally {
 			await noOrigin.remove();
@@ -472,6 +570,97 @@ describe("MnemopiSessionState.maybeRebindTouchedRepoBank (console-lane mid-sessi
 			expect(state.config.recallBanks).toContain(cwdOnlyBank);
 		} finally {
 			await state?.dispose({ consolidate: false });
+			await containerDir.remove();
+			await agentDir.remove();
+		}
+	});
+
+	// Regression: the rebind used to run ONLY at `beforeAgentStartPrompt`,
+	// which scans the messages present when a turn STARTS. A task subagent
+	// gets one prompt and one turn, so at its only start hook nothing had been
+	// touched yet and its transcript retained into the cwd-hash drawer named
+	// after its isolation dir (`t<digest>-<hash>`) — 95 such banks holding 86
+	// rows of ordinary repo work on the reference install, invisible to recall
+	// for the repo. The write paths must re-derive first: by `agent_end` the
+	// turn's tool calls are in the transcript.
+	it("rebinds on the retain path for a single-turn session that never hit a start hook", async () => {
+		const containerDir = await TempDir.create("@mnemopi-single-turn-");
+		const agentDir = await TempDir.create("@mnemopi-single-turn-agent-");
+		let state: MnemopiSessionState | undefined;
+		try {
+			const skyRailDir = path.join(containerDir.path(), "SkyRail");
+			await initGitRepoWithOrigin(skyRailDir, "git@github.com:Family-Fun-Group/SkyRail.git");
+			const settings = await Settings.isolated({
+				"mnemopi.scoping": "per-project",
+				"mnemopi.noEmbeddings": true,
+				"mnemopi.autoRecall": false,
+				"mnemopi.autoRetain": true,
+				"mnemopi.treeEnabled": false,
+			}).cloneForCwd(containerDir.path());
+			const config = loadMnemopiConfig(settings, agentDir.path());
+			const cwdOnlyBank = computeMnemopiBankScope(undefined, containerDir.path(), "per-project", undefined).bank;
+			expect(config.bank).toBe(cwdOnlyBank);
+
+			const messages: unknown[] = [];
+			const session = {
+				sessionId: "single-turn-session",
+				messages,
+				sessionManager: { getCwd: () => containerDir.path(), getEntries: () => [] },
+			} as never;
+			state = new MnemopiSessionState({ sessionId: "single-turn-session", config, session });
+
+			// The subagent's one turn edits a checkout, then ends. No start hook
+			// ever ran with those messages in view.
+			messages.push(toolCallMessage("edit", { path: path.join(skyRailDir, "fix.ts") }));
+			await state.maybeRetainOnAgentEnd([]);
+
+			const skyRailBank = computeMnemopiBankScope(
+				undefined,
+				containerDir.path(),
+				"per-project",
+				"Family-Fun-Group/SkyRail",
+			).bank;
+			expect(state.config.bank).toBe(skyRailBank);
+			expect(state.config.bank).not.toBe(cwdOnlyBank);
+			expect(state.config.recallBanks).toContain(cwdOnlyBank);
+		} finally {
+			await state?.dispose?.();
+			await containerDir.remove();
+			await agentDir.remove();
+		}
+	});
+
+	// Same for the shutdown/close write path the context-sync worker drives.
+	it("rebinds on the forced-retain path", async () => {
+		const containerDir = await TempDir.create("@mnemopi-force-retain-");
+		const agentDir = await TempDir.create("@mnemopi-force-retain-agent-");
+		let state: MnemopiSessionState | undefined;
+		try {
+			const repoDir = path.join(containerDir.path(), "kanban");
+			await initGitRepoWithOrigin(repoDir, "https://github.com/Family-Fun-Group/kanban.git");
+			const settings = await Settings.isolated({
+				"mnemopi.scoping": "per-project",
+				"mnemopi.noEmbeddings": true,
+				"mnemopi.autoRecall": false,
+				"mnemopi.autoRetain": false,
+				"mnemopi.treeEnabled": false,
+			}).cloneForCwd(containerDir.path());
+			const config = loadMnemopiConfig(settings, agentDir.path());
+			const messages: unknown[] = [];
+			const session = {
+				sessionId: "force-retain-session",
+				messages,
+				sessionManager: { getCwd: () => containerDir.path(), getEntries: () => [] },
+			} as never;
+			state = new MnemopiSessionState({ sessionId: "force-retain-session", config, session });
+			// A strong touch (a write), not a `read`: only writes claim the bank.
+			messages.push(toolCallMessage("edit", { path: path.join(repoDir, "README.md") }));
+			await state.forceRetainCurrentSession();
+			expect(state.config.bank).toBe(
+				computeMnemopiBankScope(undefined, containerDir.path(), "per-project", "Family-Fun-Group/kanban").bank,
+			);
+		} finally {
+			await state?.dispose?.();
 			await containerDir.remove();
 			await agentDir.remove();
 		}

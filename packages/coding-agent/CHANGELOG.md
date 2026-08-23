@@ -65,6 +65,22 @@
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
 
+- Fixed task subagents and other single-turn sessions retaining their memory
+  into a per-run drawer instead of the repository's bank. Two causes, both on
+  the Mnemopi write path. (1) A task-isolation or run-scratch directory is not
+  a checkout, so the git-origin walk found nothing and the bank fell back to
+  the cwd hash — a bank named after the isolation segment
+  (`t<digest>-<hash>`). Those dirs record the checkout they were cut from in
+  their `owner.json` marker, and the resolver now inherits that root's
+  `origin` when the cwd has none of its own, one hop, cwd origin still
+  winning. (2) The touched-repo rebind ran only at `beforeAgentStartPrompt`,
+  which scans the messages present when a turn STARTS — a subagent gets one
+  turn, so at its only start hook nothing had been touched yet. Both retain
+  paths (`agent_end` and the forced shutdown/close pass) now re-derive the
+  write bank first, when the turn's tool calls are visible, and a failed
+  re-derivation can no longer abort the write. On the reference install this
+  had stranded 86 rows of ordinary repository work across 95 such banks,
+  where recall for those repositories could never reach them.
 - Fixed `task` isolation failing to capture a nested worktree whose `gitdir`
   pointer is dead (a deleted parent worktree leaves the child's `.git` file
   pointing at a removed administrative directory). The nested checkout was

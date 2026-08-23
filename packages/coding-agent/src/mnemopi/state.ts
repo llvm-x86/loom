@@ -19,13 +19,13 @@ import type { AgentSession, AgentSessionEvent } from "../session/agent-session";
 import { isRecord, toolArgs, touchedRepoDirs } from "../utils/session-context-sync";
 import {
 	collectBankReposFromTouchedDirs,
+	type MnemopiBackendConfig,
+	type MnemopiScoping,
 	parseDeclaredBankRepo,
 	resolveBankRepo,
 	resolveBankRepoFromTouchedDirs,
 	sanitizeBankName,
 	withTouchedRepoBankScope,
-	type MnemopiBackendConfig,
-	type MnemopiScoping,
 } from "./config";
 import { mnemopiEmbedClient } from "./embed-client";
 import {
@@ -683,7 +683,6 @@ export class MnemopiSessionState {
 		});
 	}
 
-
 	formatScopedRecallContext(
 		results: readonly RecallResult[],
 		format: "bullet" | "json" = "bullet",
@@ -880,8 +879,11 @@ export class MnemopiSessionState {
 	 */
 	private async maybeRebindTouchedRepoBank(): Promise<void> {
 		if (this.aliasOf || this.config.bankRepoPinned || this.config.scoping === "global") return;
+		// Not `this.session.messages.length` unguarded: the retain paths call
+		// this on sessions that may carry no message list at all, and a throw
+		// there would cost the WRITE, not just the re-derivation.
 		const messages = this.session.messages;
-		if (messages.length === this.touchedRepoRescanMessageCount) return;
+		if (!Array.isArray(messages) || messages.length === this.touchedRepoRescanMessageCount) return;
 		this.touchedRepoRescanMessageCount = messages.length;
 		const cwd = this.session.sessionManager.getCwd();
 		// Reverse so the Map's first-insertion order (touchedRepoDirs never
@@ -983,6 +985,20 @@ export class MnemopiSessionState {
 
 	async maybeRetainOnAgentEnd(_messages: AgentMessage[]): Promise<void> {
 		if (!this.config.autoRetain || this.aliasOf) return;
+		// Re-derive the write bank BEFORE the write, not just at
+		// `beforeAgentStartPrompt`: that hook scans the messages that exist when
+		// a turn STARTS, so a single-turn session — every task subagent — had no
+		// touched dirs to scan yet and retained into the cwd-hash drawer keyed on
+		// its isolation dir. By `agent_end` the turn's tool calls are in the
+		// transcript, so the checkout the subagent actually worked in is visible
+		// and its memory lands in that repo's bank.
+		// Best-effort: a re-derivation that fails must still leave the write to
+		// the bank already in play, never drop the transcript on the floor.
+		try {
+			await this.maybeRebindTouchedRepoBank();
+		} catch (err) {
+			logger.debug("Mnemopi: pre-retain bank rebind failed", { error: String(err) });
+		}
 		const flat = extractMessages(this.session.sessionManager);
 		const userTurns = flat.filter(message => message.role === "user").length;
 		if (userTurns - this.lastRetainedTurn < this.config.retainEveryNTurns) return;
@@ -995,6 +1011,14 @@ export class MnemopiSessionState {
 
 	async forceRetainCurrentSession(options: { extract?: boolean } = {}): Promise<void> {
 		if (this.aliasOf) return;
+		// Same reason as `maybeRetainOnAgentEnd`: the shutdown/close pass is a
+		// WRITE, and for a session that never started a second turn this is the
+		// only chance to key it on the repo it actually touched.
+		try {
+			await this.maybeRebindTouchedRepoBank();
+		} catch (err) {
+			logger.debug("Mnemopi: pre-retain bank rebind failed", { error: String(err) });
+		}
 		const flat = extractMessages(this.session.sessionManager);
 		await this.retainMessages(flat, this.sessionId, options);
 		this.lastRetainedTurn = flat.filter(message => message.role === "user").length;

@@ -2,7 +2,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import type { MnemopiOptions } from "@oh-my-pi/pi-mnemopi";
-import { getMemoriesDir, logger } from "@oh-my-pi/pi-utils";
+import { getMemoriesDir, logger, MANAGED_RUN_OWNER_FILE } from "@oh-my-pi/pi-utils";
 import type { Settings } from "../config/settings";
 import * as git from "../utils/git";
 
@@ -304,7 +304,7 @@ export function resolveBankRepo(dir: string, settings?: Pick<Settings, "get">): 
 	const resolved = path.resolve(dir || ".");
 	const cached = bankRepoDerivationCache.get(resolved);
 	if (cached !== undefined || bankRepoDerivationCache.has(resolved)) return cached;
-	const derived = deriveBankRepoFromGitOrigin(resolved);
+	const derived = deriveBankRepoFromGitOrigin(resolved) ?? deriveBankRepoFromManagedRunOwner(resolved);
 	bankRepoDerivationCache.set(resolved, derived);
 	return derived;
 }
@@ -333,7 +333,10 @@ export function resolveBankRepo(dir: string, settings?: Pick<Settings, "get">): 
 const DECLARED_SLUG_SEGMENT = /^[A-Za-z0-9._-]+$/;
 
 export function parseDeclaredBankRepo(value: string): string | undefined {
-	const segments = value.trim().replace(/\.git$/, "").split("/");
+	const segments = value
+		.trim()
+		.replace(/\.git$/, "")
+		.split("/");
 	if (segments.length !== 2) return undefined;
 	const [owner, repo] = segments;
 	for (const segment of [owner, repo]) {
@@ -460,6 +463,63 @@ function deriveBankRepoFromGitOrigin(dir: string): string | undefined {
 	}
 	const originUrl = parseGitConfigOriginUrl(configText);
 	return originUrl ? parseOwnerRepoSlug(originUrl) : undefined;
+}
+
+/**
+ * Inherit the bank repo of the checkout a MANAGED RUN DIR was cut from.
+ *
+ * Task isolation and run scratch both hand a session a working directory that
+ * is not a checkout: an isolated task gets a disposable dir (isolation never
+ * guesses which sibling checkout you meant), and `$OMP_RUN_SCRATCH` is a bare
+ * dir under the scratch root. Neither has a `.git`, so
+ * {@link deriveBankRepoFromGitOrigin} finds nothing and the bank fell back to
+ * the cwd hash — which is why subagent memory landed in per-run drawers named
+ * after the isolation segment (`t<digest>-<hash>`) instead of the repo bank
+ * its parent session was writing to. The transcripts stranded there are
+ * ordinary repo work, so recall for that repo could never see them.
+ *
+ * Both dir kinds drop a `MANAGED_RUN_OWNER_FILE` marker recording `repoRoot`:
+ * the git root the run was cut from, or the resolved cwd when the spawn
+ * happened outside any checkout. Reading `origin` out of THAT root is what
+ * makes a scratch/isolation dir inherit its parent checkout's git config.
+ *
+ * Walks up from `dir` because the session's cwd may be a subdirectory of the
+ * managed dir (a clone made inside it), stopping at the marker, the
+ * filesystem root, or {@link OWNER_MARKER_SEARCH_DEPTH} levels. One hop only:
+ * `repoRoot` is resolved as a git checkout, never re-inherited, so a marker
+ * chain cannot recurse.
+ */
+const OWNER_MARKER_SEARCH_DEPTH = 4;
+
+function deriveBankRepoFromManagedRunOwner(dir: string): string | undefined {
+	let current = dir;
+	for (let depth = 0; depth <= OWNER_MARKER_SEARCH_DEPTH; depth++) {
+		let raw: string;
+		try {
+			raw = fs.readFileSync(path.join(current, MANAGED_RUN_OWNER_FILE), "utf8");
+		} catch {
+			const parent = path.dirname(current);
+			if (parent === current) return undefined;
+			current = parent;
+			continue;
+		}
+		let marker: unknown;
+		try {
+			marker = JSON.parse(raw);
+		} catch {
+			return undefined;
+		}
+		if (!marker || typeof marker !== "object" || !("repoRoot" in marker)) return undefined;
+		const repoRoot = marker.repoRoot;
+		if (typeof repoRoot !== "string" || !repoRoot.trim()) return undefined;
+		const resolved = path.resolve(repoRoot);
+		// `repoRoot` equal to the marker dir means the run was spawned outside
+		// any checkout: there is no parent git config to inherit, and probing
+		// it again would just repeat the lookup that already failed.
+		if (resolved === path.resolve(current)) return undefined;
+		return deriveBankRepoFromGitOrigin(resolved);
+	}
+	return undefined;
 }
 
 /** Extract the `url` value of the `[remote "origin"]` section from raw git config text. */
