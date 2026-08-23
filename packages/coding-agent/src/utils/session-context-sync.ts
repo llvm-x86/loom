@@ -17,8 +17,8 @@
 import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import { logger } from "@oh-my-pi/pi-utils";
-import { resolveDefaultRepoMemoized } from "../tools/gh";
 import { sanitizeBankName } from "../mnemopi/config";
+import { resolveDefaultRepoMemoized } from "../tools/gh";
 import { expandTilde } from "../tools/path-utils";
 import {
 	type ContextActivityEvent,
@@ -939,10 +939,21 @@ async function runSync(
 	}
 
 	if (slugToDir.size === 0) {
-		// Nothing detectable — fall back to a single cwd-basename ledger.
-		const slug = path.basename(path.resolve(session.cwd)) || "session";
-		const result = await syncSingleRepo(session, ledgerDir, slug);
-		return { repos: [slug], ...result };
+		// Nothing resolves to a GitHub repo. The only basename ledger worth
+		// keeping is the workspace root's own (the container-level context
+		// agent-chat's SPAWNING.md documents); any other cwd basename —
+		// scratch dirs, worktree ids, temp names — would mint a ledger file
+		// for a repo that does not exist, and those sessions' durable facts
+		// live in mnemopi, not in a ledger. Skip instead of minting duds
+		// (agent-chat context purge 2026-08-23: 64 such files archived).
+		const cwd = path.resolve(session.cwd);
+		const root = settings.workspaceRoot ? path.resolve(expandTilde(settings.workspaceRoot)) : cwd;
+		if (cwd === root) {
+			const slug = path.basename(cwd) || "session";
+			const result = await syncSingleRepo(session, ledgerDir, slug);
+			return { repos: [slug], ...result };
+		}
+		return { repos: [], ...EMPTY_SYNC_RESULT };
 	}
 	if (slugToDir.size === 1) {
 		const [slug] = slugToDir.keys();
@@ -1099,9 +1110,12 @@ export async function maybeSync(
 			// silent no-writes). The terminal event therefore stays `done` (the
 			// sync ran to completion) but carries the write outcome explicitly:
 			// `persisted` when at least one ledger landed, `refused` when every
-			// write was refused, with the exact per-ledger guard reasons in
-			// `refuse_reason` (`error` kept for older ingests).
-			const wroteNothing = result.refusals.length > 0 && result.refusals.length >= result.repos.length;
+			// write was refused, `skipped` when nothing was there to sync (no
+			// canonical repo slug resolved and cwd was not the workspace root),
+			// with the exact per-ledger guard reasons in `refuse_reason`
+			// (`error` kept for older ingests).
+			const wroteNothing =
+				result.repos.length === 0 || (result.refusals.length > 0 && result.refusals.length >= result.repos.length);
 			emit("done", {
 				repos: result.repos,
 				tokens_in: result.tokensIn,
@@ -1110,7 +1124,7 @@ export async function maybeSync(
 				model: result.model,
 				provider: result.provider,
 				duration_ms: result.durationMs,
-				outcome: wroteNothing ? "refused" : "persisted",
+				outcome: result.repos.length === 0 ? "skipped" : wroteNothing ? "refused" : "persisted",
 				...(result.refusals.length > 0
 					? {
 							error: `ledger not written — ${result.refusals.join("; ")}`,
