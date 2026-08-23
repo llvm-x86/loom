@@ -64,6 +64,24 @@
 - Gave LSP writethrough batches a `WRITETHROUGH_BATCH_MAX` ceiling and a `WRITETHROUGH_BATCH_TTL_MS` idle lifetime so a batch abandoned by a throwing edit call no longer retains its pending file texts forever. The age resets on every touch, so a live batch is never expired
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
+- Fixed concurrent memory-tree renders failing and littering the tree. Every
+  atomic write used one scratch path per PROCESS (`<dest>.tmp-<pid>`), which
+  was safe only while a bank had a single renderer. It no longer does: banks
+  are keyed on the repository, subagents render in-process, and the
+  post-retain render is fired unawaited — so overlapping passes over one bank
+  collided on the identical temp path and the first `rename` left the others
+  failing `ENOENT` (measured: 7 of 8 concurrent passes rejected, and a pass
+  could rename a half-written file into place). The scratch name now carries a
+  per-call counter, and passes writing the same directory are serialised
+  in-process, which also stops a fan-out from redundantly re-scanning one
+  bank. Renders are best-effort and log at debug, so the visible symptom was
+  simply a tree that silently stopped updating.
+- Fixed abandoned `.tmp-*` scratch files accumulating in the memory tree
+  forever. They are deliberately hidden from index listings and were only
+  removed on a failed write, never after a process died between `writeFile`
+  and `rename`, so a real tree was found still holding `MEMORY.md.tmp-32701`.
+  Reconcile now sweeps them, age-gated so a live peer process mid-rename is
+  never disturbed.
 
 - Fixed concurrent writers on one memory bank losing rows, and sometimes
   killing a whole session's memory, to SQLite lock errors. Keying banks on the

@@ -358,8 +358,27 @@ function renderRootEntry(
 	].join("\n");
 }
 
+/**
+ * Marker for a scratch file mid-rename, and how long one may sit before it is
+ * assumed abandoned. The horizon is generous because a live PEER process may
+ * legitimately have a temp file open right now; sweeping one out from under it
+ * would break exactly the write this function exists to make safe.
+ */
+const TMP_MARKER = ".tmp-";
+const TMP_ORPHAN_MS = 300_000;
+
+/** Distinguishes concurrent writers to one destination WITHIN a process. */
+let atomicWriteSeq = 0;
+
 async function atomicWrite(dest: string, content: string): Promise<void> {
-	const tmp = `${dest}.tmp-${process.pid}`;
+	// The suffix carries a per-call counter, not just the pid: subagents run
+	// IN-PROCESS and (since banks are keyed on the repository) render the same
+	// bank, so a pid-only name had every concurrent render fighting over one
+	// scratch path -- whoever renamed first left the rest failing ENOENT, or
+	// worse, renamed a half-written file into place. Measured: 7 of 8
+	// concurrent renders failed.
+	atomicWriteSeq = (atomicWriteSeq + 1) % 1_000_000;
+	const tmp = `${dest}${TMP_MARKER}${process.pid}-${atomicWriteSeq}`;
 	try {
 		await writeFile(tmp, content, "utf8");
 		await rename(tmp, dest);
@@ -436,7 +455,13 @@ function renderBankIndex(treeRoot: string, rows: readonly { bank: string; leaves
  * instead and must never be mistaken for a bank; `archive/` and stray
  * `MEMORY.md.tmp-*` files are likewise never listed.
  */
-export async function renderMemoryTreeIndex(treeRoot: string): Promise<void> {
+export function renderMemoryTreeIndex(treeRoot: string): Promise<void> {
+	// Same reasoning as `renderMemoryTree`; distinct key because this writes
+	// the CROSS-project index at the root, not a bank directory.
+	return serializePerRoot(`index:${path.resolve(treeRoot)}`, () => writeMemoryTreeIndex(treeRoot));
+}
+
+async function writeMemoryTreeIndex(treeRoot: string): Promise<void> {
 	let entries: Dirent[];
 	try {
 		entries = await readdir(treeRoot, { withFileTypes: true });
@@ -466,7 +491,42 @@ export async function renderMemoryTreeIndex(treeRoot: string): Promise<void> {
  * Render one bank as a file-tree projection. Idempotent — safe to call on
  * every reconcile pass. Returns what changed in this pass.
  */
-export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<RenderMemoryTreeResult> {
+export function renderMemoryTree(input: RenderMemoryTreeInput): Promise<RenderMemoryTreeResult> {
+	return serializePerRoot(path.resolve(input.treeRoot), () => renderBankTree(input));
+}
+
+/**
+ * Serialise passes that write the same directory.
+ *
+ * A projection is idempotent, so overlapping passes cannot corrupt the bank --
+ * but they do interleave writes to shared entry points, and they duplicate the
+ * whole scan for no benefit. Overlap became routine once banks were keyed on
+ * the repository: a fan-out of non-aliased subagent states all render the same
+ * bank, and `renderMemoryTree` is also triggered unawaited (`void`) after
+ * retain, so a single state can re-enter it.
+ *
+ * Keyed by resolved directory rather than bank id: the same bank rendered
+ * under two roots is genuinely independent work. Queue entries are dropped
+ * once they are the tail, so this cannot grow without bound, and the guard
+ * swallows rejections so one failed pass never poisons the next.
+ */
+const renderQueues = new Map<string, Promise<unknown>>();
+
+function serializePerRoot<T>(key: string, task: () => Promise<T>): Promise<T> {
+	const previous = renderQueues.get(key) ?? Promise.resolve();
+	const result = previous.then(task, task);
+	const guard = result.then(
+		() => undefined,
+		() => undefined,
+	);
+	renderQueues.set(key, guard);
+	void guard.then(() => {
+		if (renderQueues.get(key) === guard) renderQueues.delete(key);
+	});
+	return result;
+}
+
+async function renderBankTree(input: RenderMemoryTreeInput): Promise<RenderMemoryTreeResult> {
 	const { memory, bank, treeRoot } = input;
 	const nowMs = Date.now();
 	const leafCharCap = Math.max(TREE_LEAF_MIN_CHARS, input.leafCharCap ?? 4096);
@@ -543,6 +603,8 @@ export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<Re
 
 		result.removedStale += await removeStaleLeaves(activeDir, activeSlugs);
 		result.removedStale += await removeStaleLeaves(archiveDir, archivedKeptSlugs);
+		result.removedStale += await sweepOrphanTemps(activeDir, nowMs);
+		result.removedStale += await sweepOrphanTemps(archiveDir, nowMs);
 		const entryLeaves = [...group.active.values()]
 			.sort((a, b) => (a.updated === b.updated ? (a.id < b.id ? -1 : 1) : a.updated < b.updated ? 1 : -1))
 			.slice(0, entryRows);
@@ -567,9 +629,40 @@ export async function renderMemoryTree(input: RenderMemoryTreeInput): Promise<Re
 			};
 		})
 		.sort((a, b) => (a.subtree < b.subtree ? -1 : 1));
+	result.removedStale += await sweepOrphanTemps(treeRoot, nowMs);
 	await atomicWrite(path.join(treeRoot, MEMORY_TREE_ENTRY_FILE), renderRootEntry(treeRoot, bank, rollup));
 	appendTreeWriteLog(memory, bank, result);
 	return result;
+}
+
+/**
+ * Delete scratch files abandoned by a process that died between `writeFile`
+ * and `rename`. Nothing else ever removed these: they are deliberately hidden
+ * from the index listing, so they accumulated in the tree indefinitely (one
+ * was found in a real tree, `MEMORY.md.tmp-32701`, long after its writer was
+ * gone). Age-gated so a live peer's in-flight write is never touched.
+ */
+async function sweepOrphanTemps(dir: string, nowMs: number): Promise<number> {
+	let removed = 0;
+	let entries: string[] = [];
+	try {
+		entries = await readdir(dir);
+	} catch {
+		return 0;
+	}
+	for (const name of entries) {
+		if (!name.includes(TMP_MARKER)) continue;
+		const target = path.join(dir, name);
+		try {
+			const info = await stat(target);
+			if (nowMs - info.mtimeMs < TMP_ORPHAN_MS) continue;
+			await rm(target, { force: true });
+			removed += 1;
+		} catch {
+			// best-effort: a peer may have just renamed or removed it
+		}
+	}
+	return removed;
 }
 
 async function removeStaleLeaves(dir: string, keep: ReadonlySet<string>): Promise<number> {

@@ -297,6 +297,80 @@ describe("memory tree", () => {
 		}
 	});
 
+	/*
+	 * Concurrency guards. Overlapping passes over one bank are now routine:
+	 * banks are keyed on the repository, subagents render in-process, and the
+	 * post-retain render is fired unawaited. Pre-fix, 7 of 8 concurrent passes
+	 * rejected -- every one used the same `<dest>.tmp-<pid>` scratch path, so
+	 * the first rename left the rest with ENOENT.
+	 */
+	it("survives concurrent renders of one bank in a single process", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			for (let i = 0; i < 12; i++) {
+				memory.remember(`concurrent fact ${i}`, {
+					source: "test",
+					metadata: { subtree: `projects/p${i % 3}` },
+				});
+			}
+			const passes = await Promise.allSettled(
+				Array.from({ length: 8 }, () => renderMemoryTree({ memory, bank: "testbank", treeRoot: root })),
+			);
+			const failures = passes
+				.filter((p): p is PromiseRejectedResult => p.status === "rejected")
+				.map(p => String(p.reason));
+			expect(failures).toEqual([]);
+
+			// Every pass is a full projection, so the tree must be complete and
+			// free of scratch files no matter how the passes interleaved.
+			const leafDirs = await readdir(path.join(root, "projects"), { withFileTypes: true });
+			expect(leafDirs.length).toBe(3);
+			for (const dir of leafDirs) {
+				const names = await readdir(path.join(root, "projects", dir.name));
+				expect(names.some(n => n.includes(".tmp-"))).toBe(false);
+				expect(names).toContain("MEMORY.md");
+				for (const name of names) {
+					const body = await readFile(path.join(root, "projects", dir.name, name), "utf8");
+					expect(body.length).toBeGreaterThan(0);
+				}
+			}
+		} finally {
+			memory.close();
+			cleanup(root);
+		}
+	});
+
+	it("sweeps abandoned scratch files but leaves a peer's in-flight write alone", async () => {
+		const memory = makeMemory();
+		const root = makeRoot();
+		try {
+			memory.remember("a fact that anchors the projection", {
+				source: "test",
+				metadata: { subtree: "projects/sweep" },
+			});
+			await renderMemoryTree({ memory, bank: "testbank", treeRoot: root });
+
+			const subtreeDir = path.join(root, "projects", "sweep");
+			const abandoned = path.join(subtreeDir, "MEMORY.md.tmp-32701");
+			const inFlight = path.join(subtreeDir, "MEMORY.md.tmp-99999");
+			await writeFile(abandoned, "half-written leftover from a dead process");
+			await writeFile(inFlight, "a live peer is mid-rename right now");
+			// Only the abandoned one is aged past the orphan horizon.
+			const stale = new Date(Date.now() - 3_600_000);
+			utimesSync(abandoned, stale, stale);
+
+			await renderMemoryTree({ memory, bank: "testbank", treeRoot: root });
+
+			const names = await readdir(subtreeDir);
+			expect(names).not.toContain("MEMORY.md.tmp-32701");
+			expect(names).toContain("MEMORY.md.tmp-99999");
+		} finally {
+			memory.close();
+			cleanup(root);
+		}
+	});
+
 	it("renders two banks into their own directories without clobbering entry points or leaves", async () => {
 		const memoryA = new Mnemopi({ dbPath: ":memory:", sessionId: "tree-test", bank: "bank-a" });
 		const memoryB = new Mnemopi({ dbPath: ":memory:", sessionId: "tree-test", bank: "bank-b" });
