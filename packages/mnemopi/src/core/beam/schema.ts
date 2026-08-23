@@ -1,4 +1,5 @@
 import type { Database } from "bun:sqlite";
+import { transaction } from "../../db";
 
 type PragmaTableInfoRow = {
 	name: string;
@@ -22,6 +23,23 @@ function runAll(db: Database, statements: readonly string[]): void {
 }
 
 export function initBeam(db: Database): void {
+	// Every statement below is individually idempotent (`IF NOT EXISTS` plus
+	// `addColumnIfMissing`), but per-statement DDL across CONCURRENT processes
+	// is not safe: SQLite can refuse a schema change with SQLITE_BUSY while a
+	// peer holds a read snapshot, and it does so WITHOUT invoking the busy
+	// handler -- so `busy_timeout` never applies and the open simply throws.
+	// One write-locked transaction takes the lock up front, where the timeout
+	// DOES apply, and additionally makes a half-migrated bank unobservable.
+	//
+	// This matters now that banks are keyed on the REPOSITORY: a parallel
+	// batch of task subagents opens one bank file at once, where each used to
+	// get a private file it could migrate alone.
+	transaction(db, () => {
+		initBeamSchema(db);
+	});
+}
+
+function initBeamSchema(db: Database): void {
 	db.run(`
 		CREATE TABLE IF NOT EXISTS working_memory (
 			id TEXT PRIMARY KEY,

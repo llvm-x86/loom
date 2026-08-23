@@ -1,6 +1,6 @@
 import type { Database } from "bun:sqlite";
 import { existsSync, writeFileSync } from "node:fs";
-import { closeQuietly, type DatabasePath, openDatabase } from "../../db";
+import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../../db";
 
 export const ANNOTATION_KINDS = ["mentions", "fact", "occurred_on", "has_source"] as const;
 export type AnnotationKind = (typeof ANNOTATION_KINDS)[number];
@@ -51,6 +51,12 @@ function copyDatabase(source: DatabasePath, destination: string): void {
 }
 
 function initAnnotations(db: Database): void {
+	transaction(db, () => {
+		initAnnotationsSchema(db);
+	});
+}
+
+function initAnnotationsSchema(db: Database): void {
 	db.run(`
 		CREATE TABLE IF NOT EXISTS annotations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,

@@ -65,6 +65,30 @@
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
 
+- Fixed concurrent writers on one memory bank losing rows, and sometimes
+  killing a whole session's memory, to SQLite lock errors. Keying banks on the
+  repository (above) put a parallel batch of task subagents on ONE bank file
+  where each previously had a private file it could never contend for, which
+  turned three latent flaws into measured losses at a 24-writer fan-out.
+  (1) Top-level transactions opened `BEGIN DEFERRED`, so a read-then-write
+  transaction had to upgrade its lock mid-flight — an upgrade SQLite fails
+  with `SQLITE_BUSY` immediately and WITHOUT invoking the busy handler, so
+  `busy_timeout` never applied. They now open `BEGIN IMMEDIATE` and retry
+  acquisition with jittered backoff (safe only there: no statement has run
+  yet, so there is nothing to undo); read-only callers can opt out via
+  `deferredTransaction`. (2) Schema creation ran as loose per-statement DDL,
+  which fails the same way while a peer holds a read snapshot — `initBeam`,
+  `EpisodicGraph` and the annotation initialisers now each run in one
+  write-locked transaction, so a half-migrated bank is also unobservable.
+  (3) `remember` inserted its row with no transaction at all, losing the row
+  outright on a busy bank; the row and its temporal annotations are now
+  written atomically. `PRAGMA journal_mode=WAL` no longer throws when the mode
+  cannot be changed right now, since WAL is a concurrency optimisation and not
+  a correctness requirement — and the probe runs under a short 250 ms
+  `busy_timeout` rather than the steady-state 5 s, which had made an
+  uncooperative bank stall the open for 25 seconds. Transaction nesting is now
+  detected from SQLite's own state instead of internal bookkeeping, so the
+  helper composes with the hand-rolled `BEGIN` in the E6 migration.
 - Fixed task subagents and other single-turn sessions retaining their memory
   into a per-run drawer instead of the repository's bank. Two causes, both on
   the Mnemopi write path. (1) A task-isolation or run-scratch directory is not

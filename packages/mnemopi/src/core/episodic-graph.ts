@@ -1,5 +1,5 @@
 import type { Database } from "bun:sqlite";
-import { closeQuietly, type DatabasePath, openDatabase } from "../db";
+import { closeQuietly, type DatabasePath, openDatabase, transaction } from "../db";
 
 export interface Gist {
 	readonly id: string;
@@ -249,7 +249,12 @@ export class EpisodicGraph {
 		this.dbPath = options.dbPath ?? ":memory:";
 		this.db = options.db ?? openDatabase(this.dbPath);
 		this.ownsConnection = options.db === undefined;
-		this.initTables();
+		// One retrying write transaction, not N racing DDL statements: see
+		// `BEGIN_WRITE` in db.ts. Concurrent peers opening the same bank
+		// otherwise fail the schema change outright.
+		transaction(this.db, () => {
+			this.initTables();
+		});
 	}
 
 	private initTables(): void {
