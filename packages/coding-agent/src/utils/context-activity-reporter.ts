@@ -18,8 +18,8 @@ export type ContextActivityKind = "sync" | "compaction" | "repair";
 export type ContextActivityPhase = "start" | "done" | "skip" | "fail";
 /** Matches `SessionContextSyncReason`; compaction events always report "compaction", ledger-repair events always "repair". */
 export type ContextActivityTrigger = "compaction" | "idle" | "shutdown" | "repair";
-/** Terminal write outcome on `phase: "done"` — every ledger persisted, or a cut-invariant guard refused the write. */
-export type ContextActivityOutcome = "persisted" | "refused";
+/** Terminal write outcome on `phase: "done"` — every ledger persisted, a cut-invariant guard refused the write, or nothing was there to sync. */
+export type ContextActivityOutcome = "persisted" | "refused" | "skipped";
 
 /** Wire shape POSTed to `/api/context/event` — see the locked contract for field semantics. */
 export interface ContextActivityEvent {

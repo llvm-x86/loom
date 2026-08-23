@@ -9,7 +9,9 @@
  *    bypasses the debounce.
  * 5. In-flight guard: concurrent `maybeSync` calls -> exactly one
  *    `runEphemeralTurn` call.
- * 6. Slug falls back to the cwd basename when repo resolution fails.
+ * 6. Slug falls back to the cwd basename when repo resolution fails and the
+ *    cwd IS the effective workspace root; with a different workspaceRoot
+ *    configured, nothing is written and the sync reports `skipped`.
  *
  * Multi-repo mode (cwd is a container, not itself a checkout):
  * 7. Two touched repos -> two ledgers written from a JSON-map reply.
@@ -435,7 +437,7 @@ describe("sessionContextSync", () => {
 		expect(calls).toBe(1);
 	});
 
-	it("falls back to the cwd basename when repo resolution fails", async () => {
+	it("falls back to the cwd basename when repo resolution fails (cwd is the implicit workspace root)", async () => {
 		const settings = makeSettings({ dir });
 		const cwd = join(dir, "my-project");
 		const { session } = makeSession(cwd, settings, "# ignored — status ledger\nbody\n");
@@ -447,6 +449,31 @@ describe("sessionContextSync", () => {
 		});
 
 		expect(existsSync(join(dir, "my-project.md"))).toBe(true);
+	});
+
+	it("writes nothing and reports skipped when nothing resolves and cwd is outside the workspace root", async () => {
+		const wsRoot = mkdtempSync(join(tmpdir(), "session-context-sync-ws-"));
+		const settings = makeSettings({ dir, workspaceRoot: wsRoot });
+		// cwd sits OUTSIDE the workspace root (a scratch session) and resolves
+		// to no GitHub repo — a cwd-basename ledger must NOT be minted here.
+		const cwd = join(dir, "scratch-session");
+		mkdirSync(cwd, { recursive: true });
+		const { session, calls } = makeSession(cwd, settings, "# ignored\nbody\n");
+		const events: Array<{ phase: string; repos?: string[]; outcome?: string }> = [];
+
+		await maybeSync(session, "compaction", {
+			resolveRepo: async () => {
+				throw new Error("not a git checkout");
+			},
+			reportEvent: event => {
+				events.push({ phase: event.phase, repos: event.repos, outcome: event.outcome });
+			},
+		});
+
+		expect(calls).toBe(0);
+		expect(existsSync(join(dir, "scratch-session.md"))).toBe(false);
+		expect(events.at(-1)).toEqual({ phase: "done", repos: [], outcome: "skipped" });
+		rmSync(wsRoot, { recursive: true, force: true });
 	});
 
 	it("multi-repo: two touched repos write two ledgers via one focused turn each", async () => {
