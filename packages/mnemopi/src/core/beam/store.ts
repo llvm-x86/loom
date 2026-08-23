@@ -497,32 +497,41 @@ export function remember(beam: BeamMemoryState, content: string, options: StoreR
 	}
 
 	const memoryId = options.memoryId ?? options.memory_id ?? generateId(content, new Date(timestamp));
-	beam.db
-		.prepare(`
-			INSERT INTO working_memory
-			(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
-			 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`)
-		.run(
-			memoryId,
-			content,
-			storedEmbeddingText(content, embedText),
-			source,
-			timestamp,
-			beam.sessionId,
-			importance,
-			metadataJson(metadata),
-			validUntil,
-			scope,
-			authorId,
-			authorType,
-			channelId,
-			veracity,
-			memoryType,
-			trustTier,
-		);
-	addTemporalAnnotations(beam, memoryId, timestamp, source);
+	// One retrying write transaction (see `BEGIN_WRITE` in db.ts). A bare
+	// INSERT here loses the row outright when a peer holds the write lock:
+	// SQLite reports SQLITE_BUSY and there is nothing to retry it. Measured
+	// on a bank shared by 24 concurrent writers -- the shape a parallel batch
+	// of task subagents now produces, since banks are keyed on the repository
+	// rather than on each subagent's own run directory. Wrapping the row and
+	// its temporal annotations together also makes the pair atomic.
+	transaction(beam.db, () => {
+		beam.db
+			.prepare(`
+				INSERT INTO working_memory
+				(id, content, embed_text, source, timestamp, session_id, importance, metadata_json, valid_until, scope,
+				 author_id, author_type, channel_id, veracity, memory_type, trust_tier)
+				VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`)
+			.run(
+				memoryId,
+				content,
+				storedEmbeddingText(content, embedText),
+				source,
+				timestamp,
+				beam.sessionId,
+				importance,
+				metadataJson(metadata),
+				validUntil,
+				scope,
+				authorId,
+				authorType,
+				channelId,
+				veracity,
+				memoryType,
+				trustTier,
+			);
+		addTemporalAnnotations(beam, memoryId, timestamp, source);
+	});
 	// `extractText` lets a caller decouple "what gets stored" from "what facts are
 	// mined". coding-agent retains full multi-author transcripts but wants
 	// fact/entity heuristics to read only the user-authored turns (issue #3372).

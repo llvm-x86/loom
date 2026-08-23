@@ -208,6 +208,12 @@ export function initAnnotations(path: string = dbPath()): void {
 	}
 }
 export function initAnnotationsWithConn(db: Database): void {
+	transaction(db, () => {
+		initAnnotationsSchema(db);
+	});
+}
+
+function initAnnotationsSchema(db: Database): void {
 	db.exec(`
 		CREATE TABLE IF NOT EXISTS annotations (
 			id INTEGER PRIMARY KEY AUTOINCREMENT,
