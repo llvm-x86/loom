@@ -3198,25 +3198,25 @@ export const TENCENT_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] =
 		4_000,
 		{ reasoning: false },
 	),
-	...["deepseek-v4-flash-202605", "deepseek/deepseek-v4-flash-0731", "deepseek/deepseek-v4-flash"].map(id =>
-		createTencentModel(
-			id,
-			"DeepSeek V4 Flash 0731 GA (Vendor Direct)",
-			{ input: 0.44, output: 1.32, cacheRead: 0.014, cacheWrite: 0 },
-			1_048_576,
-			384_000,
-			{ reasoning: true },
-		),
+	// Only the dated GA ids exist on the gateway. The `deepseek/…`-prefixed spellings were verified
+	// against the live /v1/chat/completions endpoint and return gateway error 400004 ("model or
+	// service ID does not exist"), so they are NOT registered. `deepseek/deepseek-v4-flash-vision-exp`
+	// below is the sole genuinely slash-prefixed id the gateway accepts.
+	createTencentModel(
+		"deepseek-v4-flash-202605",
+		"DeepSeek V4 Flash 0731 GA (Vendor Direct)",
+		{ input: 0.44, output: 1.32, cacheRead: 0.014, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
 	),
-	...["deepseek-v4-pro-202606", "deepseek/deepseek-v4-pro-0813", "deepseek/deepseek-v4-pro"].map(id =>
-		createTencentModel(
-			id,
-			"DeepSeek V4 Pro 0813 GA (Vendor Direct)",
-			{ input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
-			1_048_576,
-			384_000,
-			{ reasoning: true },
-		),
+	createTencentModel(
+		"deepseek-v4-pro-202606",
+		"DeepSeek V4 Pro 0813 GA (Vendor Direct)",
+		{ input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
 	),
 	createTencentModel(
 		"deepseek/deepseek-v4-flash-vision-exp",
@@ -3256,14 +3256,6 @@ export const TENCENT_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] =
 		{ input: 1.74, output: 3.48, cacheRead: 0.145, cacheWrite: 0 },
 		1_048_576,
 		384_000,
-		{ reasoning: true },
-	),
-	createTencentModel(
-		"deepseek-v3.2",
-		"DeepSeek V3.2",
-		{ input: 0.57, output: 1.71, cacheRead: 0.114, cacheWrite: 0 },
-		128_000,
-		32_000,
 		{ reasoning: true },
 	),
 	createTencentModel(
@@ -3341,23 +3333,15 @@ export const TENCENT_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] =
 		256_000,
 		{ reasoning: true, vision: true },
 	),
+	// `kimi-k2.5`, `minimax-m2.5` and `deepseek-v3.2` are deliberately absent: /v1/models still
+	// lists them with status "pre-offline", but a live call to each is rejected with gateway error
+	// 400004 ("model or service ID does not exist"), so bundling them would only add dead picker
+	// entries. Verified against the Singapore endpoint.
 	createTencentModel(
 		"kimi-k2.6",
 		"Kimi K2.6",
 		{ input: 0.858, output: 3.566, cacheRead: 0.145, cacheWrite: 0 },
 		256_000,
-		256_000,
-		{ reasoning: true, vision: true },
-	),
-	createTencentModel(
-		"kimi-k2.5",
-		"Kimi K2.5",
-		{ input: 0.6, output: 3, cacheRead: 0.1, cacheWrite: 0 },
-		256_000,
-		// The Kimi guide states ">= 16000 recommended" for k2.5/k2.6 `max_tokens`, which is a
-		// suggested floor for the shared reasoning+response quota, NOT an output ceiling. Encoding
-		// 16000 here would cap a 256K-context model at 16K. Mirrors k2.6/k2.7 above and the
-		// bundled `moonshot` entries for the same models (max output == context window).
 		256_000,
 		{ reasoning: true, vision: true },
 	),
@@ -3373,14 +3357,6 @@ export const TENCENT_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] =
 		"minimax-m2.7",
 		"MiniMax M2.7",
 		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
-		200_000,
-		128_000,
-		{ reasoning: true },
-	),
-	createTencentModel(
-		"minimax-m2.5",
-		"MiniMax M2.5",
-		{ input: 0.3, output: 1.2, cacheRead: 0.03, cacheWrite: 0 },
 		200_000,
 		128_000,
 		{ reasoning: true },

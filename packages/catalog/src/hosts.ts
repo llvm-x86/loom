@@ -43,13 +43,21 @@ export const KNOWN_HOSTS = {
 	zhipu: { providers: ["zhipu-coding-plan"], urlMarkers: ["open.bigmodel.cn"] },
 	kilo: { providers: ["kilo"], urlMarkers: ["api.kilo.ai"] },
 	makora: { providers: ["makora"], urlMarkers: ["inference.makora.com"] },
-	// Three regional hosts; `-us` uses `.tech`, not `.com`. Keys are NOT interchangeable
-	// across sites — a wrong-site key returns TokenHub error `401002`.
+	// Three regional sites. Keys are NOT interchangeable across them: a wrong-site key returns
+	// TokenHub error `401002` (verified live — an intl key rejected by both the Guangzhou and
+	// Silicon Valley gateways).
+	//
+	// The Silicon Valley host is `tokenhub-us.tencentcloudmaas.com`. Tencent's overview doc spells
+	// it `.tech`, but that name resolves to `0.0.0.1` (a parked/blackhole record, confirmed via
+	// 1.1.1.1) and never accepts a TCP connection, whereas the `.com` spelling resolves to real
+	// Tencent infrastructure and answers with TokenHub's own JSON error envelope. The `.tech`
+	// marker is retained only so a URL copied out of that doc still classifies as this provider.
 	tencent: {
 		providers: ["tencent"],
 		urlMarkers: [
 			"tokenhub-intl.tencentcloudmaas.com",
 			"tokenhub.tencentcloudmaas.com",
+			"tokenhub-us.tencentcloudmaas.com",
 			"tokenhub-us.tencentcloudmaas.tech",
 		],
 	},

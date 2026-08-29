@@ -78136,33 +78136,6 @@
 		}
 	},
 	"tencent": {
-		"deepseek-v3.2": {
-			"id": "deepseek-v3.2",
-			"name": "DeepSeek V3.2",
-			"api": "openai-completions",
-			"provider": "tencent",
-			"baseUrl": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0.57,
-				"output": 1.71,
-				"cacheRead": 0.114,
-				"cacheWrite": 0
-			},
-			"contextWindow": 128000,
-			"maxTokens": 32000,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"high",
-					"max"
-				]
-			}
-		},
 		"deepseek-v4-flash": {
 			"id": "deepseek-v4-flash",
 			"name": "DeepSeek V4 Flash",
@@ -78325,60 +78298,6 @@
 				]
 			}
 		},
-		"deepseek/deepseek-v4-flash": {
-			"id": "deepseek/deepseek-v4-flash",
-			"name": "DeepSeek V4 Flash 0731 GA (Vendor Direct)",
-			"api": "openai-completions",
-			"provider": "tencent",
-			"baseUrl": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0.44,
-				"output": 1.32,
-				"cacheRead": 0.014,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048576,
-			"maxTokens": 384000,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"high",
-					"max"
-				]
-			}
-		},
-		"deepseek/deepseek-v4-flash-0731": {
-			"id": "deepseek/deepseek-v4-flash-0731",
-			"name": "DeepSeek V4 Flash 0731 GA (Vendor Direct)",
-			"api": "openai-completions",
-			"provider": "tencent",
-			"baseUrl": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0.44,
-				"output": 1.32,
-				"cacheRead": 0.014,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048576,
-			"maxTokens": 384000,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"high",
-					"max"
-				]
-			}
-		},
 		"deepseek/deepseek-v4-flash-vision-exp": {
 			"id": "deepseek/deepseek-v4-flash-vision-exp",
 			"name": "DeepSeek V4 Flash Vision Exp (Vendor Direct)",
@@ -78394,60 +78313,6 @@
 				"input": 0.44,
 				"output": 1.32,
 				"cacheRead": 0.014,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048576,
-			"maxTokens": 384000,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"high",
-					"max"
-				]
-			}
-		},
-		"deepseek/deepseek-v4-pro": {
-			"id": "deepseek/deepseek-v4-pro",
-			"name": "DeepSeek V4 Pro 0813 GA (Vendor Direct)",
-			"api": "openai-completions",
-			"provider": "tencent",
-			"baseUrl": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 1.32,
-				"output": 3.96,
-				"cacheRead": 0.044,
-				"cacheWrite": 0
-			},
-			"contextWindow": 1048576,
-			"maxTokens": 384000,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"high",
-					"max"
-				]
-			}
-		},
-		"deepseek/deepseek-v4-pro-0813": {
-			"id": "deepseek/deepseek-v4-pro-0813",
-			"name": "DeepSeek V4 Pro 0813 GA (Vendor Direct)",
-			"api": "openai-completions",
-			"provider": "tencent",
-			"baseUrl": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 1.32,
-				"output": 3.96,
-				"cacheRead": 0.044,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1048576,
@@ -78781,36 +78646,6 @@
 				]
 			}
 		},
-		"kimi-k2.5": {
-			"id": "kimi-k2.5",
-			"name": "Kimi K2.5",
-			"api": "openai-completions",
-			"provider": "tencent",
-			"baseUrl": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-			"reasoning": true,
-			"input": [
-				"text",
-				"image"
-			],
-			"cost": {
-				"input": 0.6,
-				"output": 3,
-				"cacheRead": 0.1,
-				"cacheWrite": 0
-			},
-			"contextWindow": 256000,
-			"maxTokens": 256000,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high",
-					"xhigh"
-				]
-			}
-		},
 		"kimi-k2.6": {
 			"id": "kimi-k2.6",
 			"name": "Kimi K2.6",
@@ -78959,34 +78794,6 @@
 					"medium",
 					"high"
 				]
-			}
-		},
-		"minimax-m2.5": {
-			"id": "minimax-m2.5",
-			"name": "MiniMax M2.5",
-			"api": "openai-completions",
-			"provider": "tencent",
-			"baseUrl": "https://tokenhub-intl.tencentcloudmaas.com/v1",
-			"reasoning": true,
-			"input": [
-				"text"
-			],
-			"cost": {
-				"input": 0.3,
-				"output": 1.2,
-				"cacheRead": 0.03,
-				"cacheWrite": 0
-			},
-			"contextWindow": 200000,
-			"maxTokens": 128000,
-			"thinking": {
-				"mode": "effort",
-				"efforts": [
-					"low",
-					"medium",
-					"high"
-				],
-				"requiresEffort": true
 			}
 		},
 		"minimax-m2.7": {

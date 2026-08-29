@@ -28,10 +28,11 @@ afterEach(() => {
 	vi.restoreAllMocks();
 });
 
-// Full TokenHub gateway model ids, verbatim from Tencent's own Model list
-// (https://www.tencentcloud.com/document/product/1300/78934). Every id here
-// must resolve to a distinct bundled model with no aliasing/renaming — the
-// gateway matches wire-level model ids exactly.
+// Bundled TokenHub gateway model ids. This list is not merely transcribed from Tencent's Model
+// list doc (https://www.tencentcloud.com/document/product/1300/78934) — every id was validated
+// against the live Singapore gateway, which distinguishes an unknown id (gateway error 400004,
+// "model or service ID does not exist") from a known one, so ids the doc implies but the gateway
+// rejects are excluded. See PRUNED_TENCENT_MODEL_IDS below.
 const EXPECTED_TENCENT_MODEL_IDS = [
 	"hy4-preview",
 	"hy3",
@@ -39,17 +40,12 @@ const EXPECTED_TENCENT_MODEL_IDS = [
 	"hy-mt2-plus",
 	"hy-mt2-lite",
 	"deepseek-v4-flash-202605",
-	"deepseek/deepseek-v4-flash-0731",
-	"deepseek/deepseek-v4-flash",
 	"deepseek-v4-pro-202606",
-	"deepseek/deepseek-v4-pro-0813",
-	"deepseek/deepseek-v4-pro",
 	"deepseek/deepseek-v4-flash-vision-exp",
 	"deepseek-v4-flash-0731",
 	"deepseek-v4-pro-0813",
 	"deepseek-v4-flash",
 	"deepseek-v4-pro",
-	"deepseek-v3.2",
 	"glm-5.3",
 	"glm-5.3-flash",
 	"glm-5.2",
@@ -61,12 +57,24 @@ const EXPECTED_TENCENT_MODEL_IDS = [
 	"kimi-k2.7-code-highspeed",
 	"kimi-k2.7-code",
 	"kimi-k2.6",
-	"kimi-k2.5",
 	"minimax-m3",
 	"minimax-m2.7",
-	"minimax-m2.5",
 	"mimo-v2.5-pro",
 ].sort();
+
+// Ids that must NOT be bundled, each rejected with gateway error 400004 by the live endpoint:
+//   - the four `deepseek/…`-prefixed spellings, which simply do not exist as service ids
+//     (`deepseek/deepseek-v4-flash-vision-exp` is the one real slash-prefixed id);
+//   - three models /v1/models still lists as status "pre-offline" but no longer serves.
+const PRUNED_TENCENT_MODEL_IDS = [
+	"deepseek/deepseek-v4-flash",
+	"deepseek/deepseek-v4-flash-0731",
+	"deepseek/deepseek-v4-pro",
+	"deepseek/deepseek-v4-pro-0813",
+	"deepseek-v3.2",
+	"kimi-k2.5",
+	"minimax-m2.5",
+];
 
 describe("Tencent Cloud (TokenHub) provider support", () => {
 	test("resolves TENCENT_API_KEY env fallback", () => {
@@ -99,6 +107,13 @@ describe("Tencent Cloud (TokenHub) provider support", () => {
 			expect(model.cost.cacheWrite, `${model.id} cacheWrite`).toBe(0);
 			expect(model.api).toBe("openai-completions");
 			expect(model.provider).toBe("tencent");
+		}
+
+		// Gateway-rejected ids must stay out: bundling one puts an entry in the model picker that
+		// can only ever fail at request time.
+		const bundledIds = new Set(bundled.map(model => model.id));
+		for (const id of PRUNED_TENCENT_MODEL_IDS) {
+			expect(bundledIds.has(id), `${id} must not be bundled`).toBe(false);
 		}
 	});
 
@@ -153,7 +168,6 @@ describe("Tencent Cloud (TokenHub) provider support", () => {
 			"kimi-k2.7-code-highspeed",
 			"kimi-k2.7-code",
 			"kimi-k2.6",
-			"kimi-k2.5",
 		];
 		for (const id of visionIds) {
 			expect(byId.get(id)?.input, id).toContain("image");
@@ -201,19 +215,23 @@ describe("Tencent Cloud (TokenHub) provider support", () => {
 		expect(mt2?.thinking).toBeUndefined();
 	});
 
-	test("resolves all three regional TokenHub hosts, distinct per site", () => {
-		// Keys are NOT interchangeable across sites (wrong-site key -> 401002),
-		// so all three base URLs must classify as the tencent host and stay
-		// distinguishable from each other and from an unrelated host.
+	test("resolves every regional TokenHub host, including the doc's dead .tech spelling", () => {
+		// Keys are NOT interchangeable across sites (a wrong-site key -> 401002, verified live), so
+		// each regional base URL must classify as the tencent host.
 		const singapore = "https://tokenhub-intl.tencentcloudmaas.com/v1";
 		const guangzhou = "https://tokenhub.tencentcloudmaas.com/v1";
-		const siliconValley = "https://tokenhub-us.tencentcloudmaas.tech/v1";
+		// The Silicon Valley host is `.com`; `.tech` (as printed in Tencent's overview doc) is
+		// DNS-blackholed to 0.0.0.1 and never connects. Both must still classify, so that a URL
+		// copied from either the doc or the console resolves to this provider rather than silently
+		// falling through to no host match.
+		const siliconValley = "https://tokenhub-us.tencentcloudmaas.com/v1";
+		const siliconValleyDocTypo = "https://tokenhub-us.tencentcloudmaas.tech/v1";
 		expect(hostMatchesUrl(singapore, "tencent")).toBe(true);
 		expect(hostMatchesUrl(guangzhou, "tencent")).toBe(true);
 		expect(hostMatchesUrl(siliconValley, "tencent")).toBe(true);
+		expect(hostMatchesUrl(siliconValleyDocTypo, "tencent")).toBe(true);
 		expect(hostMatchesUrl("https://api.openai.com/v1", "tencent")).toBe(false);
-		expect(singapore).not.toBe(guangzhou);
-		expect(guangzhou).not.toBe(siliconValley);
+		expect(new Set([singapore, guangzhou, siliconValley]).size).toBe(3);
 	});
 
 	test("uses TENCENT_BASE_URL override for a non-default TokenHub host", async () => {
@@ -242,9 +260,10 @@ describe("Tencent Cloud (TokenHub) provider support", () => {
 	test("treats the Kimi guide's '>= 16000' max_tokens note as a floor, not an output ceiling", () => {
 		// Regression guard: the guide recommends `max_tokens >= 16000` for k2.5/k2.6 (a suggested
 		// floor for the shared reasoning+response quota). Encoding 16000 as `maxTokens` would cap a
-		// 256K-context model at 16K of output. All four 256K Kimi entries must agree.
+		// 256K-context model at 16K of output. Every bundled 256K Kimi entry must agree. (k2.5 is
+		// not bundled — the gateway no longer serves it.)
 		const byId = new Map(getBundledModels("tencent").map(model => [model.id, model]));
-		for (const id of ["kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"]) {
+		for (const id of ["kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed"]) {
 			expect(byId.get(id)?.contextWindow, id).toBe(256_000);
 			expect(byId.get(id)?.maxTokens, id).toBe(256_000);
 		}
