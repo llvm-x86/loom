@@ -4,6 +4,7 @@
 
 ### Added
 
+- Added Tencent Cloud (TokenHub) as an OpenAI-chat-completions-compatible provider (`tencent`), fronting `tokenhub-intl.tencentcloudmaas.com` plus the Guangzhou and Silicon Valley regional hosts. Bundles 26 models — the Hunyuan family (`hy4-preview`, `hy3`, `hy-mt2-pro`/`plus`/`lite`) plus the resold DeepSeek, GLM, Kimi and MiniMax/MiMo ids the gateway serves — with costs, context/output limits and capabilities sourced from Tencent's published docs and cross-checked against the live gateway (invalid or retired ids the docs implied are excluded). Env var: `TENCENT_API_KEY`.
 - Added Fireworks `x-session-affinity` prompt-cache affinity: chat-completions and Responses requests to Fireworks models now send the session's stable prompt-cache key as the `x-session-affinity` header (mirroring the existing Grok `x-grok-conv-id` wiring), so serverless replicas can reuse the warm KV-cache prefix across turns instead of cold-prefilling.
 
 ### Fixed
