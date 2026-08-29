@@ -34,15 +34,16 @@ import {
 	buildXaiOAuthStaticSeed,
 	clampFireworksKimiMaxTokens,
 	clampKimiK27CodeMaxTokens,
+	DEEPINFRA_STATIC_MODELS,
 	isFireworksKimiK2ModelId,
 	isKimiK27CodeModelId,
+	MAKORA_STATIC_MODELS,
 	MODELS_DEV_PROVIDER_DESCRIPTORS,
 	mapModelsDevToModels,
 	projectOpenAIProReasoningAliases,
 	SAKANA_FUGU_STATIC_MODELS,
-	MAKORA_STATIC_MODELS,
-	DEEPINFRA_STATIC_MODELS,
 	stripFireworksDeepSeekThinkingToggle,
+	TENCENT_STATIC_MODELS,
 } from "../src/provider-models/openai-compat";
 import type { Api, ModelSpec } from "../src/types";
 import { cleanModelName } from "../src/utils";
@@ -534,6 +535,9 @@ async function generateModels() {
 	}
 	if (!authoritativeCatalogProviders.has("deepinfra")) {
 		allModels.push(...DEEPINFRA_STATIC_MODELS);
+	}
+	if (!authoritativeCatalogProviders.has("tencent")) {
+		allModels.push(...TENCENT_STATIC_MODELS);
 	}
 	// Seed the GitLab Duo Agent fallback model so a fresh install (no credentialed
 	// dynamic discovery/cache yet) still surfaces the provider's default model in the

@@ -43,6 +43,16 @@ export const KNOWN_HOSTS = {
 	zhipu: { providers: ["zhipu-coding-plan"], urlMarkers: ["open.bigmodel.cn"] },
 	kilo: { providers: ["kilo"], urlMarkers: ["api.kilo.ai"] },
 	makora: { providers: ["makora"], urlMarkers: ["inference.makora.com"] },
+	// Three regional hosts; `-us` uses `.tech`, not `.com`. Keys are NOT interchangeable
+	// across sites — a wrong-site key returns TokenHub error `401002`.
+	tencent: {
+		providers: ["tencent"],
+		urlMarkers: [
+			"tokenhub-intl.tencentcloudmaas.com",
+			"tokenhub.tencentcloudmaas.com",
+			"tokenhub-us.tencentcloudmaas.tech",
+		],
+	},
 	alibabaDashscope: { providers: ["alibaba-coding-plan"], urlMarkers: ["dashscope"] },
 	umans: { providers: ["umans"], urlMarkers: ["api.code.umans.ai"] },
 	xiaomi: { providers: ["xiaomi"], providerPrefixes: ["xiaomi-token-plan-"], urlMarkers: ["xiaomimimo.com"] },
