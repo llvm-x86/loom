@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added Tencent Cloud (TokenHub) as an API-key login provider (`tencent`), registered in the OAuth provider selector alongside its `TENCENT_API_KEY` env-var fallback.
+
 ### Changed
 
 - Changed Fireworks requests to emit the session prompt-cache key as `x-session-affinity` via the per-model `promptCacheSessionHeader` compat flag, giving serverless Fireworks replicas a sticky routing key for KV-cache reuse across multi-turn agent sessions.

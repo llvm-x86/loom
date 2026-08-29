@@ -42,6 +42,7 @@ import {
 	qwenPortalModelManagerOptions,
 	sakanaModelManagerOptions,
 	syntheticModelManagerOptions,
+	tencentModelManagerOptions,
 	togetherModelManagerOptions,
 	umansModelManagerOptions,
 	veniceModelManagerOptions,
@@ -243,6 +244,13 @@ export const CATALOG_PROVIDERS = [
 		envVars: ["MAKORA_API_KEY"],
 		createModelManagerOptions: (config: ModelManagerConfig) => makoraModelManagerOptions(config),
 		catalogDiscovery: { label: "Makora" },
+	},
+	{
+		id: "tencent",
+		defaultModel: "hy4-preview",
+		envVars: ["TENCENT_API_KEY"],
+		createModelManagerOptions: (config: ModelManagerConfig) => tencentModelManagerOptions(config),
+		catalogDiscovery: { label: "Tencent Cloud (TokenHub)" },
 	},
 	{
 		id: "minimax",

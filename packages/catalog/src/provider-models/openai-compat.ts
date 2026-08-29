@@ -3055,6 +3055,356 @@ export function makoraModelManagerOptions(
 }
 
 // ---------------------------------------------------------------------------
+// 14.67 Tencent Cloud (TokenHub)
+// ---------------------------------------------------------------------------
+
+// `-intl` is the default (all official Tencent samples use it); `TENCENT_BASE_URL`
+// can redirect discovery/streaming at the mainland-China sibling host
+// `https://tokenhub.tencentcloudmaas.com/v1` (confirmed via LiteLLM/OpenClaw docs).
+// Mirrors MOONSHOT_BASE_URL/LITELLM_BASE_URL. (#tencent-provider)
+const TENCENT_DEFAULT_BASE_URL = "https://tokenhub-intl.tencentcloudmaas.com/v1";
+
+// Hunyuan `reasoning_effort` accepts `high`/`low`/`no_think` (default `high`), with
+// reasoning surfaced on `reasoning_content` — confirmed by Tencent's official Hy API
+// Guide (https://www.tencentcloud.com/document/product/1300/80695) and the
+// Tencent-Hunyuan GitHub README. There is no `no_think`-equivalent tier in the shared
+// `Effort` enum, so full reasoning disablement is not modeled here; the two tiers below
+// map verbatim onto the two effort levels Tencent documents as tunable.
+const TENCENT_HY_THINKING: ThinkingConfig = {
+	mode: "effort",
+	efforts: [Effort.Low, Effort.High],
+};
+
+/**
+ * Full TokenHub gateway catalog, sourced entirely from Tencent's own docs —
+ * never from OpenRouter's resale pricing, since TokenHub sets its own prices:
+ *   - Model ids, context/max-input/max-output windows, and capability flags
+ *     (Deep Reasoning / multimodal support) for every row below:
+ *     https://www.tencentcloud.com/document/product/1300/78934 (Model list)
+ *   - Per-model reasoning wire shape (thinking toggle vs. effort dial) cross
+ *     -checked against the per-family API guides:
+ *     Hy https://www.tencentcloud.com/document/product/1300/80695,
+ *     DeepSeek https://www.tencentcloud.com/document/product/1300/80633,
+ *     GLM https://www.tencentcloud.com/document/product/1300/80634,
+ *     Kimi https://www.tencentcloud.com/document/product/1300/80635,
+ *     MiniMax https://www.tencentcloud.com/document/product/1300/80636
+ *   - Prices (USD/1M tokens) from Tencent's official pricing PDF (doc
+ *     1300/78935, "Model pricing", updated 2026-08-28):
+ *     https://staticintl.cloudcachetci.com/doc/pdf/product/pdf/1300_78935_en.pdf
+ *
+ * `ModelCost` has no time-of-day or input-length tier, so two kinds of rows
+ * are collapsed onto a single number: DeepSeek's peak/off-peak schedule keeps
+ * its PEAK price, and MiniMax-M3's length-tiered schedule keeps its ≤512k
+ * tier. Loom enforces hard budget ceilings, so a too-low bundled price can
+ * blow through a budget mid-session while a too-high one only over-reports
+ * spend — the safe direction is to round up, not average. (The alternative
+ * — modeling both tiers and letting the caller pick — would need a
+ * `ModelCost` schema change and is out of scope here.) The same reasoning
+ * applies to the Hy-MT2 translation trio, whose price sheet lists no
+ * cache-read discount at all: `cacheRead` mirrors `input` (no discount)
+ * rather than 0 (which would make cached reads look free and under-report
+ * cost). `cacheWrite` is 0 for every TokenHub model: the published schedule
+ * bills input/output/cached-input only, with no cache-write line item
+ * anywhere in the price sheet.
+ *
+ * Reasoning wiring: the Hy family (hy3, alongside hy4-preview) uses the
+ * documented `reasoning_effort` low/high dial (`TENCENT_HY_THINKING`),
+ * explicit on the spec so it is never widened. DeepSeek, GLM, and the
+ * K2-generation Kimi/MiniMax models document only a binary
+ * `thinking.type: enabled/disabled` (or "always on, cannot disable") toggle
+ * — no bespoke ladder is authored for them here; each carries `reasoning:
+ * true` with `thinking` left unset on the spec, and the shared identity
+ * layer (`resolveModelThinking`/`deriveThinking` in model-thinking.ts)
+ * synthesizes the generic effort ladder and maps it back onto the
+ * documented wire toggle at compat-build time, exactly as it already does
+ * for GLM/Kimi/DeepSeek models bundled under every other provider. `kimi-k3`
+ * is the one family member with a real (if narrow) effort dial: its own
+ * guide states `reasoning_effort` currently accepts only `"max"` (also the
+ * default) — mirrored here as `requiresEffort: true` with a single-entry
+ * `efforts` array, the same shape Moonshot's own bundled `kimi-k3` uses (the
+ * shared identity layer further normalizes any kimi-k3-identified model
+ * onto its canonical low/high/max ladder, matching Moonshot's build).
+ * The Hy-MT2 translation trio documents no reasoning capability at all
+ * (`reasoning: false`, no `thinking`). Vision (`input: ["text", "image"]`)
+ * is set only where a guide explicitly documents image support:
+ * deepseek-v4-flash-vision-exp ("Multimodal Understanding Model"),
+ * glm-5.3-flash / glm-5v-turbo ("Supports images, videos, and files"), and
+ * kimi-k3 / kimi-k2.7-code(-highspeed) / kimi-k2.6 / kimi-k2.5 ("Visual
+ * Capability: Supported" in the Kimi guide's model table).
+ */
+function createTencentModel(
+	id: string,
+	name: string,
+	cost: ModelSpec<"openai-completions">["cost"],
+	contextWindow: number | null,
+	maxTokens: number | null,
+	options: { reasoning: boolean; vision?: boolean; thinking?: ThinkingConfig } = { reasoning: true },
+): ModelSpec<"openai-completions"> {
+	return {
+		id,
+		name,
+		api: "openai-completions",
+		provider: "tencent",
+		baseUrl: TENCENT_DEFAULT_BASE_URL,
+		reasoning: options.reasoning,
+		input: options.vision ? ["text", "image"] : ["text"],
+		cost,
+		contextWindow,
+		maxTokens,
+		...(options.thinking && { thinking: { ...options.thinking } }),
+	};
+}
+
+const TENCENT_KIMI_K3_THINKING: ThinkingConfig = { mode: "effort", efforts: [Effort.Max], requiresEffort: true };
+
+export const TENCENT_STATIC_MODELS: readonly ModelSpec<"openai-completions">[] = [
+	createTencentModel(
+		"hy4-preview",
+		"Hunyuan hy4-preview",
+		{ input: 0.834, output: 2.501, cacheRead: 0.042, cacheWrite: 0 },
+		1_048_576,
+		64_000,
+		{ reasoning: true, thinking: TENCENT_HY_THINKING },
+	),
+	createTencentModel(
+		"hy3",
+		"Hunyuan hy3",
+		{ input: 0.132, output: 0.528, cacheRead: 0.033, cacheWrite: 0 },
+		256_000,
+		128_000,
+		{ reasoning: true, thinking: TENCENT_HY_THINKING },
+	),
+	createTencentModel(
+		"hy-mt2-pro",
+		"Hunyuan MT2 Pro",
+		{ input: 0.074, output: 0.295, cacheRead: 0.074, cacheWrite: 0 },
+		8_000,
+		4_000,
+		{ reasoning: false },
+	),
+	createTencentModel(
+		"hy-mt2-plus",
+		"Hunyuan MT2 Plus",
+		{ input: 0.074, output: 0.295, cacheRead: 0.074, cacheWrite: 0 },
+		8_000,
+		4_000,
+		{ reasoning: false },
+	),
+	createTencentModel(
+		"hy-mt2-lite",
+		"Hunyuan MT2 Lite",
+		{ input: 0.044, output: 0.177, cacheRead: 0.044, cacheWrite: 0 },
+		8_000,
+		4_000,
+		{ reasoning: false },
+	),
+	// Only the dated GA ids exist on the gateway. The `deepseek/…`-prefixed spellings were verified
+	// against the live /v1/chat/completions endpoint and return gateway error 400004 ("model or
+	// service ID does not exist"), so they are NOT registered. `deepseek/deepseek-v4-flash-vision-exp`
+	// below is the sole genuinely slash-prefixed id the gateway accepts.
+	createTencentModel(
+		"deepseek-v4-flash-202605",
+		"DeepSeek V4 Flash 0731 GA (Vendor Direct)",
+		{ input: 0.44, output: 1.32, cacheRead: 0.014, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"deepseek-v4-pro-202606",
+		"DeepSeek V4 Pro 0813 GA (Vendor Direct)",
+		{ input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"deepseek/deepseek-v4-flash-vision-exp",
+		"DeepSeek V4 Flash Vision Exp (Vendor Direct)",
+		{ input: 0.44, output: 1.32, cacheRead: 0.014, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true, vision: true },
+	),
+	createTencentModel(
+		"deepseek-v4-flash-0731",
+		"DeepSeek V4 Flash 0731 GA",
+		{ input: 0.44, output: 1.32, cacheRead: 0.014, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"deepseek-v4-pro-0813",
+		"DeepSeek V4 Pro 0813 GA",
+		{ input: 1.32, output: 3.96, cacheRead: 0.044, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"deepseek-v4-flash",
+		"DeepSeek V4 Flash",
+		{ input: 0.14, output: 0.28, cacheRead: 0.028, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"deepseek-v4-pro",
+		"DeepSeek V4 Pro",
+		{ input: 1.74, output: 3.48, cacheRead: 0.145, cacheWrite: 0 },
+		1_048_576,
+		384_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"glm-5.3",
+		"GLM-5.3",
+		{ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		1_048_576,
+		128_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"glm-5.3-flash",
+		"GLM-5.3 Flash",
+		{ input: 0.15, output: 0.5, cacheRead: 0.03, cacheWrite: 0 },
+		1_048_576,
+		128_000,
+		{ reasoning: true, vision: true },
+	),
+	createTencentModel(
+		"glm-5.2",
+		"GLM-5.2",
+		{ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		1_048_576,
+		128_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"glm-5.1",
+		"GLM-5.1",
+		{ input: 1.4, output: 4.4, cacheRead: 0.26, cacheWrite: 0 },
+		200_000,
+		128_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"glm-5v-turbo",
+		"GLM-5V Turbo",
+		{ input: 1.2, output: 4, cacheRead: 0.24, cacheWrite: 0 },
+		200_000,
+		128_000,
+		{ reasoning: true, vision: true },
+	),
+	createTencentModel(
+		"glm-5-turbo",
+		"GLM-5 Turbo",
+		{ input: 1.2, output: 4, cacheRead: 0.24, cacheWrite: 0 },
+		200_000,
+		128_000,
+		{ reasoning: true },
+	),
+	createTencentModel("glm-5", "GLM-5", { input: 1, output: 3.2, cacheRead: 0.2, cacheWrite: 0 }, 200_000, 128_000, {
+		reasoning: true,
+	}),
+	createTencentModel(
+		"kimi-k3",
+		"Kimi K3",
+		{ input: 3, output: 15, cacheRead: 0.3, cacheWrite: 0 },
+		1_048_576,
+		1_048_576,
+		{ reasoning: true, vision: true, thinking: TENCENT_KIMI_K3_THINKING },
+	),
+	createTencentModel(
+		"kimi-k2.7-code-highspeed",
+		"Kimi K2.7 Code HighSpeed",
+		{ input: 1.9, output: 8, cacheRead: 0.38, cacheWrite: 0 },
+		256_000,
+		256_000,
+		{ reasoning: true, vision: true },
+	),
+	createTencentModel(
+		"kimi-k2.7-code",
+		"Kimi K2.7 Code",
+		{ input: 0.95, output: 4, cacheRead: 0.19, cacheWrite: 0 },
+		256_000,
+		256_000,
+		{ reasoning: true, vision: true },
+	),
+	// `kimi-k2.5`, `minimax-m2.5` and `deepseek-v3.2` are deliberately absent: /v1/models still
+	// lists them with status "pre-offline", but a live call to each is rejected with gateway error
+	// 400004 ("model or service ID does not exist"), so bundling them would only add dead picker
+	// entries. Verified against the Singapore endpoint.
+	createTencentModel(
+		"kimi-k2.6",
+		"Kimi K2.6",
+		{ input: 0.858, output: 3.566, cacheRead: 0.145, cacheWrite: 0 },
+		256_000,
+		256_000,
+		{ reasoning: true, vision: true },
+	),
+	createTencentModel(
+		"minimax-m3",
+		"MiniMax M3",
+		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+		1_048_576,
+		null,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"minimax-m2.7",
+		"MiniMax M2.7",
+		{ input: 0.3, output: 1.2, cacheRead: 0.06, cacheWrite: 0 },
+		200_000,
+		128_000,
+		{ reasoning: true },
+	),
+	createTencentModel(
+		"mimo-v2.5-pro",
+		"MiMo V2.5 Pro",
+		{ input: 0.435, output: 0.87, cacheRead: 0.0036, cacheWrite: 0 },
+		1_048_576,
+		128_000,
+		{ reasoning: true },
+	),
+];
+
+const TENCENT_STATIC_MODEL_BY_ID = new Map(TENCENT_STATIC_MODELS.map(model => [model.id, model] as const));
+
+export interface TencentModelManagerConfig {
+	apiKey?: string;
+	baseUrl?: string;
+	fetch?: FetchImpl;
+}
+
+export function tencentModelManagerOptions(
+	config?: TencentModelManagerConfig,
+): ModelManagerOptions<"openai-completions"> {
+	const apiKey = config?.apiKey;
+	const baseUrl = config?.baseUrl ?? Bun.env.TENCENT_BASE_URL ?? TENCENT_DEFAULT_BASE_URL;
+	const references = createBundledReferenceMap<"openai-completions">("tencent");
+	return {
+		providerId: "tencent",
+		...(apiKey && {
+			fetchDynamicModels: () =>
+				fetchOpenAICompatibleModels({
+					api: "openai-completions",
+					provider: "tencent",
+					baseUrl,
+					apiKey,
+					mapModel: (entry, defaults) => {
+						const reference = references.get(defaults.id) ?? TENCENT_STATIC_MODEL_BY_ID.get(defaults.id);
+						return mapWithBundledReference(entry, defaults, reference);
+					},
+					fetch: config?.fetch,
+				}),
+		}),
+	};
+}
+
+// ---------------------------------------------------------------------------
 // 14.65 DeepInfra
 // ---------------------------------------------------------------------------
 
