@@ -10,6 +10,10 @@
 
 - Changed Fireworks requests to emit the session prompt-cache key as `x-session-affinity` via the per-model `promptCacheSessionHeader` compat flag, giving serverless Fireworks replicas a sticky routing key for KV-cache reuse across multi-turn agent sessions.
 
+### Fixed
+
+- Fixed Claude Fable 5.1 being unusable over Anthropic OAuth: the stealth fingerprint still claimed Claude Code `2.1.165`, and the API gates the model behind `2.1.251` or newer, so every request 400'd with "does not support this model" and the fallback chain quietly answered as Fable 5 instead. `claudeCodeVersion` is now `2.1.258` (and `claudeAgentSdkVersion` `0.3.258`, matching the published release pair); every surface derives from those constants, so the billing header, the `claude-cli`/`claude-code` user-agents and the cch attestation all move together.
+
 ## [17.0.5] - 2026-07-18
 
 ### Changed

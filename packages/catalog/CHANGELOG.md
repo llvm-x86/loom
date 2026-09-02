@@ -6,10 +6,12 @@
 
 - Added Tencent Cloud (TokenHub) as an OpenAI-chat-completions-compatible provider (`tencent`), fronting `tokenhub-intl.tencentcloudmaas.com` plus the Guangzhou and Silicon Valley regional hosts. Bundles 26 models — the Hunyuan family (`hy4-preview`, `hy3`, `hy-mt2-pro`/`plus`/`lite`) plus the resold DeepSeek, GLM, Kimi and MiniMax/MiMo ids the gateway serves — with costs, context/output limits and capabilities sourced from Tencent's published docs and cross-checked against the live gateway (invalid or retired ids the docs implied are excluded). Env var: `TENCENT_API_KEY`.
 - Added Fireworks `x-session-affinity` prompt-cache affinity: chat-completions and Responses requests to Fireworks models now send the session's stable prompt-cache key as the `x-session-affinity` header (mirroring the existing Grok `x-grok-conv-id` wiring), so serverless replicas can reuse the warm KV-cache prefix across turns instead of cold-prefilling.
+- Added the bundled first-party `claude-fable-5-1` entry (Claude Fable 5.1, 1M context / 128k output, adaptive thinking `low`..`max`), so the model resolves from the bundled catalog instead of only after a successful live `/v1/models` discovery pass.
 
 ### Fixed
 
 - Fixed DeepSeek V4 reasoning models on OpenAI-compatible routes exposing only the `high`/`max` pair instead of the host's real `low`/`high`/`max` scale, and fixed the Fireworks and DeepInfra V4 Flash entries silently dropping `reasoning_effort` from the wire (missing `supportsReasoningEffort`), so the selected effort never reached the host. OpenRouter's DeepSeek route still tops out at `high`.
+- Fixed the Fable/Mythos catalog policy hard-pinning cache pricing for the whole family: Fable 5.1 bills cache reads at $0.25/MTok against Fable 5's $1.00, so the blanket pin overstated 5.1 cache reads 4x whenever upstream had the real number. Token limits stay pinned (Anthropic's `/v1/models` still omits them and they are identical family-wide); pricing is now fill-only and never overwrites a value models.dev already carries.
 
 ## [17.0.5] - 2026-07-18
 

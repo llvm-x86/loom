@@ -326,17 +326,19 @@ function applyAnthropicCatalogPolicy(model: ModelSpec<Api>, parsedModel: Anthrop
 		model.maxTokens = 128000;
 	}
 
-	// Claude Fable/Mythos 5: Anthropic's /v1/models omits token limits and
-	// pricing, and models.dev lags new releases. Pin authoritative values from
-	// the model card (1M context / 128k output) and pricing docs ($10 in / $50
-	// out per MTok).
+	// Claude Fable/Mythos: Anthropic's /v1/models omits token limits and pricing,
+	// and models.dev lags a new release. Limits are identical across the family
+	// (1M context / 128k output) so they stay hard-pinned; PRICING is per-release
+	// and only filled when upstream has none. Fable 5.1 ships a cacheRead of 0.25
+	// against Fable 5's 1.0, so a blanket pin silently overcharged cache reads 4x
+	// on every model in the family that is not the one the numbers were read off.
 	if (model.provider === "anthropic" && isFableOrMythos(parsedModel.kind)) {
 		model.contextWindow = 1_000_000;
 		model.maxTokens = 128_000;
-		model.cost.input = 10;
-		model.cost.output = 50;
-		model.cost.cacheRead = 1;
-		model.cost.cacheWrite = 12.5;
+		model.cost.input ||= 10;
+		model.cost.output ||= 50;
+		model.cost.cacheRead ||= 1;
+		model.cost.cacheWrite ||= 12.5;
 	}
 }
 
