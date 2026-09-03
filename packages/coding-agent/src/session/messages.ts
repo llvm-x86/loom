@@ -39,6 +39,7 @@ import { formatOutputNotice } from "../tools/output-meta";
 
 export const SKILL_PROMPT_MESSAGE_TYPE = "skill-prompt";
 export const LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE = "lsp-late-diagnostic";
+export const ZED_DIAGNOSTICS_MESSAGE_TYPE = "zed-diagnostics";
 export const BACKGROUND_TAN_DISPATCH_MESSAGE_TYPE = "background-tan-dispatch";
 
 /** Fallback type for extension-injected messages that omit a custom type. */

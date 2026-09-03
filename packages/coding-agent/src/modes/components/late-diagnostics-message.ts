@@ -11,14 +11,18 @@ export interface LateDiagnosticsFile {
 }
 
 /**
- * Renders late LSP diagnostics (arrived after edit/write returned) in the
- * transcript, reusing the same tree renderer the edit/write tools use so the
- * styling stays consistent. Supports the global tool-output expand toggle.
+ * Renders a batch of LSP diagnostics in the transcript — late ones (arrived
+ * after edit/write returned) and `@zed-diagnostics` project scans — reusing the
+ * same tree renderer the edit/write tools use so the styling stays consistent.
+ * Supports the global tool-output expand toggle.
  */
 export class LateDiagnosticsMessageComponent extends Container {
 	#expanded = false;
 
-	constructor(private readonly files: LateDiagnosticsFile[]) {
+	constructor(
+		private readonly files: LateDiagnosticsFile[],
+		private readonly title = "Late diagnostics",
+	) {
 		super();
 		this.#rebuild();
 	}
@@ -52,7 +56,7 @@ export class LateDiagnosticsMessageComponent extends Container {
 			this.#expanded,
 			theme,
 			fp => theme.getLangIcon(getLanguageFromPath(fp)),
-			{ title: "Late diagnostics" },
+			{ title: this.title },
 		);
 		const body = text.replace(/^\n+/, "");
 		if (body) this.addChild(new Text(body, 1, 0));

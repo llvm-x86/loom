@@ -181,6 +181,20 @@ export function extractFileMentions(text: string): string[] {
 }
 
 /**
+ * Keyword mention: `@zed-diagnostics` injects project diagnostics from the
+ * language servers instead of reading a path (parity with Zed's agent panel
+ * `@diagnostics`, and with Zed's own servers when loom runs in its terminal).
+ * The keyword wins over a same-named file/dir in cwd.
+ */
+export const DIAGNOSTICS_MENTION = "zed-diagnostics";
+
+/** Split the `@zed-diagnostics` keyword out of an extracted mention list. */
+export function partitionDiagnosticsMention(mentions: string[]): { files: string[]; diagnostics: boolean } {
+	const diagnostics = mentions.includes(DIAGNOSTICS_MENTION);
+	return { files: diagnostics ? mentions.filter(m => m !== DIAGNOSTICS_MENTION) : mentions, diagnostics };
+}
+
+/**
  * Generate a FileMentionMessage containing the contents of mentioned files.
  * Returns empty array if no files could be read.
  */

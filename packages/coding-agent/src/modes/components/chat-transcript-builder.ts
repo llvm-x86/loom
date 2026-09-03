@@ -24,6 +24,7 @@ import {
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
+	ZED_DIAGNOSTICS_MESSAGE_TYPE,
 } from "../../session/messages";
 import type { SessionMessageEntry } from "../../session/session-entries";
 import { theme } from "../theme/theme";
@@ -426,6 +427,16 @@ export class ChatTranscriptBuilder {
 		if (message.customType === LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE) {
 			const details = (message as CustomMessage<{ files?: LateDiagnosticsFile[] }>).details;
 			const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
+			this.#trackExpandable(component);
+			this.container.addChild(component);
+			return;
+		}
+		if (message.customType === ZED_DIAGNOSTICS_MESSAGE_TYPE) {
+			const details = (message as CustomMessage<{ source?: string; files?: LateDiagnosticsFile[] }>).details;
+			const component = new LateDiagnosticsMessageComponent(
+				details?.files ?? [],
+				`@zed-diagnostics${details?.source ? ` (${details.source})` : ""}`,
+			);
 			this.#trackExpandable(component);
 			this.container.addChild(component);
 			return;

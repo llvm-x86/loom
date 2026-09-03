@@ -40,6 +40,7 @@ import {
 	LSP_LATE_DIAGNOSTIC_MESSAGE_TYPE,
 	SKILL_PROMPT_MESSAGE_TYPE,
 	type SkillPromptDetails,
+	ZED_DIAGNOSTICS_MESSAGE_TYPE,
 } from "../../session/messages";
 import type { SessionContext, StrippedToolCallsMarker } from "../../session/session-context";
 import { replaceTabs } from "../../tools/render-utils";
@@ -159,6 +160,17 @@ export class UiHelpers {
 							}>
 						).details;
 						const component = new LateDiagnosticsMessageComponent(details?.files ?? []);
+						component.setExpanded(this.ctx.toolOutputExpanded);
+						this.ctx.chatContainer.addChild(component);
+						break;
+					}
+					if (message.customType === ZED_DIAGNOSTICS_MESSAGE_TYPE) {
+						const details = (message as CustomMessage<{ source?: string; files?: LateDiagnosticsFile[] }>)
+							.details;
+						const component = new LateDiagnosticsMessageComponent(
+							details?.files ?? [],
+							`@zed-diagnostics${details?.source ? ` (${details.source})` : ""}`,
+						);
 						component.setExpanded(this.ctx.toolOutputExpanded);
 						this.ctx.chatContainer.addChild(component);
 						break;

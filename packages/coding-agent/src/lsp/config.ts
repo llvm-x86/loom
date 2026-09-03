@@ -9,6 +9,7 @@ import { BiomeClient } from "./clients/biome-client";
 import { SwiftLintClient } from "./clients/swiftlint-client";
 import DEFAULTS from "./defaults.json" with { type: "json" };
 import type { ServerConfig } from "./types";
+import { zedLanguageServerOverrides } from "./zed-servers";
 
 export interface LspConfig {
 	servers: Record<string, ServerConfig>;
@@ -430,7 +431,13 @@ function getConfigSources(cwd: string): ConfigSource[] {
  * ```
  */
 export function loadConfig(cwd: string): LspConfig {
-	let mergedServers = coerceServerConfigs(DEFAULTS);
+	// Inside a Zed terminal, point every server Zed is running at Zed's own
+	// binary + argv (they live outside `$PATH`). Applied before the config
+	// sources below, so explicit user/project config still wins, and left out
+	// of `hasOverrides` — borrowing a binary is not the operator declaring a
+	// server list.
+	const zedServers = zedLanguageServerOverrides();
+	let mergedServers = mergeServers(coerceServerConfigs(DEFAULTS), zedServers);
 
 	const configSources = getConfigSources(cwd).reverse();
 	let hasOverrides = false;
@@ -449,38 +456,44 @@ export function loadConfig(cwd: string): LspConfig {
 		}
 	}
 
-	if (!hasOverrides) {
-		// Auto-detect: find servers based on project markers AND available binaries
-		const detected: Record<string, ServerConfig> = {};
-		const defaultsWithRuntime = applyRuntimeDefaults(mergedServers);
+	const servers: Record<string, ServerConfig> = {};
+	const candidates = applyRuntimeDefaults(mergedServers);
 
-		for (const [name, config] of Object.entries(defaultsWithRuntime)) {
-			// Check if project has root markers for this language
-			if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
-
-			// Check if the language server binary is available (local or $PATH)
-			const resolved = resolveCommand(config.command, cwd);
-			if (!resolved) continue;
-
-			detected[name] = { ...config, resolvedCommand: resolved };
-		}
-
-		return { servers: detected, idleTimeoutMs };
-	}
-
-	// Merge overrides with defaults and filter to available servers
-	const mergedWithRuntime = applyRuntimeDefaults(mergedServers);
-	const available: Record<string, ServerConfig> = {};
-
-	for (const [name, config] of Object.entries(mergedWithRuntime)) {
-		if (config.disabled) continue;
+	for (const [name, config] of Object.entries(candidates)) {
+		// Without overrides this is auto-detection; with them it is the declared
+		// list. Both keep only servers whose project markers are present and
+		// whose binary resolves.
+		if (hasOverrides && config.disabled) continue;
 		if (!hasRootMarkers(cwd, config.rootMarkers)) continue;
 		const resolved = resolveCommand(config.command, cwd);
 		if (!resolved) continue;
-		available[name] = { ...config, resolvedCommand: resolved };
+		servers[name] = { ...config, resolvedCommand: resolved };
 	}
 
-	return { servers: available, idleTimeoutMs };
+	dropServersShadowedByZed(servers, Object.keys(zedServers));
+
+	return { servers, idleTimeoutMs };
+}
+
+/**
+ * Drop loom's default primary server for file types a Zed-borrowed primary
+ * server already covers: with Zed running `basedpyright`, also starting
+ * `pyright` would report the same problems in different words and break
+ * `@zed-diagnostics` parity with the editor's panel. Linters are left alone — they
+ * stack by design, and loom uses them for formatting too. Mutates `servers`.
+ */
+export function dropServersShadowedByZed(
+	servers: Record<string, ServerConfig>,
+	zedServerNames: readonly string[],
+): void {
+	const zedPrimary = zedServerNames.filter(name => servers[name] && !servers[name]?.isLinter);
+	if (zedPrimary.length === 0) return;
+
+	const covered = new Set(zedPrimary.flatMap(name => servers[name]?.fileTypes ?? []));
+	for (const [name, config] of Object.entries(servers)) {
+		if (config.isLinter || zedPrimary.includes(name)) continue;
+		if (config.fileTypes.some(fileType => covered.has(fileType))) delete servers[name];
+	}
 }
 
 // =============================================================================
