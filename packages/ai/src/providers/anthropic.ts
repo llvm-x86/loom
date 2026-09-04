@@ -359,6 +359,17 @@ type AnthropicProviderSessionState = ProviderSessionState & {
 	 * close.
 	 */
 	replayUnsignedThinkingDisabled: boolean;
+	/**
+	 * Runtime-learned: Anthropic's `reasoning_extraction` safety classifier
+	 * refused this request because of replayed prior reasoning. Demotion to
+	 * bare prose (see {@link renderDemotedThinking}) lowers per-block signal
+	 * but heat is CUMULATIVE, so a long history — typically after a
+	 * mid-session model switch invalidates every signature at once and turns
+	 * the whole transcript's thinking into demoted text — still trips it.
+	 * Once set, demoted prior reasoning is dropped entirely instead of being
+	 * rendered as text. Cleared on session close.
+	 */
+	priorThinkingRefused: boolean;
 };
 
 function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
@@ -366,10 +377,12 @@ function createAnthropicProviderSessionState(): AnthropicProviderSessionState {
 		strictToolsDisabled: false,
 		fastModeDisabled: false,
 		replayUnsignedThinkingDisabled: false,
+		priorThinkingRefused: false,
 		close: () => {
 			state.strictToolsDisabled = false;
 			state.fastModeDisabled = false;
 			state.replayUnsignedThinkingDisabled = false;
+			state.priorThinkingRefused = false;
 		},
 	};
 	return state;
@@ -1729,6 +1742,17 @@ export function isInvalidThinkingSignatureError(message: string): boolean {
 }
 
 /**
+ * Anthropic's `reasoning_extraction` classifier refusal, surfaced by the
+ * stream loop as `Refusal (reasoning_extraction): ...`. Distinct from every
+ * other refusal category: it is provoked by what WE put in the request
+ * (replayed prior reasoning), so it is recoverable by re-encoding, whereas a
+ * content refusal is about the user's actual turn and must surface.
+ */
+export function isReasoningExtractionRefusal(message: string): boolean {
+	return /Refusal \(reasoning_extraction\)/i.test(message);
+}
+
+/**
  * Prepend a pointed remediation to Anthropic's `Invalid signature in thinking
  * block` 400 when the model looks like an unmarked custom signing proxy
  * (opaque baseUrl, `spec.reasoning: true`, no explicit
@@ -1801,6 +1825,7 @@ const streamAnthropicOnce = (
 			let dropFastMode = providerSessionState?.fastModeDisabled ?? false;
 			let forceDemoteUnsignedThinking = providerSessionState?.replayUnsignedThinkingDisabled ?? false;
 			let forceStripThinkingSignatures = false;
+			let dropDemotedPriorThinking = providerSessionState?.priorThinkingRefused ?? false;
 			const mergedCallerHeaders = mergeHeaders(model.headers, options?.headers);
 			const umansGatewayWebSearchHeader = getUmansWebSearchHeader(model, mergedCallerHeaders);
 			// Keep fallback payloads aligned with the top-level Vertex effort gate:
@@ -1943,6 +1968,7 @@ const streamAnthropicOnce = (
 					useUmansGatewayWebSearch: umansGatewayWebSearchHeader !== undefined,
 					forceDemoteUnsignedThinking,
 					forceStripThinkingSignatures,
+					dropDemotedPriorThinking,
 					supportsEagerToolInputStreaming,
 					fallbacks,
 				});
@@ -2563,6 +2589,38 @@ const streamAnthropicOnce = (
 						continue;
 					}
 					if (
+						!dropDemotedPriorThinking &&
+						firstTokenTime === undefined &&
+						isReasoningExtractionRefusal(
+							streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
+						)
+					) {
+						logger.warn(
+							"anthropic: reasoning_extraction refusal, dropping replayed prior reasoning and retrying",
+							{
+								provider: model.provider,
+								model: model.id,
+								error: streamFailure instanceof Error ? streamFailure.message : String(streamFailure),
+							},
+						);
+						if (providerSessionState) {
+							providerSessionState.priorThinkingRefused = true;
+						}
+						dropDemotedPriorThinking = true;
+						params = await prepareParams();
+						providerRetryAttempt = 0;
+						output.content.length = 0;
+						output.model = model.id;
+						output.responseId = undefined;
+						output.errorMessage = undefined;
+						output.stopDetails = undefined;
+						output.providerPayload = undefined;
+						output.usage = createEmptyUsage(copilotDynamicHeaders?.premiumRequests);
+						output.stopReason = "stop";
+						firstTokenTime = undefined;
+						continue;
+					}
+					if (
 						!dropFastMode &&
 						model.provider === "anthropic" &&
 						options?.serviceTier === "priority" &&
@@ -2640,6 +2698,9 @@ const streamAnthropicOnce = (
 			}
 			if (forceDemoteUnsignedThinking && model.compat.replayUnsignedThinking) {
 				output.disabledFeatures = [...(output.disabledFeatures ?? []), "unsigned-thinking-replay"];
+			}
+			if (dropDemotedPriorThinking) {
+				output.disabledFeatures = [...(output.disabledFeatures ?? []), "prior-thinking-replay"];
 			}
 			stream.push({ type: "done", reason: output.stopReason, message: output });
 			stream.end();
@@ -3222,6 +3283,10 @@ type AnthropicParamBuildOptions = {
 	 * thinking signature (not just unsigned demotion) so transform's existing
 	 * drop/demote rules remove the poisoned blocks from the wire. */
 	forceStripThinkingSignatures?: boolean;
+	/** Set after a live `Refusal (reasoning_extraction)`: drop prior reasoning
+	 * that would otherwise be replayed as demoted text, rather than feeding the
+	 * classifier more cumulative heat on the retry. */
+	dropDemotedPriorThinking?: boolean;
 	supportsEagerToolInputStreaming: boolean;
 	/** Sanitized server-side fallback entries; defaults to `options?.fallbacks` when omitted. */
 	fallbacks?: AnthropicOptions["fallbacks"];
@@ -3239,6 +3304,7 @@ function buildParams(
 		useUmansGatewayWebSearch,
 		forceDemoteUnsignedThinking,
 		forceStripThinkingSignatures = false,
+		dropDemotedPriorThinking = false,
 		supportsEagerToolInputStreaming,
 		fallbacks = options?.fallbacks,
 	} = buildOptions;
@@ -3398,6 +3464,7 @@ function buildParams(
 		model: options?.requestModelId ?? model.requestModelId ?? model.id,
 		messages: convertAnthropicMessages(contextMessages, effectiveModel, isOAuthToken, {
 			serverSideFallbackEnabled: !!fallbacks?.length,
+			dropDemotedPriorThinking,
 		}),
 		...(systemBlocks && { system: systemBlocks }),
 		...(tools !== undefined && { tools }),
@@ -3573,7 +3640,7 @@ export function convertAnthropicMessages(
 	messages: Message[],
 	model: Model<"anthropic-messages">,
 	isOAuthToken: boolean,
-	opts?: { serverSideFallbackEnabled?: boolean },
+	opts?: { serverSideFallbackEnabled?: boolean; dropDemotedPriorThinking?: boolean },
 ): AnthropicMessageParam[] {
 	// Indices of params emitted from `developer` messages. After the main pass,
 	// the ones whose placement satisfies Anthropic's mid-conversation rules are
@@ -3644,7 +3711,7 @@ export function convertAnthropicMessages(
 								thinking: block.thinking.toWellFormed(),
 								signature: "",
 							});
-						} else {
+						} else if (!opts?.dropDemotedPriorThinking) {
 							blocks.push({
 								type: "text",
 								text: renderDemotedThinking(model.id, block.thinking),

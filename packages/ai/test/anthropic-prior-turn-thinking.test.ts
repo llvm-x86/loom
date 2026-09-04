@@ -326,6 +326,58 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		}
 	});
 
+	it("drops prior reasoning entirely under dropDemotedPriorThinking after a reasoning_extraction refusal", () => {
+		// Bare-prose demotion (the test above) lowers per-block classifier
+		// signal but heat is CUMULATIVE: a mid-session switch to Fable
+		// invalidates every signature at once, so a long transcript replays as
+		// hundreds of demoted reasoning blocks and Anthropic refuses the whole
+		// request with `Refusal (reasoning_extraction)`. The provider learns
+		// that from the live refusal and retries with this flag, which must
+		// remove the reasoning from the wire altogether — while leaving the
+		// turn's real content (tool calls, visible text) intact, since dropping
+		// those would change what the model is being asked to continue from.
+		const target = makeAnthropicModel({
+			provider: "anthropic",
+			id: "claude-fable-5",
+			name: "Claude Fable 5",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const reasoning = "Need to preserve the plan while switching to Claude Fable 5.";
+		const messages: Message[] = [
+			makeUser("Read the project notes"),
+			makeAssistant(
+				[
+					{ type: "thinking", thinking: reasoning, thinkingSignature: "sig_source" },
+					{ type: "toolCall", id: "toolu_prior", name: "read", arguments: { path: "NOTES.md" } },
+				],
+				{ provider: "anthropic", model: "claude-sonnet-4-6" },
+			),
+			toolResult("toolu_prior", "notes body"),
+			makeAssistant([{ type: "text", text: "I found the relevant notes." }], {
+				provider: "anthropic",
+				model: "claude-fable-5",
+				stopReason: "stop",
+			}),
+			makeUser("Continue from those notes."),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false, {
+			dropDemotedPriorThinking: true,
+		});
+		const assistants = params.filter(p => p.role === "assistant");
+		expect(assistants).toHaveLength(2);
+		const priorBlocks = assistants[0].content as WireBlock[];
+		expect(priorBlocks.find(b => b.type === "thinking")).toBeUndefined();
+		// The reasoning must be gone in EVERY form, not merely un-tagged.
+		for (const block of priorBlocks) {
+			if (block.type === "text") expect((block as WireTextBlock).text).not.toContain(reasoning);
+		}
+		// ...but the turn itself survives: dropping the tool call would orphan
+		// the tool_result that follows it and 400 the request.
+		expect(priorBlocks.find(b => b.type === "tool_use")).toBeDefined();
+		expect((assistants[1].content as WireBlock[]).find(b => b.type === "text")).toBeDefined();
+	});
+
 	it("does not demote same-model official Anthropic unsigned thinking to text", () => {
 		// Same-model Anthropic replay is not a dialect transition. If a committed
 		// tool-use turn lacks a usable thinking signature, the native thinking block
