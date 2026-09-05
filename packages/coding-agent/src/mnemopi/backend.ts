@@ -527,7 +527,13 @@ function escapeMarkdownTableCell(value: string): string {
 	return value.replaceAll("|", "\\|").replaceAll("\n", " ");
 }
 
-async function loadMnemopiConfigWithProviders(
+/**
+ * `loadMnemopiConfig` plus the resolved `llm`/embedding provider options
+ * (`mnemopi.llmMode` smol/remote → a live `complete`). Exported for
+ * `loom memory wiki run`, which opens banks outside any session and needs the
+ * same LLM wiring the session backend gets.
+ */
+export async function loadMnemopiConfigWithProviders(
 	settings: MemoryBackendStartOptions["settings"],
 	agentDir: string,
 	modelRegistry: ModelRegistry,

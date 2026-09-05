@@ -65,6 +65,8 @@ export interface MnemopiBackendConfig {
 	treeArchiveGcDays: number;
 	/** Collapse duplicate fact writes into the existing row (default true). */
 	treeDedupe: boolean;
+	/** Run the background Wiki Maintainer / Skill Proposer after retention (default true). */
+	wiki: boolean;
 	debug: boolean;
 	providerOptions: MnemopiProviderOptions;
 	llmMode: MnemopiLlmMode;
@@ -149,6 +151,7 @@ export function loadMnemopiConfig(settings: Settings, agentDir: string): Mnemopi
 		treeEntryRows: Math.max(20, Math.floor(settings.get("mnemopi.treeEntryRows"))),
 		treeArchiveGcDays: Math.max(0, Math.floor(settings.get("mnemopi.treeArchiveGcDays"))),
 		treeDedupe: settings.get("mnemopi.treeDedupe"),
+		wiki: settings.get("mnemopi.wiki"),
 		debug: settings.get("mnemopi.debug"),
 		providerOptions: {
 			noEmbeddings: settings.get("mnemopi.noEmbeddings"),

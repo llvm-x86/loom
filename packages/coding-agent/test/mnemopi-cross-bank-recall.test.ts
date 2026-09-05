@@ -52,6 +52,7 @@ function makeConfig(overrides: Partial<MnemopiBackendConfig> = {}): MnemopiBacke
 		treeEntryRows: 200,
 		treeArchiveGcDays: 90,
 		treeDedupe: true,
+		wiki: false,
 		proactiveLinking: false,
 		retainEveryNTurns: 3,
 		recallLimit: 10,

@@ -2814,6 +2814,18 @@ export const SETTINGS_SCHEMA = {
 			condition: "mnemopiActive",
 		},
 	},
+	"mnemopi.wiki": {
+		type: "boolean",
+		default: true,
+		ui: {
+			tab: "memory",
+			group: "Memory Tree",
+			label: "Wiki Maintainer",
+			description:
+				"Background pass that compiles retained transcripts into root-caused patterns (wiki/patterns) and, when a pattern recurs across sessions, into managed skills; needs an LLM mode other than none",
+			condition: "mnemopiActive",
+		},
+	},
 	"mnemopi.treeRoot": {
 		type: "string",
 		default: undefined,

@@ -35,6 +35,14 @@ import {
 	renderMemoryTreeIndex,
 	restoreMemoryRow,
 } from "./tree";
+import { PATTERN_MEMORY_TYPE } from "./wiki";
+
+/**
+ * Retention fires every few turns; one maintainer pass per retain would be
+ * one LLM round-trip per retain while the agent is still mid-task. Debounce
+ * so a burst of retains collapses into one pass, run off the agent's path.
+ */
+const WIKI_PASS_DEBOUNCE_MS = 15_000;
 
 // The mnemopi package pulls the embeddings stack; keep it off the CLI startup
 // module graph by loading it lazily at the async boundaries that need it.
@@ -455,6 +463,8 @@ export class MnemopiSessionState {
 	 * (see `scanDeclaredBankRepo`) — never persisted to a sidecar file.
 	 */
 	private declaredBankRepo?: string;
+	private wikiPassTimer: NodeJS.Timeout | undefined;
+	private wikiPassInFlight: Promise<void> | undefined;
 
 	constructor(options: MnemopiSessionStateOptions) {
 		this.sessionId = options.sessionId;
@@ -622,6 +632,16 @@ export class MnemopiSessionState {
 			}
 		}
 		merged.sort(compareRecallResults);
+		// Compiled patterns before raw transcript chunks: a pattern already
+		// carries the root cause and fix its evidence rows only exhibit, so it
+		// is the row worth spending injection budget on (WikiSkill's premise:
+		// the agent reads the wiki, the raw layer is for the maintainer).
+		const patterns = merged.filter(result => result.memory_type === PATTERN_MEMORY_TYPE);
+		if (patterns.length > 0 && patterns.length < merged.length) {
+			const rest = merged.filter(result => result.memory_type !== PATTERN_MEMORY_TYPE);
+			merged.length = 0;
+			merged.push(...patterns, ...rest);
+		}
 		if (merged.length > this.config.recallLimit) merged.length = this.config.recallLimit;
 		return merged;
 	}
@@ -1056,6 +1076,66 @@ export class MnemopiSessionState {
 		void this.renderMemoryTree().catch((error: unknown) => {
 			logger.warn("Mnemopi: memory tree render after retain failed.", { error: String(error) });
 		});
+		this.scheduleWikiPass();
+	}
+
+	/**
+	 * Debounced background WikiSkill pass on the retain bank: the Wiki
+	 * Maintainer compiles new raw rows into patterns, then the Skill Proposer
+	 * promotes recurring ones into managed skills. Runs off the agent's turn,
+	 * never throws, and is skipped when the wiki is off or no LLM is configured
+	 * (the pass itself re-checks `llmEnabled`; this is just the cheap gate).
+	 */
+	scheduleWikiPass(delayMs = WIKI_PASS_DEBOUNCE_MS): void {
+		if (this.aliasOf) {
+			this.aliasOf.scheduleWikiPass(delayMs);
+			return;
+		}
+		if (!this.config.wiki || this.config.llmMode === "none") return;
+		clearTimeout(this.wikiPassTimer);
+		this.wikiPassTimer = setTimeout(() => {
+			this.wikiPassTimer = undefined;
+			void this.runWikiPass();
+		}, delayMs);
+		this.wikiPassTimer.unref?.();
+	}
+
+	/** Run one maintainer + proposer pass now; concurrent callers share the in-flight pass. */
+	runWikiPass(): Promise<void> {
+		if (this.aliasOf) return this.aliasOf.runWikiPass();
+		if (this.wikiPassInFlight) return this.wikiPassInFlight;
+		const target = this.scoped.retain;
+		this.wikiPassInFlight = (async () => {
+			// Lazy like the mnemopi module itself: the proposer pulls managed-skills
+			// and the maintainer is only needed once a pass actually fires.
+			const [{ WikiStore }, { runWikiMaintainerPass }, { runSkillProposerPass }] = await Promise.all([
+				import("./wiki"),
+				import("./wiki-maintainer"),
+				import("./wiki-skills"),
+			]);
+			const store = new WikiStore(target.bank, target.memory);
+			const maintained = await runWikiMaintainerPass(store);
+			if (maintained.skipped) {
+				if (this.config.debug) logger.debug("Mnemopi: wiki pass skipped", { bank: target.bank, ...maintained });
+				return;
+			}
+			const proposed = await runSkillProposerPass(store);
+			logger.info("Mnemopi: wiki pass complete", {
+				bank: target.bank,
+				accepted: maintained.accepted,
+				rejected: maintained.rejected,
+				skill:
+					proposed.action === "no_action" ? null : `${proposed.action} ${proposed.skill} (${proposed.decision})`,
+			});
+			await this.renderMemoryTree();
+		})()
+			.catch((error: unknown) => {
+				logger.warn("Mnemopi: wiki pass failed.", { bank: target.bank, error: String(error) });
+			})
+			.finally(() => {
+				this.wikiPassInFlight = undefined;
+			});
+		return this.wikiPassInFlight;
 	}
 
 	attachSessionListeners(): void {
@@ -1199,6 +1279,8 @@ export class MnemopiSessionState {
 		this.unsubscribe = undefined;
 		this.exitReconcileCancel?.();
 		this.exitReconcileCancel = undefined;
+		clearTimeout(this.wikiPassTimer);
+		this.wikiPassTimer = undefined;
 		if (this.aliasOf) return;
 		const closeOwned = (): void => {
 			for (const memory of this.scoped.owned) memory.close();
@@ -1207,11 +1289,14 @@ export class MnemopiSessionState {
 			closeOwned();
 			return;
 		}
-		const consolidatePromise = this.consolidate({ full: false, extract: false, sleep: false }).catch(
-			(error: unknown) => {
-				logger.warn("Mnemopi: consolidation on dispose failed.", { error: String(error) });
-			},
-		);
+		// An in-flight wiki pass holds the same SQLite handles `closeOwned`
+		// closes, so it rides the same shutdown budget as consolidation.
+		const consolidatePromise = Promise.all([
+			this.consolidate({ full: false, extract: false, sleep: false }),
+			this.wikiPassInFlight,
+		]).catch((error: unknown) => {
+			logger.warn("Mnemopi: consolidation on dispose failed.", { error: String(error) });
+		});
 		const { timeoutMs } = options;
 		if (timeoutMs !== undefined && timeoutMs > 0) {
 			const TIMED_OUT = Symbol("mnemopi.dispose.timedOut");

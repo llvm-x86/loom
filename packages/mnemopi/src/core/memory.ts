@@ -10,9 +10,11 @@ import { BeamMemory, initBeam } from "./beam/index";
 import { reconcileEmbeddingModel } from "./beam/store";
 import type { RecallEnhancedOptions, RecallOptions, RecallResult, SleepResult } from "./beam/types";
 import { EpisodicGraph } from "./episodic-graph";
+import { complete as llmComplete } from "./local-llm";
 import {
 	isPiAiModel,
 	type MnemopiEmbeddingRuntimeOptions,
+	type MnemopiLlmCompleteOptions,
 	type MnemopiLlmCompletion,
 	type MnemopiLlmRuntimeOptions,
 	type ResolvedMnemopiRuntimeOptions,
@@ -471,6 +473,29 @@ export class Mnemopi {
 
 	getContext(limit = 10): unknown[] {
 		return this.#withRuntimeOptions(() => this.beam.getContext(limit));
+	}
+
+	/**
+	 * One completion through whatever LLM this instance was configured with
+	 * (custom completion, pi-ai model, host backend, or remote endpoint), or
+	 * `null` when none is configured or the call yields nothing. Runs inside
+	 * this instance's runtime options, which is what makes the configured
+	 * handle visible to the underlying `complete()`.
+	 */
+	complete(prompt: string, options: MnemopiLlmCompleteOptions = {}): Promise<string | null> {
+		return this.#withRuntimeOptions(() =>
+			llmComplete(prompt, options.temperature ?? 0.3, {
+				maxTokens: options.maxTokens,
+				timeout: options.timeout,
+				provider: options.provider ?? null,
+				model: options.model ?? null,
+			}),
+		);
+	}
+
+	/** Whether {@link complete} can reach any LLM at all. */
+	get llmEnabled(): boolean {
+		return this.runtimeOptions?.llm?.enabled === true;
 	}
 
 	getStats(
