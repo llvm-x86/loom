@@ -124,6 +124,7 @@ import { AgentSession, type PlanYolo, type Prewalk } from "./session/agent-sessi
 import { discoverAuthStorage as discoverAuthStorageFromConfig } from "./session/auth-broker-config";
 import type { AuthStorage } from "./session/auth-storage";
 import { createInterruptedTurnAbortMessage } from "./session/exit-diagnostics";
+import { redactInterruptedThinkingForModel } from "./session/interrupted-thinking-replay";
 import {
 	type CustomMessage,
 	convertToLlm,
@@ -2774,6 +2775,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				: undefined;
 		const transformProviderContext = async (context: Context, transformModel: Model): Promise<Context> => {
 			let transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+			transformed = redactInterruptedThinkingForModel(transformed, transformModel);
 			if (snapcompactInline) transformed = await snapcompactInline.transform(transformed, transformModel);
 			return clampProviderContextImages(transformed, transformModel);
 		};
@@ -3185,7 +3187,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					convertToLlm: convertToLlmFinal,
 					transformContext: async messages => wrapSteeringForModel(messages),
 					transformProviderContext: async (context, transformModel) => {
-						const transformed = obfuscator ? obfuscateProviderContext(obfuscator, context) : context;
+						const transformed = redactInterruptedThinkingForModel(
+							obfuscator ? obfuscateProviderContext(obfuscator, context) : context,
+							transformModel,
+						);
 						return clampProviderContextImages(transformed, transformModel);
 					},
 					thinkingBudgets: agent.thinkingBudgets,
