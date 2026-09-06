@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import * as path from "node:path";
-import { extractFileMentions, generateFileMentionMessages } from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
+import {
+	extractFileMentions,
+	generateFileMentionMessages,
+	partitionDiagnosticsMention,
+} from "@oh-my-pi/pi-coding-agent/utils/file-mentions";
 import { removeWithRetries } from "@oh-my-pi/pi-utils";
 
 const tempDirs: string[] = [];
@@ -119,5 +123,21 @@ describe("generateFileMentionMessages path resolution", () => {
 			expect(file.content).toContain("binary file");
 			expect(file.content).not.toContain("\u0000");
 		}
+	});
+});
+
+describe("partitionDiagnosticsMention", () => {
+	test("splits the @zed-diagnostics keyword out of file mentions", () => {
+		expect(partitionDiagnosticsMention(extractFileMentions("check @zed-diagnostics and @src/a.ts"))).toEqual({
+			files: ["src/a.ts"],
+			diagnostics: true,
+		});
+	});
+
+	test("leaves plain mentions untouched", () => {
+		expect(partitionDiagnosticsMention(extractFileMentions("see @src/diagnostics.ts and @diagnostics"))).toEqual({
+			files: ["src/diagnostics.ts", "diagnostics"],
+			diagnostics: false,
+		});
 	});
 });

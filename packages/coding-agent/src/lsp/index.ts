@@ -10,6 +10,7 @@ import type {
 import { logger, once, prompt, untilAborted } from "@oh-my-pi/pi-utils";
 import type { BunFile } from "bun";
 import { LRUCache } from "lru-cache/raw";
+import type { LateDiagnosticsFile } from "../modes/components/late-diagnostics-message";
 import { type Theme, theme } from "../modes/theme/theme";
 import lspDescription from "../prompts/tools/lsp.md" with { type: "text" };
 import type { ToolSession } from "../tools";
@@ -17,6 +18,7 @@ import { truncateForPrompt } from "../tools/approval";
 import { formatPathRelativeToCwd, resolveToCwd } from "../tools/path-utils";
 import { ToolAbortError, ToolError, throwIfAborted } from "../tools/tool-errors";
 import { clampTimeout } from "../tools/tool-timeouts";
+import { ls as gitLs } from "../utils/git";
 import {
 	ensureFileOpen,
 	FileChangeType,
@@ -633,7 +635,7 @@ async function waitForDiagnostics(
 }
 
 /** Project type detection result */
-interface ProjectType {
+export interface ProjectType {
 	type: "rust" | "typescript" | "go" | "python" | "unknown";
 	command?: string[];
 	description: string;
@@ -745,7 +747,7 @@ async function detectProjectType(cwd: string, signal?: AbortSignal): Promise<Pro
 }
 
 /** Run workspace diagnostics command and parse output */
-async function runWorkspaceDiagnostics(
+export async function runWorkspaceDiagnostics(
 	cwd: string,
 	signal?: AbortSignal,
 ): Promise<{ output: string; projectType: ProjectType }> {
@@ -969,6 +971,170 @@ async function getDiagnosticsForFile(
 		messages: limited,
 		summary,
 		errored: hasErrors,
+	};
+}
+
+/**
+ * Ask every server that handles `absolutePath` for fresh diagnostics, opening
+ * or re-syncing the file first so a server that has never seen it still
+ * reports. Deduplicated across servers and sorted; server names are collected
+ * into `serverNames` (including servers that failed, matching what the `lsp`
+ * tool reports).
+ */
+async function collectFileDiagnostics(
+	absolutePath: string,
+	cwd: string,
+	servers: readonly [string, ServerConfig][],
+	timeoutMs: number,
+	serverNames: Set<string>,
+	signal?: AbortSignal,
+): Promise<Diagnostic[]> {
+	const uri = fileToUri(absolutePath);
+	const collected: Diagnostic[] = [];
+
+	for (const [serverName, serverConfig] of servers) {
+		serverNames.add(serverName);
+		try {
+			throwIfAborted(signal);
+			if (serverConfig.createClient) {
+				collected.push(...(await getLinterClient(serverName, serverConfig, cwd).lint(absolutePath)));
+				continue;
+			}
+			const client = await getOrCreateClient(serverConfig, cwd, undefined, signal);
+			if (isProjectAwareLspServer(serverConfig)) {
+				await waitForProjectLoaded(client, signal);
+				throwIfAborted(signal);
+			}
+			const minVersion = client.diagnosticsVersion;
+			await refreshFile(client, absolutePath, signal);
+			const expectedDocumentVersion = client.openFiles.get(uri)?.version;
+			collected.push(
+				...(await waitForDiagnostics(client, uri, { timeoutMs, signal, minVersion, expectedDocumentVersion })),
+			);
+		} catch (err) {
+			if (err instanceof ToolAbortError || signal?.aborted) throw err;
+			// Server failed, continue with others
+		}
+	}
+
+	const seen = new Set<string>();
+	const unique: Diagnostic[] = [];
+	for (const d of collected) {
+		const key = `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.message}`;
+		if (seen.has(key)) continue;
+		seen.add(key);
+		unique.push(d);
+	}
+	sortDiagnostics(unique);
+	return unique;
+}
+
+/** Files per project diagnostics scan. Beyond this the report is truncated. */
+const MAX_PROJECT_DIAGNOSTIC_FILES = 300;
+/** Wall-clock ceiling for a project scan; partial results are still reported. */
+const PROJECT_DIAGNOSTICS_DEADLINE_MS = 45_000;
+const PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS = 1500;
+
+export interface ProjectDiagnosticsResult {
+	/** Formatted report, one summary line plus grouped messages per file. */
+	output: string;
+	/** Per-file diagnostics, in the shape the transcript renderer consumes. */
+	files: LateDiagnosticsFile[];
+	/** Servers consulted. */
+	servers: string[];
+	/** Files actually queried. */
+	scanned: number;
+	/** True when the file cap or the deadline cut the scan short. */
+	truncated: boolean;
+}
+
+/**
+ * Project-wide diagnostics from the language servers themselves: every
+ * git-visible file that has a configured server is opened and its published
+ * diagnostics collected.
+ *
+ * This is what an editor's diagnostics panel shows, and why it is used for
+ * `@zed-diagnostics` instead of {@link runWorkspaceDiagnostics}: the
+ * build-command path (`tsc --noEmit`, `cargo check`, `pyright`) reports what
+ * the *compiler* thinks, which is a different — usually smaller — set than the
+ * servers the editor runs (lint rules, a stricter type checker, unused-import
+ * hints).
+ *
+ * Returns `null` when no server is configured for this project, so callers can
+ * fall back to the build-command path.
+ *
+ * Parity is inherently approximate: an editor reports diagnostics for buffers
+ * it has open, including unsaved edits, while this reads what is on disk.
+ */
+export async function runProjectDiagnostics(
+	cwd: string,
+	signal?: AbortSignal,
+): Promise<ProjectDiagnosticsResult | null> {
+	const config = loadConfig(cwd);
+	if (Object.keys(config.servers).length === 0) return null;
+	setIdleTimeout(config.idleTimeoutMs);
+
+	// git decides what belongs to the project, so build output and ignored
+	// vendor trees stay out; `Bun.Glob` would walk straight into node_modules.
+	const [tracked, untracked] = await Promise.all([
+		gitLs.files(cwd, { signal }).catch(() => []),
+		gitLs.untracked(cwd, signal).catch(() => []),
+	]);
+
+	const targets: string[] = [];
+	const serversByFile = new Map<string, readonly [string, ServerConfig][]>();
+	for (const relPath of new Set([...tracked, ...untracked])) {
+		const absolute = resolveToCwd(relPath, cwd);
+		const servers = getServersForFile(config, absolute);
+		if (servers.length === 0) continue;
+		targets.push(absolute);
+		serversByFile.set(absolute, servers);
+	}
+
+	let truncated = targets.length > MAX_PROJECT_DIAGNOSTIC_FILES;
+	const scanList = truncated ? targets.slice(0, MAX_PROJECT_DIAGNOSTIC_FILES) : targets;
+	const deadline = Date.now() + PROJECT_DIAGNOSTICS_DEADLINE_MS;
+	const serverNames = new Set<string>();
+	const files: LateDiagnosticsFile[] = [];
+	const lines: string[] = [];
+	let scanned = 0;
+	let issues = 0;
+
+	for (const absolute of scanList) {
+		throwIfAborted(signal);
+		if (Date.now() > deadline) {
+			truncated = true;
+			break;
+		}
+		scanned++;
+		const diagnostics = await collectFileDiagnostics(
+			absolute,
+			cwd,
+			serversByFile.get(absolute) ?? [],
+			PROJECT_DIAGNOSTICS_WAIT_TIMEOUT_MS,
+			serverNames,
+			signal,
+		);
+		if (diagnostics.length === 0) continue;
+		issues += diagnostics.length;
+		const relPath = formatPathRelativeToCwd(absolute, cwd);
+		const summary = formatDiagnosticsSummary(diagnostics);
+		const messages = diagnostics.map(d => formatDiagnostic(d, relPath));
+		files.push({ path: relPath, summary, errored: diagnostics.some(d => d.severity === 1), messages });
+		lines.push(`${relPath}: ${summary}`);
+		lines.push(formatGroupedDiagnosticMessages(messages));
+	}
+
+	if (truncated) {
+		lines.push(`(truncated: scanned ${scanned} of ${targets.length} files)`);
+	}
+
+	return {
+		output: issues === 0 ? `No diagnostics in ${scanned} file(s)` : lines.join("\n"),
+		files,
+		servers: [...serverNames],
+		scanned,
+		truncated,
 	};
 }
 
@@ -1718,56 +1884,15 @@ export class LspTool implements AgentTool<typeof lspSchema, LspToolDetails, Them
 					continue;
 				}
 
-				const uri = fileToUri(resolved);
 				const relPath = formatPathRelativeToCwd(resolved, this.session.cwd);
-				const allDiagnostics: Diagnostic[] = [];
-
-				// Query all applicable servers for this file
-				for (const [serverName, serverConfig] of servers) {
-					allServerNames.add(serverName);
-					try {
-						throwIfAborted(signal);
-						if (serverConfig.createClient) {
-							const linterClient = getLinterClient(serverName, serverConfig, this.session.cwd);
-							const diagnostics = await linterClient.lint(resolved);
-							allDiagnostics.push(...diagnostics);
-							continue;
-						}
-						const client = await getOrCreateClient(serverConfig, this.session.cwd, undefined, signal);
-						if (isProjectAwareLspServer(serverConfig)) {
-							await waitForProjectLoaded(client, signal);
-							throwIfAborted(signal);
-						}
-						const minVersion = client.diagnosticsVersion;
-						await refreshFile(client, resolved, signal);
-						const expectedDocumentVersion = client.openFiles.get(uri)?.version;
-						const diagnostics = await waitForDiagnostics(client, uri, {
-							timeoutMs: diagnosticsWaitTimeoutMs,
-							signal,
-							minVersion,
-							expectedDocumentVersion,
-						});
-						allDiagnostics.push(...diagnostics);
-					} catch (err) {
-						if (err instanceof ToolAbortError || signal?.aborted) {
-							throw err;
-						}
-						// Server failed, continue with others
-					}
-				}
-
-				// Deduplicate diagnostics
-				const seen = new Set<string>();
-				const uniqueDiagnostics: Diagnostic[] = [];
-				for (const d of allDiagnostics) {
-					const key = `${d.range.start.line}:${d.range.start.character}:${d.range.end.line}:${d.range.end.character}:${d.message}`;
-					if (!seen.has(key)) {
-						seen.add(key);
-						uniqueDiagnostics.push(d);
-					}
-				}
-
-				sortDiagnostics(uniqueDiagnostics);
+				const uniqueDiagnostics = await collectFileDiagnostics(
+					resolved,
+					this.session.cwd,
+					servers,
+					diagnosticsWaitTimeoutMs,
+					allServerNames,
+					signal,
+				);
 
 				if (!detailed && targets.length === 1) {
 					if (uniqueDiagnostics.length === 0) {

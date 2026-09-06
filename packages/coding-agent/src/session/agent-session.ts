@@ -257,6 +257,7 @@ import type { Goal, GoalModeState } from "../goals/state";
 import type { HindsightSessionState } from "../hindsight/state";
 import { type LocalProtocolOptions, resolveLocalUrlToPath } from "../internal-urls";
 import { IrcBus, type IrcMessage } from "../irc/bus";
+import { runProjectDiagnostics, runWorkspaceDiagnostics } from "../lsp";
 import { resolveMemoryBackend } from "../memory-backend";
 import { retryMnemopiStartupIfDue } from "../mnemopi/backend";
 import { sanitizeBankName } from "../mnemopi/config";
@@ -356,7 +357,7 @@ import { parseCommandArgs } from "../utils/command-args";
 import { type ContextActivityEvent, reportContextActivity } from "../utils/context-activity-reporter";
 import { type EditMode, resolveEditMode } from "../utils/edit-mode";
 import { resolveFileDisplayMode } from "../utils/file-display-mode";
-import { extractFileMentions, generateFileMentionMessages } from "../utils/file-mentions";
+import { extractFileMentions, generateFileMentionMessages, partitionDiagnosticsMention } from "../utils/file-mentions";
 import { normalizeModelContextImages } from "../utils/image-loading";
 import { describeAttachedImagesForTextModel } from "../utils/image-vision-fallback";
 import { formatLocalCalendarDate } from "../utils/local-date";
@@ -410,6 +411,7 @@ import {
 	SKILL_PROMPT_MESSAGE_TYPE,
 	stripImagesFromMessage,
 	USER_INTERRUPT_LABEL,
+	ZED_DIAGNOSTICS_MESSAGE_TYPE,
 } from "./messages";
 import type { BuildSessionContextOptions, SessionContext } from "./session-context";
 import { getLatestCompactionEntry, getRestorableSessionModels } from "./session-context";
@@ -9161,8 +9163,10 @@ export class AgentSession {
 			}
 			this.#pendingNextTurnMessages = [];
 
-			// Auto-read @filepath mentions
-			const fileMentions = extractFileMentions(expandedText);
+			// Auto-read @filepath mentions; `@zed-diagnostics` is a keyword, not a path.
+			const { files: fileMentions, diagnostics: wantsDiagnostics } = partitionDiagnosticsMention(
+				extractFileMentions(expandedText),
+			);
 			if (fileMentions.length > 0) {
 				const fileMentionMessages = await generateFileMentionMessages(fileMentions, this.sessionManager.getCwd(), {
 					autoResizeImages: this.settings.get("images.autoResize"),
@@ -9172,6 +9176,35 @@ export class AgentSession {
 				for (const fileMentionMessage of fileMentionMessages) {
 					messages.push(await this.#normalizeAgentMessageImages(fileMentionMessage));
 				}
+			}
+			if (wantsDiagnostics) {
+				const cwd = this.sessionManager.getCwd();
+				// Language servers first — that is what the editor's diagnostics
+				// panel shows. Only projects with no configured server fall back
+				// to the build command.
+				const lspResult = await runProjectDiagnostics(cwd);
+				const { output, source, files } = lspResult
+					? {
+							output: lspResult.output,
+							source: lspResult.servers.join(", ") || "lsp",
+							files: lspResult.files,
+						}
+					: await runWorkspaceDiagnostics(cwd).then(r => ({
+							output: r.output,
+							source: r.projectType.description,
+							files: [{ summary: r.projectType.description, messages: r.output.split("\n") }],
+						}));
+				messages.push({
+					role: "custom",
+					customType: ZED_DIAGNOSTICS_MESSAGE_TYPE,
+					content: `<diagnostics source="${source}">\n${output}\n</diagnostics>`,
+					// A clean project still renders a card, so the mention never
+					// looks like it silently did nothing.
+					details: { source, files: files.length > 0 ? files : [{ summary: "no issues", messages: [output] }] },
+					display: true,
+					attribution: "user",
+					timestamp: Date.now(),
+				});
 			}
 
 			const beforeAgentStartSystemPrompt = await this.#buildSystemPromptForAgentStart(expandedText);

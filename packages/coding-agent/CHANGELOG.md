@@ -3,6 +3,21 @@
 ## [Unreleased]
 
 ### Added
+- Added the `@zed-diagnostics` prompt mention (parity with Zed's agent-panel
+  `@diagnostics`): typing it in a prompt attaches a `<diagnostics>` block with
+  project-wide diagnostics collected from the language servers themselves —
+  every git-visible file with a configured server, capped at 300 files and 45s,
+  falling back to the build-command check (cargo check / tsc --noEmit / go
+  build / pyright) only when no server is configured. It is a keyword, not a
+  path, so it wins over a same-named file in cwd; every other `@…` mention
+  still auto-reads as before.
+- Loom now borrows the language servers of the Zed editor that owns its
+  terminal: any live server under Zed's `languages/` tree is discovered from
+  the process table and used with Zed's exact binary and argv (they are not on
+  `$PATH`), and Zed's primary server shadows loom's default for the same file
+  types — so a Zed-managed project gets `basedpyright` + `ruff` instead of a
+  stray `pyright`, and `@zed-diagnostics` matches what the editor's panel shows.
+  Explicit project/user LSP config still wins; Linux-only, no-op elsewhere.
 - Added `mnemopi.bankRepo` (env override `LOOM_MNEMOPI_BANK_REPO`): a GitHub
   `owner/repo` slug that pins the per-project Mnemopi bank to the REPOSITORY
   instead of the checkout path. One repo converges on one bank across Linux
