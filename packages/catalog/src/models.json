@@ -36473,7 +36473,7 @@
 		},
 		"kimi-for-coding": {
 			"id": "kimi-for-coding",
-			"name": "K2.7 Coding",
+			"name": "K2.8 Preview",
 			"api": "openai-completions",
 			"provider": "kimi-code",
 			"baseUrl": "https://api.kimi.com/coding/v1",
@@ -36492,16 +36492,14 @@
 				"cacheRead": 0,
 				"cacheWrite": 0
 			},
-			"contextWindow": 262144,
+			"contextWindow": 1048576,
 			"maxTokens": 32000,
+			"compactionModel": "kimi-for-coding-highspeed",
 			"thinking": {
 				"mode": "effort",
-				"efforts": [
-					"minimal",
-					"low",
-					"medium",
-					"high"
-				]
+				"efforts": ["low", "high", "max"],
+				"defaultLevel": "max",
+				"requiresEffort": true
 			},
 			"compat": {
 				"thinkingFormat": "zai",

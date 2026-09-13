@@ -1437,12 +1437,25 @@ function dropOpenRouterKimiForcedToolReasoning(
 	}
 }
 
+/**
+ * Kimi Code models whose thinking is mandatory (`supports_thinking_type:
+ * "only"` on `/coding/v1/models`): K3, K3-256k, and since 2026-09 the
+ * `kimi-for-coding` alias, which now serves K2.8 Preview (1M context, efforts
+ * low/high/max, default max). The K2.7 highspeed sibling keeps optional
+ * thinking and stays out.
+ */
+const MANDATORY_THINKING_KIMI_CODE_IDS = new Set(["k3", "k3-256k", "kimi-for-coding"]);
+
 function hasActiveNativeKimiK3Reasoning(
 	model: Model<"openai-completions">,
 	options: OpenAICompletionsOptions | undefined,
 ): boolean {
-	const nativeK3Ids = new Set(["k3", "k3-256k"]);
-	if (model.provider !== "kimi-code" || !nativeK3Ids.has(model.id.toLowerCase()) || !model.reasoning) return false;
+	if (
+		model.provider !== "kimi-code" ||
+		!MANDATORY_THINKING_KIMI_CODE_IDS.has(model.id.toLowerCase()) ||
+		!model.reasoning
+	)
+		return false;
 	if (options?.reasoning === undefined || options.disableReasoning) return false;
 	try {
 		const url = new URL(model.baseUrl);
