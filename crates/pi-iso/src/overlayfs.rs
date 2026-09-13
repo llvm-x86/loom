@@ -74,9 +74,10 @@ impl IsolationBackend for OverlayfsBackend {
 mod imp {
 	use std::{
 		collections::BTreeMap,
-		ffi::CString,
-		fs,
-		os::unix::ffi::OsStrExt,
+		env,
+		ffi::{CString, OsStr},
+		fs, io,
+		os::unix::{ffi::OsStrExt, fs::PermissionsExt},
 		path::{Path, PathBuf},
 		process::{Command, Stdio},
 		sync::LazyLock,
@@ -99,7 +100,7 @@ mod imp {
 		if kernel_overlay_supported() {
 			return ProbeResult::available();
 		}
-		if fuse_overlayfs_available() {
+		if fuse_overlayfs_binary().is_some() {
 			return ProbeResult::available();
 		}
 		ProbeResult::unavailable(
@@ -233,13 +234,24 @@ mod imp {
 	}
 
 	fn fuse_mount(lower: &Path, upper: &Path, work: &Path, merged: &Path) -> IsoResult<()> {
+		// Probe PATH before spawning. Spawning a missing binary from a
+		// large-VSZ parent does not necessarily report ENOENT: measured on
+		// asus-kiosk 2026-09-10, a 43 GB-VSZ session under
+		// `vm.overcommit_memory=0` got `Cannot allocate memory (os error
+		// 12)` in ~270 ms, masking the "not found" that would otherwise
+		// have triggered the fallback chain.
+		let binary = fuse_overlayfs_binary().ok_or_else(|| {
+			IsoError::unavailable(
+				"fuse-overlayfs not found on PATH; install it to enable overlay isolation",
+			)
+		})?;
 		let opts = format!(
 			"lowerdir={},upperdir={},workdir={}",
 			lower.display(),
 			upper.display(),
 			work.display()
 		);
-		let output = Command::new("fuse-overlayfs")
+		let output = Command::new(&binary)
 			.args(["-o", &opts])
 			.arg(merged)
 			.stdin(Stdio::null())
@@ -248,12 +260,12 @@ mod imp {
 			.output();
 		let output = match output {
 			Ok(out) => out,
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
-				return Err(IsoError::unavailable(
-					"fuse-overlayfs not found on PATH; install it to enable overlay isolation",
-				));
-			},
-			Err(err) => return Err(IsoError::other(format!("spawn fuse-overlayfs: {err}"))),
+			// Any spawn failure means this backend cannot run here — the host
+			// may be out of address space (ENOMEM), out of pids (EAGAIN), or
+			// the binary may have vanished after the PATH probe. None of those
+			// is a task failure: report unavailable so the resolver records the
+			// reason and falls through to the next backend (worktree / rcopy).
+			Err(err) => return Err(spawn_unavailable("fuse-overlayfs", &err)),
 		};
 		if output.status.success() {
 			return Ok(());
@@ -277,8 +289,9 @@ mod imp {
 			match result {
 				Ok(out) if out.status.success() => return Ok(()),
 				Ok(_) => {},
-				Err(err) if err.kind() == std::io::ErrorKind::NotFound => {},
-				Err(err) => return Err(IsoError::other(format!("spawn {binary}: {err}"))),
+				// Spawn failure (missing binary, ENOMEM, …): try the next
+				// candidate rather than aborting teardown.
+				Err(_) => {},
 			}
 		}
 		// Last resort — try the lazy kernel umount; it works for both kernel
@@ -295,14 +308,32 @@ mod imp {
 			.any(|line| line.split_whitespace().any(|word| word == "overlay"))
 	}
 
-	fn fuse_overlayfs_available() -> bool {
-		Command::new("fuse-overlayfs")
-			.arg("--version")
-			.stdin(Stdio::null())
-			.stdout(Stdio::null())
-			.stderr(Stdio::null())
-			.status()
-			.is_ok()
+	/// Locate `fuse-overlayfs` without spawning it.
+	///
+	/// The previous implementation ran `fuse-overlayfs --version` and treated
+	/// any successful spawn as availability; under memory pressure the spawn
+	/// itself fails, so a filesystem lookup is both cheaper and more truthful.
+	fn fuse_overlayfs_binary() -> Option<PathBuf> {
+		find_in_path("fuse-overlayfs", env::var_os("PATH").as_deref())
+	}
+
+	fn find_in_path(name: &str, path_var: Option<&OsStr>) -> Option<PathBuf> {
+		if name.contains('/') {
+			let direct = PathBuf::from(name);
+			return is_executable_file(&direct).then_some(direct);
+		}
+		env::split_paths(path_var?)
+			.filter(|dir| !dir.as_os_str().is_empty())
+			.map(|dir| dir.join(name))
+			.find(|candidate| is_executable_file(candidate))
+	}
+
+	fn is_executable_file(path: &Path) -> bool {
+		fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.permissions().mode() & 0o111 != 0)
+	}
+
+	fn spawn_unavailable(binary: &str, err: &io::Error) -> IsoError {
+		IsoError::unavailable(format!("spawn {binary}: {err}"))
 	}
 
 	fn canonical_existing_dir(path: &Path) -> IsoResult<PathBuf> {
@@ -338,5 +369,57 @@ mod imp {
 	fn to_cstring(bytes: &[u8], label: &str) -> IsoResult<CString> {
 		CString::new(bytes)
 			.map_err(|err| IsoError::other(format!("{label} path contains NUL byte: {err}")))
+	}
+
+	#[cfg(test)]
+	mod tests {
+		use std::{ffi::OsString, fs, io, os::unix::fs::PermissionsExt};
+
+		use super::{find_in_path, is_executable_file, spawn_unavailable};
+
+		#[test]
+		fn spawn_enomem_degrades_to_unavailable() {
+			// Measured failure: `spawn fuse-overlayfs: Cannot allocate memory
+			// (os error 12)` used to be `IsoError::Other`, which the TS
+			// resolver treats as a hard task failure instead of a fallback.
+			let err = io::Error::from_raw_os_error(libc::ENOMEM);
+			let iso = spawn_unavailable("fuse-overlayfs", &err);
+			assert!(iso.is_unavailable(), "spawn ENOMEM must be backend-unavailable: {iso:?}");
+			assert!(iso.message().contains("fuse-overlayfs"), "reason names the binary: {iso}");
+			assert!(iso.message().contains("Cannot allocate memory"), "reason names the error: {iso}");
+		}
+
+		#[test]
+		fn spawn_any_io_error_degrades_to_unavailable() {
+			for raw in [libc::ENOENT, libc::EAGAIN, libc::EPERM] {
+				let iso = spawn_unavailable("fuse-overlayfs", &io::Error::from_raw_os_error(raw));
+				assert!(iso.is_unavailable(), "errno {raw} must be unavailable: {iso:?}");
+			}
+		}
+
+		#[test]
+		fn path_probe_finds_executable_without_spawning() {
+			let dir = std::env::temp_dir().join(format!("pi-iso-path-{}", std::process::id()));
+			fs::create_dir_all(&dir).expect("temp dir");
+			let bin = dir.join("fuse-overlayfs");
+			fs::write(&bin, b"#!/bin/sh\nexit 0\n").expect("write stub");
+			let path_var = OsString::from(dir.as_os_str());
+
+			fs::set_permissions(&bin, fs::Permissions::from_mode(0o644)).expect("chmod 644");
+			assert!(!is_executable_file(&bin), "non-executable file is not a usable binary");
+			assert_eq!(find_in_path("fuse-overlayfs", Some(&path_var)), None);
+
+			fs::set_permissions(&bin, fs::Permissions::from_mode(0o755)).expect("chmod 755");
+			assert_eq!(
+				find_in_path("fuse-overlayfs", Some(&path_var)).as_deref(),
+				Some(bin.as_path())
+			);
+
+			// An empty or absent PATH must never read as "found".
+			assert_eq!(find_in_path("fuse-overlayfs", None), None);
+			assert_eq!(find_in_path("fuse-overlayfs", Some(&OsString::new())), None);
+
+			fs::remove_dir_all(&dir).ok();
+		}
 	}
 }
