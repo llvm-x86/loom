@@ -46,8 +46,9 @@ export interface MismatchDetails {
 	hashRecognized?: boolean;
 	/**
 	 * Paths THIS session recorded the expected hash for, excluding the edited
-	 * path itself. Non-empty turns the generic "not from this session" refusal
-	 * into a wrong-file diagnostic — the tag is real, it just belongs elsewhere
+	 * path itself. Consulted ONLY under `hashRecognized === false`: non-empty
+	 * turns the generic "not from this session" refusal into a wrong-file
+	 * diagnostic — the tag is real, it just belongs elsewhere
 	 * (e.g. a relative path that resolved to a stale same-named file in the
 	 * session cwd while the tag came from reading the real checkout).
 	 */

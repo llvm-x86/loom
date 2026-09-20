@@ -191,6 +191,28 @@ describe("task scratch dirs", () => {
 			expect(fs.existsSync(staleLegacy)).toBe(false);
 		});
 
+		it("never sweeps lane-tmp, the console's per-lane launch tree, however stale", async () => {
+			// lane-tmp carries no owner marker and its mtime only moves when an
+			// ACCOUNT dir is created under it — so 24h after the last new account
+			// it is classification-identical to the stale legacy dir above. Since
+			// 2026-09-20 it is the boot cwd of every repo-less console lane:
+			// sweeping it deletes the working directory of live agents.
+			const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+			const laneTmp = path.join(scratchRoot, "lane-tmp");
+			const liveLane = path.join(laneTmp, "a112", "some-lane");
+			fs.mkdirSync(liveLane, { recursive: true });
+			ageMs(laneTmp, THIRTY_DAYS_MS);
+			const staleLegacy = path.join(scratchRoot, "sstale");
+			fs.mkdirSync(staleLegacy, { recursive: true });
+			ageMs(staleLegacy, THIRTY_DAYS_MS);
+
+			const result = await sweepOrphanedScratchDirs();
+
+			expect(result.failed).toEqual([]);
+			expect(result.removed).toEqual([staleLegacy]);
+			expect(fs.existsSync(liveLane)).toBe(true);
+		});
+
 		it("returns an empty result when the scratch root does not exist", async () => {
 			const result = await sweepOrphanedScratchDirs();
 			expect(result).toEqual({ removed: [], failed: [] });

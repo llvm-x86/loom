@@ -193,6 +193,19 @@ interface SweepRootOptions {
 }
 
 /**
+ * Top-level entries the sweep must never remove, owner marker or not.
+ * `lane-tmp` is the agent-chat console's per-lane launch/TMPDIR tree
+ * (app.py lane_tmpdir): it lives under this root only because the root is
+ * the host's big-disk symlink, it is created and owned per account by the
+ * console, and since 2026-09-20 it is the BOOT CWD of every repo-less lane
+ * — sweeping it deletes the working directory of live, running agents.
+ * It carries no owner.json because no loom run owns it; the markerless-dir
+ * grace path would classify it as a legacy leftover 24h after the last
+ * account dir was created under it.
+ */
+const SWEEP_NEVER_REMOVE = new Set(["lane-tmp"]);
+
+/**
  * Best-effort sweep of orphaned workspaces under `root`. Never throws: a
  * missing root yields empty results and per-dir failures are collected into
  * `failed`.
@@ -217,6 +230,7 @@ async function sweepRoot(root: string, options: SweepRootOptions): Promise<TaskI
 	}
 	for (const entry of entries) {
 		if (!entry.isDirectory()) continue;
+		if (SWEEP_NEVER_REMOVE.has(entry.name)) continue;
 		const baseDir = path.join(root, entry.name);
 		try {
 			if (options.requireMountSubdir && !(await hasMountSubdir(baseDir))) continue;

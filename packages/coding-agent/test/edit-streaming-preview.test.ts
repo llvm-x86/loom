@@ -177,6 +177,36 @@ describe("hashline streaming preview (single-op trailing payload)", () => {
 		expect(previews?.[0]?.error).toContain("not from this session");
 	});
 
+	test("a drifted edit through a symlinked path is file-changed, never a foreign-tag accusation", async () => {
+		// Store keys are realpath'd; the authored path is not. Before the
+		// canonical-key fix, editing the tag's OWN file through a symlinked dir
+		// (~/.loom/scratch on this box) missed both lookups and produced "not
+		// from this session" — or, with recognizedPaths, named the very file
+		// being edited as a different one.
+		const linkDir = path.join(os.tmpdir(), `hashline-stream-link-${process.pid}-${Date.now()}`);
+		await fs.symlink(tmpDir, linkDir);
+		try {
+			// Production stores record CANONICAL keys (FileSnapshotStore realpaths
+			// on record); the shared beforeEach records the verbatim spelling,
+			// which on this box is itself symlinked (~/.loom/scratch). Mirror
+			// production or the test measures the wrong store shape.
+			const canonicalFile = await fs.realpath(file);
+			const canonStore = new InMemorySnapshotStore();
+			const canonHeader = formatHashlineHeader("a.ts", canonStore.record(canonicalFile, text));
+			await Bun.write(file, `// drifted\n${text}`);
+			const input = `${canonHeader}\nSWAP 2.=2:\n+const b = 22\n`;
+			const linkCtx = { cwd: linkDir, signal: new AbortController().signal, snapshots: canonStore };
+			const previews = await strategy.computeDiffPreview({ input } as never, linkCtx as never);
+			expect(previews).toHaveLength(1);
+			const error = previews?.[0]?.error ?? "";
+			expect(error).toContain("file changed between read and edit");
+			expect(error).not.toContain("not from this session");
+			expect(error).not.toContain("different file");
+		} finally {
+			await fs.rm(linkDir, { force: true });
+		}
+	});
+
 	test("yields no preview (not an error) before the first payload byte arrives", async () => {
 		// Op header typed, payload still empty: applyPartialTo drops the
 		// payload-less op so nothing changes yet. The preview must report null

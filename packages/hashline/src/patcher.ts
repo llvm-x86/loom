@@ -572,6 +572,19 @@ export class Patcher {
 		expected: string,
 		hashRecognized: boolean,
 	): MismatchError {
+		// Look the foreign paths up BEFORE recording the drifted snapshot:
+		// record() goes through the LRU store, and at capacity the record can
+		// evict the very history this lookup needs — dropping the diagnostic
+		// back to the generic "not from this session" in exactly the
+		// high-file-count sessions where wrong-file mistakes happen.
+		const recognizedPaths = [
+			...new Set(
+				this.snapshots
+					.findByHash(expected)
+					.map(snapshot => snapshot.path)
+					.filter(snapshotPath => snapshotPath !== canonicalPath),
+			),
+		];
 		const actualFileHash = this.#recordFullSnapshot(canonicalPath, normalized);
 		return new MismatchError({
 			path: section.path,
@@ -580,10 +593,7 @@ export class Patcher {
 			fileLines: normalized.split("\n"),
 			anchorLines: section.collectAnchorLines(),
 			hashRecognized,
-			recognizedPaths: this.snapshots
-				.findByHash(expected)
-				.map(snapshot => snapshot.path)
-				.filter(snapshotPath => snapshotPath !== canonicalPath),
+			recognizedPaths,
 		});
 	}
 

@@ -155,17 +155,29 @@ function createMismatchError(
 	snapshots: SnapshotStore,
 	expected: string,
 ): MismatchError {
+	// Both lookups go through the CANONICAL key, not the authored path: store
+	// keys are realpath'd (file-snapshot-store.ts) and absolutePath is not, so
+	// a symlink anywhere in the path (~/.loom/scratch, /home/a112/agent-chat,
+	// macOS /tmp) would miss the edited file's own records — flipping a
+	// same-file drift into "not from this session", or worse, leaving its
+	// entry in recognizedPaths and accusing it of being a different file.
+	// Same pattern as recoverSectionPathFromTag above.
+	const authoredKey = canonicalSnapshotKey(absolutePath);
 	return new MismatchError({
 		path: section.path,
 		expectedFileHash: expected,
 		actualFileHash: computeFileHash(normalized),
 		fileLines: normalized.split("\n"),
 		anchorLines: section.collectAnchorLines(),
-		hashRecognized: snapshots.byHash(absolutePath, expected) !== null,
-		recognizedPaths: snapshots
-			.findByHash(expected)
-			.map(snapshot => snapshot.path)
-			.filter(snapshotPath => snapshotPath !== absolutePath),
+		hashRecognized: snapshots.byHash(authoredKey, expected) !== null,
+		recognizedPaths: [
+			...new Set(
+				snapshots
+					.findByHash(expected)
+					.map(snapshot => snapshot.path)
+					.filter(snapshotPath => snapshotPath !== authoredKey),
+			),
+		],
 	});
 }
 
