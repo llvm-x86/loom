@@ -580,6 +580,10 @@ export class Patcher {
 			fileLines: normalized.split("\n"),
 			anchorLines: section.collectAnchorLines(),
 			hashRecognized,
+			recognizedPaths: this.snapshots
+				.findByHash(expected)
+				.map(snapshot => snapshot.path)
+				.filter(snapshotPath => snapshotPath !== canonicalPath),
 		});
 	}
 

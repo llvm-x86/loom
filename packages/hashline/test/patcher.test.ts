@@ -103,6 +103,35 @@ describe("Patcher snapshot tag integrity", () => {
 		expect(fs.get(PATH)).toBe("drifted\n");
 	});
 
+	it("names the file a foreign tag belongs to instead of blaming a prior session", async () => {
+		// Incident 2026-09-20: the model read the real checkout by absolute path
+		// (tag minted for it), then edited a RELATIVE same-named path that
+		// resolved to a stale copy in the session cwd. byHash(path, tag) missed,
+		// so the old message claimed the tag was "not from this session" and the
+		// agent went hunting for worktree corruption. The tag was fine — aimed
+		// at the wrong file. The message must say which file it belongs to.
+		const OTHER = "real/routes.py";
+		const fs = new InMemoryFilesystem([
+			[PATH, "stale copy\n"],
+			[OTHER, "real content\n"],
+		]);
+		const snapshots = new InMemorySnapshotStore();
+		const tag = snapshots.record(OTHER, "real content\n");
+		const patcher = new Patcher({ fs, snapshots });
+
+		try {
+			await patcher.apply(Patch.parse(`[${PATH}#${tag}]\nSWAP 1.=1:\n+after`));
+			throw new Error("expected MismatchError");
+		} catch (error) {
+			expect(error).toBeInstanceOf(MismatchError);
+			const message = (error as MismatchError).displayMessage;
+			expect(message).toMatch(new RegExp(`hash #${tag} was minted this session for a different file: ${OTHER.replace(/\./g, "\\.")}`));
+			expect(message).not.toMatch(/not from this session/);
+			expect(message).toMatch(/current file hashes to #[0-9A-F]{4}|editing a file that hashes to #[0-9A-F]{4}/);
+		}
+		expect(fs.get(PATH)).toBe("stale copy\n");
+	});
+
 	it("refuses with a 'not from this session' diagnostic when the tag was never recorded for this path", async () => {
 		const fs = new InMemoryFilesystem([[PATH, "current\n"]]);
 		const snapshots = new InMemorySnapshotStore();

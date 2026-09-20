@@ -162,6 +162,10 @@ function createMismatchError(
 		fileLines: normalized.split("\n"),
 		anchorLines: section.collectAnchorLines(),
 		hashRecognized: snapshots.byHash(absolutePath, expected) !== null,
+		recognizedPaths: snapshots
+			.findByHash(expected)
+			.map(snapshot => snapshot.path)
+			.filter(snapshotPath => snapshotPath !== absolutePath),
 	});
 }
 

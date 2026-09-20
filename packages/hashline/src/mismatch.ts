@@ -44,6 +44,14 @@ export interface MismatchDetails {
 	 * to `true` for backward compatibility with direct callers.
 	 */
 	hashRecognized?: boolean;
+	/**
+	 * Paths THIS session recorded the expected hash for, excluding the edited
+	 * path itself. Non-empty turns the generic "not from this session" refusal
+	 * into a wrong-file diagnostic — the tag is real, it just belongs elsewhere
+	 * (e.g. a relative path that resolved to a stale same-named file in the
+	 * session cwd while the tag came from reading the real checkout).
+	 */
+	recognizedPaths?: readonly string[];
 }
 
 /**
@@ -59,6 +67,7 @@ export class MismatchError extends Error {
 	readonly fileLines: string[];
 	readonly anchorLines: readonly number[];
 	readonly hashRecognized: boolean;
+	readonly recognizedPaths: readonly string[];
 
 	constructor(details: MismatchDetails) {
 		super(MismatchError.formatMessage(details));
@@ -69,6 +78,7 @@ export class MismatchError extends Error {
 		this.fileLines = details.fileLines;
 		this.anchorLines = details.anchorLines ?? [];
 		this.hashRecognized = details.hashRecognized ?? true;
+		this.recognizedPaths = details.recognizedPaths ?? [];
 	}
 
 	get displayMessage(): string {
@@ -79,6 +89,7 @@ export class MismatchError extends Error {
 			fileLines: this.fileLines,
 			anchorLines: this.anchorLines,
 			hashRecognized: this.hashRecognized,
+			recognizedPaths: this.recognizedPaths,
 		});
 	}
 
@@ -86,6 +97,20 @@ export class MismatchError extends Error {
 		const pathText = details.path ? ` for ${details.path}` : "";
 		const hashRecognized = details.hashRecognized ?? true;
 		if (!hashRecognized) {
+			const foreign = details.recognizedPaths ?? [];
+			if (foreign.length > 0) {
+				// The tag IS from this session — minted for a different path. The
+				// generic "prior session" wording sends the model debugging stale
+				// state when the truth is simpler: it aimed a good tag at the
+				// wrong file (observed 2026-09-20: a relative `routes.py` edit
+				// resolved to a stale workspace-root copy while the tag belonged
+				// to the session's real checkout; the agent spent ~20 minutes
+				// suspecting worktree corruption).
+				return [
+					`Edit rejected${pathText}: hash ${HL_FILE_HASH_SEP}${details.expectedFileHash} was minted this session for a different file: ${foreign.join(", ")}.`,
+					`You are editing a file that hashes to ${HL_FILE_HASH_SEP}${details.actualFileHash}. Point the edit at the file the tag names, or re-read THIS file with \`read\` to mint its own tag.`,
+				];
+			}
 			return [
 				`Edit rejected${pathText}: hash ${HL_FILE_HASH_SEP}${details.expectedFileHash} is not from this session.`,
 				`The current file hashes to ${HL_FILE_HASH_SEP}${details.actualFileHash}. Re-read the file with \`read\` to copy a current ${HL_FILE_PREFIX}path${HL_FILE_HASH_SEP}tag${HL_FILE_SUFFIX} header — never invent the tag and never reuse one from a prior session.`,
