@@ -16712,6 +16712,48 @@
 		}
 	},
 	"deepseek": {
+		"deepseek-flash": {
+			"id": "deepseek-flash",
+			"name": "DeepSeek V4.1 Flash",
+			"api": "openai-completions",
+			"provider": "deepseek",
+			"baseUrl": "https://api.deepseek.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0.003,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"compat": {
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"maxTokensField": "max_tokens",
+				"supportsToolChoice": false,
+				"extraBody": {
+					"thinking": {
+						"type": "enabled"
+					}
+				},
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresAssistantContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			}
+		},
 		"deepseek-v4-flash": {
 			"id": "deepseek-v4-flash",
 			"name": "DeepSeek V4 Flash",
@@ -16720,12 +16762,55 @@
 			"baseUrl": "https://api.deepseek.com",
 			"reasoning": true,
 			"input": [
-				"text"
+				"text",
+				"image"
 			],
 			"cost": {
-				"input": 0.14,
-				"output": 0.28,
-				"cacheRead": 0.0028,
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0.003,
+				"cacheWrite": 0
+			},
+			"contextWindow": 1000000,
+			"maxTokens": 384000,
+			"compat": {
+				"supportsDeveloperRole": false,
+				"supportsReasoningEffort": true,
+				"maxTokensField": "max_tokens",
+				"supportsToolChoice": false,
+				"extraBody": {
+					"thinking": {
+						"type": "enabled"
+					}
+				},
+				"reasoningContentField": "reasoning_content",
+				"requiresReasoningContentForToolCalls": true,
+				"requiresAssistantContentForToolCalls": true
+			},
+			"thinking": {
+				"mode": "effort",
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				]
+			}
+		},
+		"deepseek-v4-flash-vision-exp": {
+			"id": "deepseek-v4-flash-vision-exp",
+			"name": "DeepSeek V4 Flash Vision Exp",
+			"api": "openai-completions",
+			"provider": "deepseek",
+			"baseUrl": "https://api.deepseek.com",
+			"reasoning": true,
+			"input": [
+				"text",
+				"image"
+			],
+			"cost": {
+				"input": 0.15,
+				"output": 0.6,
+				"cacheRead": 0.003,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -16764,9 +16849,9 @@
 				"text"
 			],
 			"cost": {
-				"input": 0.435,
-				"output": 0.87,
-				"cacheRead": 0.003625,
+				"input": 0.66,
+				"output": 1.98,
+				"cacheRead": 0.022,
 				"cacheWrite": 0
 			},
 			"contextWindow": 1000000,
@@ -16788,6 +16873,7 @@
 			"thinking": {
 				"mode": "effort",
 				"efforts": [
+					"low",
 					"high",
 					"max"
 				]
@@ -36649,7 +36735,11 @@
 			"compactionModel": "kimi-for-coding-highspeed",
 			"thinking": {
 				"mode": "effort",
-				"efforts": ["low", "high", "max"],
+				"efforts": [
+					"low",
+					"high",
+					"max"
+				],
 				"defaultLevel": "max",
 				"requiresEffort": true
 			},
