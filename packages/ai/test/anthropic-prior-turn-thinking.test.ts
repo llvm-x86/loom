@@ -689,4 +689,51 @@ describe("Anthropic prior-turn thinking preservation (#2257, #2265)", () => {
 		const wireBlobs = JSON.stringify(priorBlocks);
 		expect(wireBlobs).not.toContain("sig_sonnet");
 	});
+
+	it("strips a foreign signature from the LATEST surviving assistant turn when the session resumes under a different model (#1457 regression)", () => {
+		// Session interrupted on k3-256k (stopReason: aborted) and resumed under
+		// official Anthropic claude-fable-5-1. The interrupted turn is the
+		// latest surviving assistant and is cross-model: its signature was
+		// cryptographically bound to k3's key+session+model, so claude-fable
+		// cannot reverify it and rejects the replay with HTTP 400 `Invalid
+		// signature in thinking block`. The strip must therefore fire on the
+		// latest surviving assistant too — not just prior turns (#2257).
+		const target = makeAnthropicModel({
+			provider: "anthropic",
+			id: "claude-fable-5-1",
+			name: "Claude Fable 5.1",
+			baseUrl: "https://api.anthropic.com",
+		});
+		const messages: Message[] = [
+			makeUser("Build it and verify the stream is byte-identical."),
+			makeAssistant(
+				[
+					{
+						type: "thinking",
+						thinking: "Byte-identical stream both builds, no kill — amendment is safe.",
+						thinkingSignature: "k3_foreign_signature",
+					},
+					{ type: "text", text: "Amending the commit and pushing." },
+				],
+				{
+					provider: "kimi-code",
+					model: "k3-256k",
+					stopReason: "aborted",
+				},
+			),
+			makeUser("proceed."),
+		];
+
+		const params = convertAnthropicMessages(messages, target, false);
+		const assistant = params.find(p => p.role === "assistant");
+		if (!assistant) throw new Error("expected assistant wire message");
+		const blocks = assistant.content as WireBlock[];
+		// Foreign signature must never reach a signing Anthropic target.
+		expect(JSON.stringify(blocks)).not.toContain("k3_foreign_signature");
+		// Unsigned cross-model thinking demotes to text on official Anthropic
+		// (replayUnsignedThinking: false), so the reasoning survives as context.
+		const text = blocks.find(b => b.type === "text") as WireTextBlock | undefined;
+		expect(text?.text).toContain("Byte-identical");
+		expect(blocks.find(b => b.type === "thinking")).toBeUndefined();
+	});
 });

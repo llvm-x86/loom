@@ -605,19 +605,24 @@ export function transformMessages<TApi extends Api>(
 						// Latest abandoned turn: Anthropic's byte-for-byte rule forbids
 						// even stripping a signature on the latest message.
 						if (isLatestSurvivingAssistant && abandonedToolUse) return block;
-						// Cross-model prior turns crossing an official Anthropic endpoint
+						// Cross-model turns crossing an official Anthropic endpoint
 						// must strip the source signature so the downstream encoder
 						// applies its `replayUnsignedThinking` policy (unsigned thinking
 						// is emitted natively on Anthropic-compatible reasoning endpoints
 						// and demoted to text on official Anthropic). 3p ↔ 3p replays
 						// keep the signature so the reasoning chain stays signed on
 						// continuation (#2265).
-						if (
-							!isLatestSurvivingAssistant &&
-							!isSameModel &&
-							signingAnthropicInvolved &&
-							sanitized.thinkingSignature
-						) {
+						//
+						// This applies to the LATEST surviving assistant too, not just
+						// prior turns. A session resumed under a different model replays
+						// the interrupted latest turn's signature, which was bound to the
+						// source model's key+session — the target cannot reverify it and
+						// rejects the replay with HTTP 400 `Invalid signature in thinking
+						// block` (#1457). The same-model case is already exempt below
+						// (`isSameModel`), and the byte-for-byte aborted latest turn is a
+						// same-model scenario, so cross-model latest strips are always
+						// safe.
+						if (!isSameModel && signingAnthropicInvolved && sanitized.thinkingSignature) {
 							sanitized = { ...sanitized, thinkingSignature: undefined };
 						}
 						// Drop blocks with neither a signature anchor nor any text —

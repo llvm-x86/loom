@@ -171,7 +171,7 @@ it("preserves redacted thinking blocks in assistant replay payloads", () => {
 	expect(blocks[1]?.data).toBe("encrypted_payload");
 });
 
-it("preserves latest Anthropic thinking blocks even when model id changes", () => {
+it("strips the source signature from latest Anthropic thinking blocks when the model id changes (#4297)", () => {
 	const model: Model<"anthropic-messages"> = buildModel({
 		api: "anthropic-messages",
 		provider: "anthropic",
@@ -217,7 +217,12 @@ it("preserves latest Anthropic thinking blocks even when model id changes", () =
 	);
 	const transformedAssistant = transformed.find(m => m.role === "assistant") as AssistantMessage | undefined;
 	expect(transformedAssistant).toBeDefined();
-	expect(transformedAssistant?.content[0]).toEqual(assistant.content[0]);
+	// Cross-model signature is stripped (bound to source key+session+model) but
+	// the thinking + redacted sibling survive for the next turn.
+	expect(transformedAssistant?.content[0]).toEqual({
+		type: "thinking",
+		thinking: "internal",
+	});
 	expect(transformedAssistant?.content[1]).toEqual(assistant.content[1]);
 });
 
