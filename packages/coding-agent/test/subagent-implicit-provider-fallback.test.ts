@@ -62,7 +62,7 @@ describe("subagent implicit cross-provider fallback", () => {
 		vi.restoreAllMocks();
 	});
 
-	it("synthesizes a chain to another credentialed provider when none is configured", async () => {
+	it("synthesizes NO chain for a pinned model when none is configured — pinned means hard (#12745)", async () => {
 		const primary = model("cloud-a", "main");
 		const other = model("cloud-b", "other");
 		let childFallbackChains: Record<string, string[]> | undefined;
@@ -88,10 +88,79 @@ describe("subagent implicit cross-provider fallback", () => {
 			enableLsp: false,
 		});
 
-		expect(childFallbackChains?.["subagent:implicit-1"]).toEqual(["cloud-b/other"]);
+		// The old behaviour installed ["cloud-b/other"] here and silently
+		// walked to it mid-run; a pinned model must run exactly that model or
+		// fail loudly (issue #12745).
+		expect(childFallbackChains?.["subagent:implicit-1"]).toBeUndefined();
 	});
 
-	it("prefers a role-configured model on the other provider over its flagship", async () => {
+	it("synthesizes a chain for an INHERITED (unpinned) model when none is configured", async () => {
+		const primary = model("cloud-a", "main");
+		const other = model("cloud-b", "other");
+		let childFallbackChains: Record<string, string[]> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "implicit-1b",
+			modelOverride: "cloud-a/main",
+			// The task-tool pipeline fills modelOverride with the inherited
+		// parent model and marks it NOT pinned; resilience rerouting is the
+		// behaviour fan-outs against a quota-parked provider rely on.
+			explicitModelPinned: false,
+			settings: Settings.isolated(),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, other],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(childFallbackChains?.["subagent:implicit-1b"]).toEqual(["cloud-b/other"]);
+	});
+
+	it("honours a configured retry.fallbackChains.default even for a pinned model", async () => {
+		const primary = model("cloud-a", "main");
+		const other = model("cloud-b", "other");
+		let childFallbackChains: Record<string, string[]> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			if (!options) throw new Error("Expected createAgentSession options");
+			childFallbackChains = options.settings?.get("retry.fallbackChains") as Record<string, string[]> | undefined;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "implicit-1c",
+			modelOverride: "cloud-a/main",
+			// An operator-configured default chain is an explicit opt-in to
+			// rerouting, so it applies to pinned models too.
+			settings: Settings.isolated({
+				"retry.fallbackChains": { default: ["cloud-b/other"] },
+			}),
+			modelRegistry: {
+				refresh: async () => {},
+				getAvailable: () => [primary, other],
+				getApiKey: async () => "test-key",
+			} as never,
+			enableLsp: false,
+		});
+
+		expect(childFallbackChains?.["subagent:implicit-1c"]).toEqual(["cloud-b/other"]);
+	});
+
+	it("does not reroute a pinned model to a role-configured sibling either (#12745)", async () => {
 		const primary = model("cloud-a", "main");
 		const cheap = model("cloud-b", "cheap");
 		const pricey = model("cloud-b", "pricey");
@@ -120,7 +189,7 @@ describe("subagent implicit cross-provider fallback", () => {
 			enableLsp: false,
 		});
 
-		expect(childFallbackChains?.["subagent:implicit-2"]).toEqual(["cloud-b/cheap"]);
+		expect(childFallbackChains?.["subagent:implicit-2"]).toBeUndefined();
 	});
 
 	it("does not synthesize a chain for an on-device primary", async () => {
@@ -203,7 +272,7 @@ describe("subagent parked-provider redirect at spawn", () => {
 		} as never;
 	}
 
-	it("reroutes to a healthy provider and tells the parent", async () => {
+	it("does NOT reroute a pinned model away from a parked provider (#12745)", async () => {
 		const primary = model("cloud-a", "main");
 		const other = model("cloud-b", "other");
 		const blockedUntilMs = Date.now() + 3_600_000;
@@ -220,6 +289,36 @@ describe("subagent parked-provider redirect at spawn", () => {
 			index: 0,
 			id: "parked-1",
 			modelOverride: "cloud-a/main",
+			settings: Settings.isolated(),
+			modelRegistry: registry([primary, other], { "cloud-a": true }, blockedUntilMs),
+			enableLsp: false,
+		});
+
+		// The spawn runs the pin against the parked provider and the retry
+		// engine fails it loudly with the park reason — that loud failure,
+		// not a silent cloud-b run, is the contract for a pinned model.
+		expect(childModel?.provider).toBe("cloud-a");
+		expect(result.modelRedirect).toBeUndefined();
+	});
+
+	it("reroutes an INHERITED (unpinned) model away from a parked provider and tells the parent", async () => {
+		const primary = model("cloud-a", "main");
+		const other = model("cloud-b", "other");
+		const blockedUntilMs = Date.now() + 3_600_000;
+		let childModel: Model<Api> | undefined;
+		vi.spyOn(sdkModule, "createAgentSession").mockImplementation(async options => {
+			childModel = options?.model as Model<Api> | undefined;
+			return { session: createYieldingSession(), extensionsResult: {}, setToolUIContext: () => {} } as never;
+		});
+
+		const result = await runSubprocess({
+			cwd: "/tmp",
+			agent,
+			task: "work",
+			index: 0,
+			id: "parked-1b",
+			modelOverride: "cloud-a/main",
+			explicitModelPinned: false,
 			settings: Settings.isolated(),
 			modelRegistry: registry([primary, other], { "cloud-a": true }, blockedUntilMs),
 			enableLsp: false,

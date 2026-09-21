@@ -79,6 +79,19 @@
 - Gave LSP writethrough batches a `WRITETHROUGH_BATCH_MAX` ceiling and a `WRITETHROUGH_BATCH_TTL_MS` idle lifetime so a batch abandoned by a throwing edit call no longer retains its pending file texts forever. The age resets on every touch, so a live batch is never expired
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
+- Fixed explicit sub-agent model pins being silently substituted: a spawn with
+  an explicit `model` (including a `:effort` suffix) got a dynamically
+  synthesized cross-provider retry fallback chain and a silent parked-provider
+  redirect, so a capacity hiccup walked the run to a different — often slower,
+  more expensive — model with no surfaced error (issue #12745: `deepseek-v4-flash:low`
+  ran the bulk of a 32-minute task on `deepseek-v4-pro`, 6/6 agents). A pinned
+  model now runs exactly that model or fails loudly; only an operator-configured
+  `retry.fallbackChains.default` may still reroute a pin (that chain is an
+  explicit opt-in). Spawns whose model was INHERITED from the parent session
+  keep the resilience reroute — that is the case the implicit chain was built
+  for. The pin signal is threaded from the `task` tool pipeline
+  (`explicitModelPinned` on the spawn policy), because that pipeline pre-fills
+  `modelOverride` with the inherited parent model, which is not a pin.
 - Fixed `[Image #N]` markers surviving text relay (steer/follow-up submission,
   compaction queueing, sub-agent delegation) with no image behind them: none of
   those paths carry `pendingImages` along with the text, so an unresolvable

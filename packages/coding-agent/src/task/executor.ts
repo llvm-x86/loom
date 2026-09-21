@@ -212,6 +212,7 @@ function redirectAwayFromParkedProvider(
 	authStorage: AuthStorage,
 	settings: Settings,
 	configuredChain: string[] | undefined,
+	allowImplicit: boolean,
 ): (ModelRedirectNote & { model: Model<Api> }) | undefined {
 	// Extensions may supply their own ModelRegistry (`registerProvider`), so the
 	// accessor is not guaranteed to exist on every registry's auth storage.
@@ -220,9 +221,12 @@ function redirectAwayFromParkedProvider(
 	const blockedUntilMs = authStorage.providerBlockedUntil(primary.provider);
 	if (blockedUntilMs === undefined) return undefined;
 	const seen = new Set<string>();
+	// The implicit chain is offered only to spawns whose model was INHERITED,
+	// never to an explicit pin: redirecting a pinned model is the silent
+	// substitution issue #12745 is about.
 	const candidates = [
 		...(configuredChain ?? []),
-		...buildImplicitModelFallbackChain(primary, modelRegistry, settings),
+		...(allowImplicit ? buildImplicitModelFallbackChain(primary, modelRegistry, settings) : []),
 	];
 	for (const selector of candidates) {
 		if (seen.has(selector)) continue;
@@ -251,8 +255,9 @@ function installSubagentRetryFallbackChain(args: {
 	model: Model<Api> | undefined;
 	authFallbackUsed: boolean;
 	modelRegistry: ModelRegistry;
+	allowImplicitFallback: boolean;
 }): string | undefined {
-	const { settings, id, candidates, defaultFallbackChain, model, authFallbackUsed, modelRegistry } = args;
+	const { settings, id, candidates, defaultFallbackChain, model, authFallbackUsed, modelRegistry, allowImplicitFallback } = args;
 	if (!model || authFallbackUsed || candidates.length === 0) return undefined;
 
 	const selectedIndex = candidates.findIndex(
@@ -261,14 +266,21 @@ function installSubagentRetryFallbackChain(args: {
 	if (selectedIndex < 0) return undefined;
 	const fallbackSelectors = candidates.slice(selectedIndex + 1).map(candidate => candidate.selector);
 	const existingFallbackChains = settings.get("retry.fallbackChains");
-	// A single explicit model may reuse a configured default chain, then a
-	// dynamically discovered cross-provider chain, but never an implicit parent fallback.
+	// A single explicit model may reuse a configured default chain, but never
+	// an implicit parent fallback — and, when the model was PINNED by the
+	// caller, never the dynamically discovered cross-provider chain either
+	// (issue #12745: that chain silently walked a `:low` pin to a slower,
+	// more expensive model for most of a 32-minute run). With no chain the
+	// retry engine fails the spawn loudly on provider failure, which is the
+	// documented contract for an explicit pin.
 	const fallbackChain =
 		fallbackSelectors.length > 0
 			? fallbackSelectors
 			: defaultFallbackChain && defaultFallbackChain.length > 0
 				? defaultFallbackChain
-				: buildImplicitModelFallbackChain(model, modelRegistry, settings);
+				: allowImplicitFallback
+					? buildImplicitModelFallbackChain(model, modelRegistry, settings)
+					: undefined;
 	if (
 		!Array.isArray(fallbackChain) ||
 		fallbackChain.length === 0 ||
@@ -395,6 +407,22 @@ export interface ExecutorOptions {
 	 */
 	detached?: boolean;
 	modelOverride?: string | string[];
+	/**
+	 * `true` when the model was PINNED by the caller (the `task` tool's `model`
+	 * argument, a `task.agentModelOverrides` entry, or the agent definition's
+	 * own `model`) rather than inherited from the parent session's active
+	 * model. Pinned means hard: no implicit cross-provider retry chain and no
+	 * silent parked-provider redirect — the spawn runs exactly that model or
+	 * fails loudly (issue #12745: an explicit `:low` pin silently walked to a
+	 * slower, more expensive model for the bulk of a 32-minute run). Only an
+	 * explicitly configured `retry.fallbackChains.default` may still reroute
+	 * a pin — that chain is the operator's own opt-in. Unset callers fall back
+	 * to `modelOverride != null || agent.model != null`, which is correct for
+	 * direct `runSubprocess` callers; the `task` tool pipeline sets this
+	 * explicitly because it pre-fills `modelOverride` with the inherited
+	 * parent model, which is NOT a pin.
+	 */
+	explicitModelPinned?: boolean;
 	/**
 	 * Active model selector of the parent session, used as an auth-aware fallback
 	 * if the resolved subagent model has no working credentials. See #985.
@@ -2450,6 +2478,9 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 	}
 
 	const modelPatterns = normalizeModelPatterns(modelOverride ?? agent.model);
+	// Pinned means hard: an explicitly pinned model gets no implicit fallback
+	// machinery (see SubprocessOptions.explicitModelPinned and issue #12745).
+	const explicitModelPinned = options.explicitModelPinned ?? (modelOverride != null || agent.model != null);
 	const sessionFile = subtaskSessionFile ?? null;
 	const spawnsEnv = atMaxDepth
 		? ""
@@ -2582,6 +2613,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 						authStorage,
 						subagentSettings,
 						defaultRetryFallbackChain,
+						!explicitModelPinned,
 					)
 				: undefined;
 			const model = parkedRedirect?.model ?? resolvedPrimaryModel;
@@ -2620,6 +2652,7 @@ export async function runSubprocess(options: ExecutorOptions): Promise<SingleRes
 				model,
 				authFallbackUsed,
 				modelRegistry,
+				allowImplicitFallback: !explicitModelPinned,
 			});
 			if (retryFallbackRole) {
 				logger.debug("Configured subagent runtime model fallback chain", {

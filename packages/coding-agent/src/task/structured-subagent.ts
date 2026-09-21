@@ -8,7 +8,7 @@ import * as fs from "node:fs/promises";
 import * as os from "node:os";
 import path from "node:path";
 import { $env, prompt, Snowflake } from "@oh-my-pi/pi-utils";
-import { resolveAgentModelPatterns } from "../config/model-resolver";
+import { resolveAgentModelPatterns, resolveConfiguredModelPatterns } from "../config/model-resolver";
 import type { LocalProtocolOptions } from "../internal-urls";
 import { registerArtifactsDir } from "../internal-urls/registry-helpers";
 import { MCPManager } from "../mcp/manager";
@@ -136,6 +136,14 @@ export interface EffectiveSubagentPolicy {
 	agent: AgentDefinition;
 	effectiveAgent: AgentDefinition;
 	modelOverride?: string | string[];
+	/**
+	 * `true` when the model came from a caller/agent-author pin (the `task`
+	 * tool's `model`, `task.agentModelOverrides`, the agent definition's
+	 * `model`) rather than the inherited parent model. Gates the executor's
+	 * implicit fallback machinery — pinned means run exactly that model or
+	 * fail loudly (issue #12745).
+	 */
+	explicitModelPinned: boolean;
 	parentActiveModelPattern?: string;
 	schema: StructuredSubagentSchemaResolution;
 	planMode: boolean;
@@ -299,13 +307,23 @@ export async function resolveEffectiveSubagentPolicy(
 	}
 	const agentModelOverrides = request.session.settings.get("task.agentModelOverrides");
 	const parentActiveModelPattern = request.session.getActiveModelString?.();
+	const callerModelPin = request.model ?? agentModelOverrides[agentName];
 	const modelOverride = resolveAgentModelPatterns({
-		settingsOverride: request.model ?? agentModelOverrides[agentName],
+		settingsOverride: callerModelPin,
 		agentModel: effectiveAgent.model,
 		settings: request.session.settings,
 		activeModelPattern: parentActiveModelPattern,
 		fallbackModelPattern: request.session.getModelString?.(),
 	});
+	// A pin is a caller/agent-author choice (`task` tool's `model`,
+	// task.agentModelOverrides, the agent definition's `model`) — NOT the
+	// inherited parent model resolveAgentModelPatterns fills in when none of
+	// those exists. The executor gates its implicit fallback machinery on
+	// this (issue #12745): pinned means the spawn runs exactly that model or
+	// fails loudly; inherited keeps the resilience reroute.
+	const explicitModelPinned =
+		resolveConfiguredModelPatterns(callerModelPin, request.session.settings).length > 0 ||
+		effectiveAgent.model != null;
 	const isolationMode = request.session.settings.get("task.isolation.mode");
 	// Plan mode never isolates: its controls are rejected outright above, and its
 	// subagents are read-only, so a worktree would buy nothing.
@@ -344,6 +362,7 @@ export async function resolveEffectiveSubagentPolicy(
 		agent,
 		effectiveAgent,
 		modelOverride,
+		explicitModelPinned,
 		parentActiveModelPattern,
 		schema,
 		planMode,
@@ -457,6 +476,7 @@ function buildExecutorOptions(
 		invokedAt: request.invokedAt,
 		acquiredAt: request.acquiredAt,
 		modelOverride: policy.modelOverride,
+		explicitModelPinned: policy.explicitModelPinned,
 		parentActiveModelPattern: policy.parentActiveModelPattern,
 		thinkingLevel: policy.effectiveAgent.thinkingLevel,
 		...(policy.schema.source === "none"
