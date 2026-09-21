@@ -11,7 +11,7 @@ import { extractImagePathFromText } from "../../modes/components/custom-editor";
 import { renderSegmentTrack } from "../../modes/components/segment-track";
 import { TinyTitleDownloadProgressComponent } from "../../modes/components/tiny-title-download-progress";
 import { expandEmoticons } from "../../modes/emoji-autocomplete";
-import { materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
+import { annotateOutgoingImageMarkers, materializeImageReferenceLinks, shiftImageMarkers } from "../../modes/image-references";
 import { createPromptActionAutocompleteProvider } from "../../modes/prompt-action-autocomplete";
 import { parseQueueShorthand, splitQueuedMessages } from "../../modes/queue-input";
 import { invokeSkillCommandFromText, isKnownSkillCommand } from "../../modes/skill-command";
@@ -658,6 +658,15 @@ export class InputController {
 				}
 				hasInputImages = (inputImages?.length ?? 0) > 0;
 			}
+
+			// Annotate `[Image #N]` markers before the text leaves this turn: relay,
+			// compaction, and sub-agent delegation all carry the TEXT forward but
+			// never `pendingImages`, so an unresolvable marker read downstream as a
+			// bare filesystem-looking token — production incident 2026-09-21, model
+			// hallucinated a file search instead of asking for the image. Resolvable
+			// markers get `attachment://N` appended so `inspect_image` can still
+			// fetch them after the marker's numbering context is gone.
+			if (text.includes("[Image #")) text = annotateOutgoingImageMarkers(text, inputImages);
 
 			if (!text && !hasInputImages) return;
 

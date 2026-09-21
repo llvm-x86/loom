@@ -28,6 +28,37 @@ export function shiftImageMarkers(text: string, offset: number): string {
 	);
 }
 
+/** Note substituted for an `[Image #N]` marker whose index has no backing
+ *  `pendingImages` entry. Observed in production 2026-09-21: a relayed/
+ *  compacted/sub-agent-delegated marker with no image behind it reads to the
+ *  model as a plain filesystem path, and the model hallucinates a search for
+ *  it instead of asking the user to re-supply the image. */
+function orphanImageMarkerNote(index: number): string {
+	return `[Image #${index} referenced but its image data never arrived in this session — ask the user to re-paste it into the loom prompt directly, or save it to a file and give you the path]`;
+}
+
+/** Rewrite every `[Image #N]` marker in outgoing `text` so it survives relay,
+ *  compaction, and sub-agent delegation (none of which carry `pendingImages`
+ *  along with the text):
+ *  - N with no matching `pendingImages` entry becomes {@link orphanImageMarkerNote}.
+ *  - N that resolves gets its `attachment://N` reference appended. This N is
+ *    the SAME 1-based index the marker already carries — verified against
+ *    `AgentSession.getImageAttachments()` (agent-session.ts), which numbers
+ *    `attachment://N` by position within the outgoing message's image content
+ *    parts, and `normalizeModelContextImages` (image-loading.ts), which maps
+ *    `images` to that content 1:1 with no reordering/dropping — so marker N
+ *    and attachment N are the same slot by construction, not by luck.
+ *  Only applied to the text actually sent; draft positional semantics
+ *  (`[Image #N]` ↔ `pendingImages[N-1]`) are untouched. */
+export function annotateOutgoingImageMarkers(text: string, pendingImages: readonly ImageContent[] | undefined): string {
+	const count = pendingImages?.length ?? 0;
+	return text.replace(IMAGE_MARKER_REGEX, (_match, idx: string, tail: string) => {
+		const index = Number(idx);
+		if (index > count) return orphanImageMarkerNote(index);
+		return `[Image #${idx}${tail}, attachment://${index}]`;
+	});
+}
+
 type ImageBlobWriter = (data: Buffer, options?: { extension?: string }) => Promise<BlobPutResult>;
 type ImageBlobWriterSync = (data: Buffer, options?: { extension?: string }) => BlobPutResult;
 

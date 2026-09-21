@@ -34,7 +34,7 @@ interface ImageAttachmentReference {
 const IMAGE_ATTACHMENT_REFERENCE_REGEX =
 	/^\s*(?:\[?Image #([1-9]\d*)(?:,[^\]\n]*)?\]?|(?:attachment|image):\/\/([1-9]\d*))\s*$/i;
 
-function parseImageAttachmentReference(path: string): ImageAttachmentReference | null {
+export function parseImageAttachmentReference(path: string): ImageAttachmentReference | null {
 	const match = IMAGE_ATTACHMENT_REFERENCE_REGEX.exec(path);
 	if (!match) return null;
 	const rawIndex = match[1] ?? match[2];

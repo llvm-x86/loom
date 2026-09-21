@@ -79,6 +79,16 @@
 - Gave LSP writethrough batches a `WRITETHROUGH_BATCH_MAX` ceiling and a `WRITETHROUGH_BATCH_TTL_MS` idle lifetime so a batch abandoned by a throwing edit call no longer retains its pending file texts forever. The age resets on every touch, so a live batch is never expired
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
+- Fixed `[Image #N]` markers surviving text relay (steer/follow-up submission,
+  compaction queueing, sub-agent delegation) with no image behind them: none of
+  those paths carry `pendingImages` along with the text, so an unresolvable
+  marker read to the model as a bare filesystem-looking token and the model
+  hallucinated a file search for it instead of asking the user to re-supply the
+  image (production, 2026-09-21). Outgoing text is now scanned for `[Image #N]`
+  markers at send time: an index with no `pendingImages` entry is rewritten to
+  an explicit not-delivered note, and a resolvable index gets its
+  `attachment://N` reference appended so the marker stays resolvable by
+  `inspect_image` after the original numbering context is gone.
 - Fixed concurrent memory-tree renders failing and littering the tree. Every
   atomic write used one scratch path per PROCESS (`<dest>.tmp-<pid>`), which
   was safe only while a bank had a single renderer. It no longer does: banks
