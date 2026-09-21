@@ -24,7 +24,7 @@ cookies, and sessions apply.
    Linux the policy is machine-wide — the command elevates with `sudo`
    automatically, prompting for your password when needed. **Fully quit and
    reopen the browser** so the policy loads.
-   - `--dev` instead writes the unpacked extension to `~/.omp/webbridge/extension`
+   - `--dev` instead writes the unpacked extension to `~/.loom/webbridge/extension`
      and prints manual **Load unpacked** steps (Developer mode).
    - `--system` forces the machine-wide store on Windows/macOS too (needs elevation).
    - `loom webbridge uninstall` removes the force-install policy.

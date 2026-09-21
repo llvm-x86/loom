@@ -193,12 +193,38 @@ export async function installWindows(opts: PolicyOptions, entry: string): Promis
 		const key = registryKey(opts.family, hive);
 		const values = await queryRegistryValues(exec, key);
 		const prefix = `${opts.extensionId};`;
-		if (values.some(value => value.data.startsWith(prefix))) {
+		const existingIdx = values.findIndex(value => value.data.startsWith(prefix));
+		if (existingIdx !== -1 && values[existingIdx].data === entry) {
 			return {
 				family: opts.family,
 				applied: true,
 				location: key,
 				message: `Policy already present. ${RESTART_NOTE}`,
+			};
+		}
+		// Same extension id with a stale update URL (e.g. a config-root move
+		// from `~/.omp` to `~/.loom`) — overwrite the value with the new entry.
+		if (existingIdx !== -1) {
+			const name = values[existingIdx].name;
+			const put = await exec("reg", ["add", key, "/v", name, "/t", "REG_SZ", "/d", entry, "/f"]);
+			if (put.ok) {
+				const fellBack = opts.system && hive === "HKCU";
+				return {
+					family: opts.family,
+					applied: true,
+					location: key,
+					message: fellBack
+						? `Machine-wide policy was denied, so the per-user policy (${key}) was written instead. ${RESTART_NOTE}`
+						: RESTART_NOTE,
+				};
+			}
+			const detail = put.stderr.trim() || put.stdout.trim() || "reg add failed";
+			return {
+				family: opts.family,
+				applied: false,
+				location: key,
+				message: `Could not update the force-install policy at ${key}: ${detail}`,
+				manualCommand: `reg add "${key}" \`\n  /v "${name}" \`\n  /t REG_SZ \`\n  /d "${entry}" \`\n  /f`,
 			};
 		}
 		const name = nextForcelistIndex(values);
@@ -304,7 +330,8 @@ async function installMacOS(opts: PolicyOptions, entry: string): Promise<PolicyR
 	const target = macTarget(opts.family, opts.system);
 	const existing = await readMacForcelist(target);
 	const prefix = `${opts.extensionId};`;
-	if (existing.some(item => item.startsWith(prefix))) {
+	const existingIndex = existing.findIndex(item => item.startsWith(prefix));
+	if (existingIndex !== -1 && existing[existingIndex] === entry) {
 		return {
 			family: opts.family,
 			applied: true,
@@ -312,7 +339,10 @@ async function installMacOS(opts: PolicyOptions, entry: string): Promise<PolicyR
 			message: `Policy already present. ${RESTART_NOTE}`,
 		};
 	}
-	const entries = [...existing, entry];
+	// Same extension id with a stale update URL (e.g. a config-root move
+	// from `~/.omp` to `~/.loom`) — repair the array element in place.
+	const entries =
+		existingIndex === -1 ? [...existing, entry] : existing.map(item => (item.startsWith(prefix) ? entry : item));
 	const written = await run(target.command, [
 		...target.prefix,
 		"write",
@@ -344,6 +374,7 @@ async function installMacOS(opts: PolicyOptions, entry: string): Promise<PolicyR
 	}
 	return { family: opts.family, applied: true, location: target.domain, message: RESTART_NOTE };
 }
+
 
 async function removeMacOS(opts: PolicyOptions): Promise<PolicyResult> {
 	const target = macTarget(opts.family, opts.system);
@@ -418,10 +449,16 @@ async function installLinux(opts: PolicyOptions, entry: string): Promise<PolicyR
 	const file = path.join(dir, LINUX_POLICY_FILENAME);
 	const prefix = `${opts.extensionId};`;
 	const existing = await readLinuxForcelist(file);
-	if (existing.some(item => item.startsWith(prefix))) {
+	const existingIndex = existing.findIndex(item => item.startsWith(prefix));
+	if (existingIndex !== -1 && existing[existingIndex] === entry) {
 		return { family: opts.family, applied: true, location: file, message: `Policy already present. ${RESTART_NOTE}` };
 	}
-	const content = `${JSON.stringify({ ExtensionInstallForcelist: [...existing, entry] }, null, "\t")}\n`;
+	// Same extension id but a different update URL (e.g. the legacy `~/.omp`
+	// path, or a config-root move) — repair it in place instead of leaving a
+	// dead URL that the browser keeps trying and silently failing to load.
+	const list =
+		existingIndex === -1 ? [...existing, entry] : existing.map(item => (item.startsWith(prefix) ? entry : item));
+	const content = `${JSON.stringify({ ExtensionInstallForcelist: list }, null, "\t")}\n`;
 
 	if (await canWriteDirectly(dir)) {
 		try {

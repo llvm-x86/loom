@@ -19,7 +19,7 @@ import { BROWSER_FAMILIES, type BrowserFamily, type PolicyResult } from "./insta
 import { WEBBRIDGE_HOST } from "./protocol";
 import loomWebBridgeSkill from "./skill/SKILL.md" with { type: "text" };
 
-/** `~/.omp/webbridge` — home for the extension, CRX artifacts, pid file, and daemon log. */
+/** `~/.loom/webbridge` — home for the extension, CRX artifacts, pid file, and daemon log. */
 export function webBridgeDir(): string {
 	return path.join(getConfigRootDir(), "webbridge");
 }
@@ -244,7 +244,7 @@ export async function stopDaemon(): Promise<StopResult> {
 // ---------------------------------------------------------------------------
 
 export interface InstallOptions {
-	/** Destination for the unpacked extension. Default `~/.omp/webbridge/extension`. */
+	/** Destination for the unpacked extension. Default `~/.loom/webbridge/extension`. */
 	dir?: string;
 	/** Write the unpacked extension only; skip CRX packing + force-install (manual Developer-mode load). */
 	dev: boolean;

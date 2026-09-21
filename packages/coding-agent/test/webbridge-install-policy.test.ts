@@ -79,6 +79,33 @@ describe("installWindows", () => {
 		expect(again.message).toContain("already present");
 		expect(second.some(c => c[1] === "add")).toBe(false);
 	});
+
+	it("repairs a stale update URL for the same extension id (config-root move to `.loom`)", async () => {
+		// Legacy `.omp` force-install entry for the same extension id. After a
+		// config-root move the browser keeps polling the dead `~/.omp` URL and
+		// the extension never loads. The installer must overwrite the value
+		// with the current entry, not short-circuit as "already present".
+		const staleEntry = `${EXTENSION_ID};file:///C:/Users/kiosk/.omp/webbridge/update.xml`;
+		const present = `\r\n${CHROME_HKCU}\r\n    1    REG_SZ    ${staleEntry}\r\n`;
+		const { calls, exec } = recorder((_command, args) => (args[0] === "query" ? ok(present) : ok()));
+		const result = await installWindows({ family: "chrome", extensionId: EXTENSION_ID, exec }, ENTRY);
+		expect(result.applied).toBe(true);
+		// Must rewrite the SAME value name (1) with the repaired `.loom` entry.
+		expect(calls.find(c => c[1] === "add")).toEqual([
+			"reg",
+			"add",
+			CHROME_HKCU,
+			"/v",
+			"1",
+			"/t",
+			"REG_SZ",
+			"/d",
+			ENTRY,
+			"/f",
+		]);
+		// No second add for a fresh name — the stale value was overwritten.
+		expect(calls.filter(c => c[1] === "add")).toHaveLength(1);
+	});
 });
 
 describe("removeWindows", () => {
