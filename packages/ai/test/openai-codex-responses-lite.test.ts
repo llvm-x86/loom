@@ -13,6 +13,7 @@ import {
 import { isOpenAIResponsesProgressEvent } from "@oh-my-pi/pi-ai/providers/openai-shared";
 import type { CodexCompactionRequestContext, Context, FetchImpl, ProviderSessionState } from "@oh-my-pi/pi-ai/types";
 import { buildModel } from "@oh-my-pi/pi-catalog/build";
+import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 import * as piUtils from "@oh-my-pi/pi-utils";
 import { createCodexModel } from "./helpers";
 
@@ -684,7 +685,7 @@ describe("openai-codex Responses Lite and client metadata wire format", () => {
 		expect(result.stopReason).toBe("stop");
 		expect(captured).toBeDefined();
 		expect(captured!.headers.get("x-openai-internal-codex-responses-lite")).toBe("true");
-		expect(captured!.headers.get("version")).toBe("0.144.1");
+		expect(captured!.headers.get("version")).toBe(CODEX_CLIENT_VERSION);
 		const body = captured!.body;
 		expect(body.reasoning).toEqual({ context: "all_turns" });
 		expect(body.instructions).toBeUndefined();
