@@ -10,6 +10,19 @@
 
 ### Fixed
 
+- Fixed Cerebras-hosted Qwen models 400ing on every reasoning request:
+  `buildOpenAICompat` routed any `qwen*` id to the Alibaba-style top-level
+  `enable_thinking` dialect regardless of host, and Cerebras's strict schema
+  rejects that property outright (`400 wrong_api_format`, measured on the live
+  endpoint). Cerebras Qwen entries now use the OpenAI dialect
+  (`reasoning_effort`, verified accepted at none/low/high), same as Fireworks.
+  Same failure class as #2299 (NVIDIA NIM), one host over.
+- Removed six Cerebras entries the provider no longer serves, verified against
+  the live API with a real key: `gemma-4-31b` and `zai-glm-4.7` return
+  `404 model_archived`; `llama3.1-8b`, `qwen-3-235b-a22b-instruct-2507`,
+  `qwen-3-coder-480b` and `zai-glm-4.6` return `404 model_not_found`. The
+  section now matches what Cerebras actually serves (`gpt-oss-120b`,
+  `qwen-3.8-27b`).
 - Fixed DeepSeek V4 reasoning models on OpenAI-compatible routes exposing only the `high`/`max` pair instead of the host's real `low`/`high`/`max` scale, and fixed the Fireworks and DeepInfra V4 Flash entries silently dropping `reasoning_effort` from the wire (missing `supportsReasoningEffort`), so the selected effort never reached the host. OpenRouter's DeepSeek route still tops out at `high`.
 - Fixed the Fable/Mythos catalog policy hard-pinning cache pricing for the whole family: Fable 5.1 bills cache reads at $0.25/MTok against Fable 5's $1.00, so the blanket pin overstated 5.1 cache reads 4x whenever upstream had the real number. Token limits stay pinned (Anthropic's `/v1/models` still omits them and they are identical family-wide); pricing is now fill-only and never overwrites a value models.dev already carries.
 

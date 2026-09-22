@@ -429,7 +429,11 @@ export function buildOpenAICompat(spec: ModelSpec<"openai-completions">): Resolv
 				? "openrouter"
 				: isQwen && isNvidiaNim
 					? "qwen-chat-template"
-					: isQwen && isFireworks
+					// Cerebras rejects the top-level `enable_thinking` switch outright
+					// (400 wrong_api_format, measured 2026-09-22 on qwen-3.8-27b) but
+					// accepts `reasoning_effort`, so its Qwen models ride the plain
+					// OpenAI dialect like Fireworks' do.
+					: isQwen && (isFireworks || isCerebras)
 						? "openai"
 						: isAlibaba || isQwen
 							? "qwen"

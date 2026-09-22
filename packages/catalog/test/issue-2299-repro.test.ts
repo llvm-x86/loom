@@ -115,3 +115,42 @@ describe("issue #2299-adj — Fireworks Qwen thinking format", () => {
 		expect(model.compat.reasoningDisableMode).toBe("lowest-effort");
 	});
 });
+
+describe("issue #2299-adj — Cerebras Qwen thinking format", () => {
+	it("resolves the bundled Cerebras Qwen model to the openai thinking format (reasoning_effort)", () => {
+		// Same failure class as #2299, one host over: Cerebras's strict schema
+		// 400s on the top-level `enable_thinking` boolean ("property
+		// 'enable_thinking' is unsupported", measured 2026-09-22 on
+		// cerebras/qwen-3.8-27b) but accepts OpenAI-style `reasoning_effort`
+		// (none/low/medium/high all verified 200 on the live endpoint).
+		const model = getBundledModel<"openai-completions">("cerebras", "qwen-3.8-27b");
+		expect(model.provider).toBe("cerebras");
+		expect(model.baseUrl).toContain("cerebras.ai");
+		expect(model.compat.thinkingFormat).toBe("openai");
+	});
+
+	it("emits reasoning_effort — never top-level enable_thinking — on the wire", async () => {
+		const model = getBundledModel<"openai-completions">("cerebras", "qwen-3.8-27b");
+		const captured: { body: string | null } = { body: null };
+		const fetchMock: FetchImpl = async (_input, init) => {
+			captured.body = typeof init?.body === "string" ? init.body : null;
+			return sseDoneResponse();
+		};
+
+		const context: Context = {
+			messages: [{ role: "user", content: "hi", timestamp: Date.now() }],
+		};
+		const stream = streamOpenAICompletions(model as Model<"openai-completions">, context, {
+			apiKey: "csk-test",
+			reasoning: "high",
+			fetch: fetchMock,
+		});
+		for await (const _ of stream) {
+			// drain
+		}
+
+		const parsed = JSON.parse(captured.body ?? "{}") as Record<string, unknown>;
+		expect(parsed.enable_thinking).toBeUndefined();
+		expect(parsed.reasoning_effort).toBe("high");
+	});
+});

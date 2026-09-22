@@ -434,8 +434,8 @@ describe("Context overflow error handling", () => {
 	// =============================================================================
 
 	describe.skipIf(!e2eApiKey("CEREBRAS_API_KEY"))("Cerebras", () => {
-		it("qwen-3-235b - should detect overflow via isContextOverflow", async () => {
-			const model = getBundledModel("cerebras", "qwen-3-235b-a22b-instruct-2507");
+		it("qwen-3.8-27b - should detect overflow via isContextOverflow", async () => {
+			const model = getBundledModel("cerebras", "qwen-3.8-27b");
 			const result = await testContextOverflow(model, Bun.env.CEREBRAS_API_KEY!);
 			logResult(result);
 
