@@ -12,6 +12,8 @@
 
 ### Fixed
 
+- Fixed Claude Opus 5.5 being unusable over Anthropic OAuth: the API gates the model behind Claude Code `2.1.280` or newer (`400 claude_code_version_too_old`), and the stealth fingerprint still claimed `2.1.258`. `claudeCodeVersion` is now `2.1.280` (and `claudeAgentSdkVersion` `0.3.280`); every surface derives from those constants, so the billing header, the `claude-cli`/`claude-code` user-agents and the cch attestation all move together.
+
 - Fixed Claude Fable 5.1 being unusable over Anthropic OAuth: the stealth fingerprint still claimed Claude Code `2.1.165`, and the API gates the model behind `2.1.251` or newer, so every request 400'd with "does not support this model" and the fallback chain quietly answered as Fable 5 instead. `claudeCodeVersion` is now `2.1.258` (and `claudeAgentSdkVersion` `0.3.258`, matching the published release pair); every surface derives from those constants, so the billing header, the `claude-cli`/`claude-code` user-agents and the cch attestation all move together.
 
 - Fixed a resumed session replaying a signed `thinking` block from a different model to a signature-enforcing Anthropic endpoint (`400 Invalid signature in thinking block`). The transform only stripped cross-model signatures on prior turns; the latest surviving assistant's foreign signature slipped through when a session was resumed/switched to another model (#1457, #4297). Cross-model signatures are now stripped there too, so the reasoning chain demotes to text instead of rejecting the replay.
