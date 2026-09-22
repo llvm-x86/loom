@@ -908,6 +908,14 @@ export interface AgentSessionConfig {
 	settings: Settings;
 	/** Whether the caller explicitly requested yolo/auto-approve behavior for this session. */
 	autoApprove?: boolean;
+	/**
+	 * The session model was pinned by the caller (CLI --model, sub-agent spawn
+	 * `model`/`modelOverride`, agent frontmatter). A pin is a hard constraint
+	 * (#12745): the retry machinery must never silently substitute a different
+	 * model, so implicit synthesized fallback chains are disabled. Explicitly
+	 * configured `retry.fallbackChains` roles still apply.
+	 */
+	explicitModelPinned?: boolean;
 	/** Models to cycle through with Ctrl+P (from --models flag) */
 	scopedModels?: Array<{ model: Model; thinkingLevel?: ThinkingLevel }>;
 	/** Initial session thinking selector. */
@@ -1898,6 +1906,7 @@ export class AgentSession {
 	readonly yieldQueue: YieldQueue;
 	fileSnapshotStore?: InMemorySnapshotStore;
 	#autoApprove: boolean;
+	#explicitModelPinned = false;
 
 	#powerAssertion: MacOSPowerAssertion | undefined;
 
@@ -2843,6 +2852,7 @@ export class AgentSession {
 		};
 		this.settings = config.settings;
 		this.#autoApprove = config.autoApprove === true;
+		this.#explicitModelPinned = config.explicitModelPinned === true;
 		this.#syncContextCliMode = config.syncContextCliMode === true;
 		// Power assertions are taken per turn (see #beginInFlight); nothing acquired here.
 		this.#evalKernelOwnerId = config.evalKernelOwnerId ?? `agent-session:${Snowflake.next()}`;
@@ -15905,6 +15915,10 @@ export class AgentSession {
 		// (a model id the account isn't entitled to, a dead credential, ...)
 		// always has somewhere to go instead of failing the turn outright.
 		if (!options?.allowImplicit) return false;
+		// #12745/#26: an explicit pin is a hard constraint — spawn-time already
+		// refused to install an implicit chain for it; do not re-synthesize one
+		// here at error time.
+		if (this.#explicitModelPinned) return false;
 		const model = this.model;
 		if (!model || ON_DEVICE_PROVIDERS[model.provider]) return false;
 		for (const raw of buildImplicitModelFallbackChain(model, this.#modelRegistry, this.settings)) {
@@ -15979,6 +15993,10 @@ export class AgentSession {
 		if (role && role !== IMPLICIT_RETRY_FALLBACK_ROLE)
 			return this.#findRetryFallbackCandidates(role, currentSelector).length > 0;
 		if (ON_DEVICE_PROVIDERS[model.provider]) return false;
+		// #12745/#26: pinned model, no configured chain — the implicit synthesis
+		// below would silently substitute another provider's model (a cerebras
+		// 400 rerouted a pinned spawn to claude-opus-5). Fail loudly instead.
+		if (this.#explicitModelPinned) return false;
 		return buildImplicitModelFallbackChain(model, this.#modelRegistry, this.settings).length > 0;
 	}
 

@@ -386,6 +386,12 @@ export interface CreateAgentSessionOptions {
 
 	/** Model to use. Default: from settings, else first available */
 	model?: Model;
+	/**
+	 * The model (or modelPattern) was pinned by the caller. A pin is a hard
+	 * constraint (#12745): the session's retry recovery must never silently
+	 * substitute a different model via a synthesized implicit fallback chain.
+	 */
+	explicitModelPinned?: boolean;
 	/** Raw model pattern(s) (e.g. from --model CLI flag) to resolve after extensions load.
 	 * Used when model lookup is deferred because extension-provided models aren't registered yet. */
 	modelPattern?: string | string[];
@@ -2973,6 +2979,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			sessionManager,
 			settings,
 			autoApprove: options.autoApprove,
+			explicitModelPinned: options.explicitModelPinned,
 			evalKernelOwnerId,
 			// Defined only for top-level sessions (creation is gated above).
 			// AgentSession uses this to decide whether it may dispose the global

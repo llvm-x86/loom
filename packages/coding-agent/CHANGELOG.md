@@ -79,6 +79,17 @@
 - Gave LSP writethrough batches a `WRITETHROUGH_BATCH_MAX` ceiling and a `WRITETHROUGH_BATCH_TTL_MS` idle lifetime so a batch abandoned by a throwing edit call no longer retains its pending file texts forever. The age resets on every touch, so a live batch is never expired
 - Added idle reclamation of JS eval contexts after `JS_CONTEXT_IDLE_TIMEOUT_MS` (30 minutes). Each live context pinned a spawned subprocess — ~66 MB RSS measured — for the whole session; a reclaimed context respawns transparently on the next cell with a fresh global scope, and contexts with an in-flight run are never reclaimed
 ### Fixed
+- Fixed the session-level retry recovery re-synthesizing an implicit
+  cross-provider fallback chain for a PINNED model at error time (#26,
+  completes #12745): the spawn-time guard refused to install an implicit
+  chain, but `#isHardErrorFallbackEligible` rebuilt one from credentialed
+  models when a hard error arrived, so a pinned `cerebras/qwen-3.8-27b` spawn
+  that 400'd on a malformed request silently rerouted to another provider
+  (measured: answered by `anthropic/claude-opus-5`, reported as success).
+  `AgentSession` now takes `explicitModelPinned` (threaded from the spawn via
+  `CreateAgentSessionOptions`) and skips the implicit-synthesis arm in both
+  `#isHardErrorFallbackEligible` and `#tryRetryModelFallback`; explicitly
+  configured `retry.fallbackChains` roles are still honored for pins.
 - Fixed explicit sub-agent model pins being silently substituted: a spawn with
   an explicit `model` (including a `:effort` suffix) got a dynamically
   synthesized cross-provider retry fallback chain and a silent parked-provider

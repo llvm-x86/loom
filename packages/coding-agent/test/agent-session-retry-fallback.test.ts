@@ -2554,3 +2554,127 @@ describe("AgentSession retry fallback", () => {
 		expect(contentBlock.text).toBe("Recovered after provider finish_reason error");
 	});
 });
+
+describe("AgentSession retry fallback — explicit pin (#12745/#26)", () => {
+	let tempDir2: TempDir;
+	let authStorage2: AuthStorage;
+	let registry2: ModelRegistry;
+	let session2: AgentSession | undefined;
+
+	beforeAll(async () => {
+		tempDir2 = TempDir.createSync("@pi-retry-pin-");
+		authStorage2 = await AuthStorage.create(path.join(tempDir2.path(), "testauth.db"));
+		// Several credentialed providers so the implicit synthesized chain has
+		// candidates — without them there is nothing to substitute and the test
+		// cannot distinguish "guard held" from "nothing to switch to".
+		authStorage2.setRuntimeApiKey("anthropic", "anthropic-test-key");
+		authStorage2.setRuntimeApiKey("openai", "openai-test-key");
+		authStorage2.setRuntimeApiKey("google", "google-test-key");
+		authStorage2.setRuntimeApiKey("cerebras", "cerebras-test-key");
+		registry2 = new ModelRegistry(authStorage2);
+	});
+
+	afterAll(() => {
+		authStorage2.close();
+		tempDir2.removeSync();
+	});
+
+	afterEach(async () => {
+		if (session2) {
+			await session2.dispose();
+			session2 = undefined;
+		}
+	});
+
+	function hardFailingPrimaryAgent(primaryModel: Model, requestedModels: string[]): Agent {
+		const mock = createMockModel();
+		return new Agent({
+			getApiKey: model => `${model.provider}-test-key`,
+			initialState: {
+				model: primaryModel,
+				systemPrompt: ["Test"],
+				tools: [],
+				messages: [],
+			},
+			streamFn: (model, context, options) => {
+				requestedModels.push(`${model.provider}/${model.id}`);
+				if (model.provider === primaryModel.provider && model.id === primaryModel.id) {
+					// The measured cerebras/qwen-3.8-27b failure from #26: a hard,
+					// non-retryable 400 on every attempt.
+					mock.push({ throw: "400 invalid_request_error: enable_thinking: property 'enable_thinking' is unsupported" });
+				} else {
+					mock.push({ content: [`substituted:${model.provider}/${model.id}`] });
+				}
+				return mock.stream(model, context, options);
+			},
+		});
+	}
+
+	function pinTestSettings() {
+		return Settings.isolated({
+			"compaction.enabled": false,
+			"retry.baseDelayMs": 5,
+			// No retry.fallbackChains entry: the only substitution route is the
+			// implicit synthesized chain, which is what the pin must forbid.
+		});
+	}
+
+	it("never substitutes a pinned model via the implicit hard-error chain", async () => {
+		const primaryModel = getBundledModel("cerebras", "qwen-3.8-27b");
+		if (!primaryModel) throw new Error("Expected bundled cerebras/qwen-3.8-27b");
+
+		const requestedModels: string[] = [];
+		const fallbackApplied: Array<Extract<AgentSessionEvent, { type: "retry_fallback_applied" }>> = [];
+		const agent = hardFailingPrimaryAgent(primaryModel, requestedModels);
+
+		session2 = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: pinTestSettings(),
+			modelRegistry: registry2,
+			explicitModelPinned: true,
+		});
+		session2.subscribe(event => {
+			if (event.type === "retry_fallback_applied") fallbackApplied.push(event);
+		});
+
+		await session2.prompt("trigger the hard error");
+		await session2.waitForIdle();
+
+		// The pin held: only the primary was ever attempted, no fallback fired,
+		// and the hard error surfaced to the caller instead of being laundered
+		// into a silent cross-provider substitution.
+		expect(requestedModels).toEqual(["cerebras/qwen-3.8-27b"]);
+		expect(fallbackApplied).toEqual([]);
+		const last = getLastAssistantMessage(session2);
+		expect(last.stopReason).toBe("error");
+		expect(last.errorMessage).toContain("enable_thinking");
+	});
+
+	it("still substitutes an UNPINNED model via the implicit hard-error chain", async () => {
+		// Control: proves the scenario above actually reaches the implicit-chain
+		// path when the model is not pinned — without it the pinned test could
+		// pass for incidental reasons (no candidates, wrong error class).
+		const primaryModel = getBundledModel("cerebras", "qwen-3.8-27b");
+		if (!primaryModel) throw new Error("Expected bundled cerebras/qwen-3.8-27b");
+
+		const requestedModels: string[] = [];
+		const agent = hardFailingPrimaryAgent(primaryModel, requestedModels);
+
+		session2 = new AgentSession({
+			agent,
+			sessionManager: SessionManager.inMemory(),
+			settings: pinTestSettings(),
+			modelRegistry: registry2,
+		});
+
+		await session2.prompt("trigger the hard error");
+		await session2.waitForIdle();
+
+		expect(requestedModels.length).toBeGreaterThan(1);
+		expect(requestedModels[0]).toBe("cerebras/qwen-3.8-27b");
+		const last = getLastAssistantMessage(session2);
+		expect(last.stopReason).not.toBe("error");
+		expect(`${last.provider}/${last.model}`).not.toBe("cerebras/qwen-3.8-27b");
+	});
+});
