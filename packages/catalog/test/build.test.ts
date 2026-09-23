@@ -664,6 +664,42 @@ describe("model cache spec round trip", () => {
 			await fs.rm(tempDir, { recursive: true, force: true });
 		}
 	});
+
+	it("refetches authoritative caches when dynamic discovery inputs change", async () => {
+		const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), "pi-catalog-discovery-fingerprint-"));
+		const dbPath = path.join(tempDir, "models.db");
+		const oldModel = completionsSpec({ id: "before-version-change" });
+		const newModel = completionsSpec({ id: "after-version-change" });
+		let fetchedModel = oldModel;
+		let fetches = 0;
+		const resolve = (dynamicModelsFingerprint: string) =>
+			resolveProviderModels({
+				providerId: "dynamic-fingerprint-test",
+				staticModels: [],
+				dynamicModelsAuthoritative: true,
+				dynamicModelsFingerprint,
+				cacheDbPath: dbPath,
+				fetchDynamicModels: async () => {
+					fetches++;
+					return [fetchedModel];
+				},
+			});
+		try {
+			expect((await resolve("client-version-0.144.1")).models.map(model => model.id)).toEqual([
+				"before-version-change",
+			]);
+			fetchedModel = newModel;
+			expect((await resolve("client-version-0.156.0")).models.map(model => model.id)).toEqual([
+				"after-version-change",
+			]);
+			expect((await resolve("client-version-0.156.0")).models.map(model => model.id)).toEqual([
+				"after-version-change",
+			]);
+			expect(fetches).toBe(2);
+		} finally {
+			await fs.rm(tempDir, { recursive: true, force: true });
+		}
+	});
 });
 
 describe("isOfficialAnthropicApiUrl", () => {

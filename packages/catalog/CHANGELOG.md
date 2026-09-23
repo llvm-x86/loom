@@ -10,6 +10,7 @@
 
 ### Fixed
 
+- Fixed authoritative model caches reusing discovery results after request inputs changed without static catalog changes; cache fingerprints now include dynamic discovery inputs, including Codex client version and account ID ([#28](https://github.com/llvm-x86/loom/issues/28)).
 - Fixed Cerebras-hosted Qwen models 400ing on every reasoning request:
   `buildOpenAICompat` routed any `qwen*` id to the Alibaba-style top-level
   `enable_thinking` dialect regardless of host, and Cerebras's strict schema
