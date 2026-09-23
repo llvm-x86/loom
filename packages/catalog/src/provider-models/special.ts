@@ -4,6 +4,7 @@ import type { DevinModelDiscoveryOptions } from "../discovery/devin";
 import { buildGitLabDuoWorkflowFallbackModel, fetchGitLabDuoWorkflowModels } from "../discovery/gitlab-duo-workflow";
 import type { ModelManagerOptions } from "../model-manager";
 import type { FetchImpl } from "../types";
+import { CODEX_CLIENT_VERSION } from "../wire/codex";
 
 // ---------------------------------------------------------------------------
 // OpenAI Codex
@@ -23,6 +24,10 @@ export function openaiCodexModelManagerOptions(
 	return {
 		providerId: "openai-codex",
 		dynamicModelsAuthoritative: true,
+		dynamicModelsFingerprint: JSON.stringify({
+			clientVersion: clientVersion?.trim() || CODEX_CLIENT_VERSION,
+			accountId: accountId?.trim(),
+		}),
 		...(accessToken
 			? {
 					fetchDynamicModels: async () => {

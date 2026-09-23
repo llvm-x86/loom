@@ -9,8 +9,20 @@ import { writeModelCache } from "@oh-my-pi/pi-catalog/model-cache";
 import { resolveProviderModels } from "@oh-my-pi/pi-catalog/model-manager";
 import { openaiCodexModelManagerOptions } from "@oh-my-pi/pi-catalog/provider-models/special";
 import type { ModelSpec } from "@oh-my-pi/pi-catalog/types";
+import { CODEX_CLIENT_VERSION } from "@oh-my-pi/pi-catalog/wire/codex";
 
 describe("Codex model discovery", () => {
+	it("includes the Codex client version in its discovery fingerprint", () => {
+		const defaultFingerprint = openaiCodexModelManagerOptions({ accessToken: "token" }).dynamicModelsFingerprint;
+		expect(defaultFingerprint).toBe(
+			openaiCodexModelManagerOptions({ accessToken: "token", clientVersion: CODEX_CLIENT_VERSION })
+				.dynamicModelsFingerprint,
+		);
+		expect(defaultFingerprint).not.toBe(
+			openaiCodexModelManagerOptions({ accessToken: "token", clientVersion: "0.144.1" }).dynamicModelsFingerprint,
+		);
+	});
+
 	it("marks discovered models for provider-native V2 compaction", async () => {
 		let capturedHeaders: Headers | undefined;
 		const fetchFn: typeof fetch = Object.assign(

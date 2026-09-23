@@ -39,6 +39,8 @@ export interface ModelManagerOptions<TApi extends Api = Api, TModelsDevPayload =
 	cacheTtlMs?: number;
 	/** When true, a successful dynamic fetch is the complete provider catalog and prunes static-only models. */
 	dynamicModelsAuthoritative?: boolean;
+	/** Stable representation of inputs affecting authoritative dynamic discovery. */
+	dynamicModelsFingerprint?: string;
 	/** Cached model ids to ignore when the cache was written against a different static catalog fingerprint. */
 	dropCachedModelIdsOnStaticMismatch?: readonly string[];
 	/** Optional dynamic endpoint fetcher. */
@@ -169,7 +171,11 @@ export async function resolveProviderModels<TApi extends Api = Api, TModelsDevPa
 	const usableCachedModels = restoredCache.models.filter(model => !restoredCache.unresolvedModelIds.has(model.id));
 	const cacheHasUnresolvedHeaders = restoredCache.unresolvedModelIds.size > 0;
 	const dynamicModelsAuthoritative = options.dynamicModelsAuthoritative ?? false;
-	const staticFingerprint = fingerprintStatic(staticModels, dynamicModelsAuthoritative);
+	const staticFingerprint = fingerprintStatic(
+		staticModels,
+		dynamicModelsAuthoritative,
+		options.dynamicModelsFingerprint,
+	);
 	const cacheFingerprintMatches = cache?.staticFingerprint === staticFingerprint && staticFingerprint.length > 0;
 	const hasUsableFreshCache =
 		(cache?.fresh ?? false) && !cacheHasUnresolvedHeaders && (!dynamicModelsAuthoritative || cacheFingerprintMatches);
@@ -405,21 +411,22 @@ function retainModelIds<TApi extends Api>(
 }
 
 /**
- * Stable, low-collision fingerprint of a static catalog slice. Cached by
- * reference so repeat calls in the same process (e.g. multiple cold-start
- * arms calling `resolveProviderModels` with the same `staticModels` array)
- * skip the JSON+hash work after the first call.
+ * Fingerprints the static catalog and, for authoritative catalogs, dynamic
+ * discovery inputs so cache freshness tracks every part of the merge.
  */
-const MODEL_CACHE_FINGERPRINT_VERSION = "merge-v3";
+const MODEL_CACHE_FINGERPRINT_VERSION = "merge-v4";
 const kStaticFingerprint = Symbol("model-manager.staticFingerprint");
 type ModelArrayWithFingerprint = readonly Model<Api>[] & { [kStaticFingerprint]?: string };
 function fingerprintStatic<TApi extends Api>(
 	models: readonly Model<TApi>[],
 	dynamicModelsAuthoritative = false,
+	dynamicModelsFingerprint?: string,
 ): string {
+	if (dynamicModelsAuthoritative) {
+		const input = JSON.stringify([models, dynamicModelsFingerprint]);
+		return `${MODEL_CACHE_FINGERPRINT_VERSION}:authoritative:${Bun.hash(input).toString(36)}`;
+	}
 	if (models.length === 0) return `${MODEL_CACHE_FINGERPRINT_VERSION}:empty`;
-	if (dynamicModelsAuthoritative)
-		return `${MODEL_CACHE_FINGERPRINT_VERSION}:authoritative:${fingerprintStatic(models)}`;
 	const tagged = models as ModelArrayWithFingerprint;
 	const cached = tagged[kStaticFingerprint];
 	if (cached !== undefined) return cached;
